@@ -79,27 +79,11 @@ fn handle_filter_key(mut state: AppState, key: KeyEvent) -> AppState {
     }
 }
 
-/// Switch to AgentDetail view if an agent is selected.
-/// If no task is selected or task has no agent, no-op.
+/// Switch to AgentDetail view. Auto-selects first agent if none selected.
 fn switch_to_agent_detail(mut state: AppState) -> AppState {
-    // Get selected task from current view
-    if let Some(task_idx) = state.selected_task_index {
-        if let Some(ref task_graph) = state.task_graph {
-            // Flatten all tasks across waves to find selected task
-            let all_tasks: Vec<_> = task_graph
-                .waves
-                .iter()
-                .flat_map(|w| &w.tasks)
-                .collect();
-
-            if let Some(task) = all_tasks.get(task_idx) {
-                if let Some(ref agent_id) = task.agent_id {
-                    state.view = ViewState::AgentDetail {
-                        agent_id: agent_id.clone(),
-                    };
-                }
-            }
-        }
+    state.view = ViewState::AgentDetail;
+    if state.selected_agent_index.is_none() && !state.agents.is_empty() {
+        state.selected_agent_index = Some(0);
     }
     state
 }
@@ -126,18 +110,25 @@ fn scroll_down(mut state: AppState) -> AppState {
             PanelFocus::Right => {
                 state.scroll_offsets.event_stream =
                     state.scroll_offsets.event_stream.saturating_add(1);
-                // Disable auto-scroll when manually scrolling
                 state.auto_scroll = false;
             }
         },
-        ViewState::AgentDetail { .. } => match state.focus {
+        ViewState::AgentDetail => match state.focus {
             PanelFocus::Left => {
-                state.scroll_offsets.tool_calls =
-                    state.scroll_offsets.tool_calls.saturating_add(1);
+                let agent_count = state.agents.len();
+                if agent_count > 0 {
+                    let current = state.selected_agent_index.unwrap_or(0);
+                    let new_idx = (current + 1).min(agent_count - 1);
+                    if new_idx != current {
+                        state.scroll_offsets.agent_events = 0;
+                    }
+                    state.selected_agent_index = Some(new_idx);
+                }
             }
             PanelFocus::Right => {
-                state.scroll_offsets.reasoning =
-                    state.scroll_offsets.reasoning.saturating_add(1);
+                state.scroll_offsets.agent_events =
+                    state.scroll_offsets.agent_events.saturating_add(1);
+                state.auto_scroll = false;
             }
         },
         ViewState::Sessions => {
@@ -157,18 +148,22 @@ fn scroll_up(mut state: AppState) -> AppState {
             PanelFocus::Right => {
                 state.scroll_offsets.event_stream =
                     state.scroll_offsets.event_stream.saturating_sub(1);
-                // Disable auto-scroll when manually scrolling
                 state.auto_scroll = false;
             }
         },
-        ViewState::AgentDetail { .. } => match state.focus {
+        ViewState::AgentDetail => match state.focus {
             PanelFocus::Left => {
-                state.scroll_offsets.tool_calls =
-                    state.scroll_offsets.tool_calls.saturating_sub(1);
+                let current = state.selected_agent_index.unwrap_or(0);
+                let new_idx = current.saturating_sub(1);
+                if new_idx != current {
+                    state.scroll_offsets.agent_events = 0;
+                }
+                state.selected_agent_index = Some(new_idx);
             }
             PanelFocus::Right => {
-                state.scroll_offsets.reasoning =
-                    state.scroll_offsets.reasoning.saturating_sub(1);
+                state.scroll_offsets.agent_events =
+                    state.scroll_offsets.agent_events.saturating_sub(1);
+                state.auto_scroll = false;
             }
         },
         ViewState::Sessions => {
@@ -179,13 +174,12 @@ fn scroll_up(mut state: AppState) -> AppState {
 }
 
 /// Drill down into selected item.
-/// Dashboard: Enter on task with agent -> switch to AgentDetail
+/// Dashboard: Enter on task with agent -> switch to AgentDetail, select that agent
 /// AgentDetail: no drill-down (no-op)
 /// Sessions: Enter on session -> load session
 fn drill_down(mut state: AppState) -> AppState {
     match state.view {
         ViewState::Dashboard => {
-            // Enter on a task with agent -> switch to agent detail
             if let Some(task_idx) = state.selected_task_index {
                 if let Some(ref task_graph) = state.task_graph {
                     let all_tasks: Vec<_> = task_graph
@@ -196,40 +190,33 @@ fn drill_down(mut state: AppState) -> AppState {
 
                     if let Some(task) = all_tasks.get(task_idx) {
                         if let Some(ref agent_id) = task.agent_id {
-                            state.view = ViewState::AgentDetail {
-                                agent_id: agent_id.clone(),
-                            };
+                            let agent_idx = state
+                                .agents
+                                .keys()
+                                .position(|k| k == agent_id);
+                            state.selected_agent_index = agent_idx;
+                            state.view = ViewState::AgentDetail;
                         }
                     }
                 }
             }
         }
-        ViewState::AgentDetail { .. } => {
-            // No drill-down in agent detail view
-        }
-        ViewState::Sessions => {
-            // Enter on session would trigger session load
-            // This is handled by side effects in main loop, not here
-        }
+        ViewState::AgentDetail => {}
+        ViewState::Sessions => {}
     }
     state
 }
 
 /// Navigate back to previous view.
-/// AgentDetail -> Dashboard
-/// Sessions -> Dashboard
-/// Dashboard -> no-op
 fn go_back(mut state: AppState) -> AppState {
     match state.view {
-        ViewState::AgentDetail { .. } => {
+        ViewState::AgentDetail => {
             state.view = ViewState::Dashboard;
         }
         ViewState::Sessions => {
             state.view = ViewState::Dashboard;
         }
-        ViewState::Dashboard => {
-            // Already at top level, no-op
-        }
+        ViewState::Dashboard => {}
     }
     state
 }
@@ -255,7 +242,8 @@ fn toggle_auto_scroll(mut state: AppState) -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Task, TaskGraph, TaskStatus, Wave};
+    use crate::model::{Agent, Task, TaskGraph, TaskStatus, Wave};
+    use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -285,51 +273,27 @@ mod tests {
     }
 
     #[test]
-    fn key_2_switches_to_agent_detail_if_task_selected() {
-        let mut state = AppState::new();
-
-        // Create task graph with agent
-        let task = Task {
-            id: "T1".to_string(),
-            description: "Test task".to_string(),
-            agent_id: Some("a04".to_string()),
-            status: TaskStatus::Running,
-            review_status: Default::default(),
-            files_modified: vec![],
-            tests_passed: None,
-        };
-        let wave = Wave::new(1, vec![task]);
-        state.task_graph = Some(TaskGraph::new(vec![wave]));
-        state.selected_task_index = Some(0);
-
+    fn key_2_switches_to_agent_detail() {
+        let state = AppState::new();
         let new_state = handle_key(state, key(KeyCode::Char('2')));
-        assert!(matches!(
-            new_state.view,
-            ViewState::AgentDetail { agent_id } if agent_id == "a04"
-        ));
+        assert!(matches!(new_state.view, ViewState::AgentDetail));
     }
 
     #[test]
-    fn key_2_no_op_if_no_task_selected() {
+    fn key_2_auto_selects_first_agent() {
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::empty());
-        state.selected_task_index = None;
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
 
         let new_state = handle_key(state, key(KeyCode::Char('2')));
-        assert!(matches!(new_state.view, ViewState::Dashboard));
+        assert!(matches!(new_state.view, ViewState::AgentDetail));
+        assert_eq!(new_state.selected_agent_index, Some(0));
     }
 
     #[test]
-    fn key_2_no_op_if_task_has_no_agent() {
-        let mut state = AppState::new();
-
-        let task = Task::new("T1".to_string(), "Test".to_string(), TaskStatus::Pending);
-        let wave = Wave::new(1, vec![task]);
-        state.task_graph = Some(TaskGraph::new(vec![wave]));
-        state.selected_task_index = Some(0);
-
+    fn key_2_no_auto_select_when_empty() {
+        let state = AppState::new();
         let new_state = handle_key(state, key(KeyCode::Char('2')));
-        assert!(matches!(new_state.view, ViewState::Dashboard));
+        assert_eq!(new_state.selected_agent_index, None);
     }
 
     #[test]
@@ -421,27 +385,77 @@ mod tests {
     }
 
     #[test]
-    fn scroll_in_agent_detail_tool_calls() {
+    fn j_moves_agent_selection_down() {
         let mut state = AppState::new();
-        state.view = ViewState::AgentDetail {
-            agent_id: "a04".to_string(),
-        };
+        state.view = ViewState::AgentDetail;
         state.focus = PanelFocus::Left;
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.selected_agent_index = Some(0);
 
         let new_state = handle_key(state, key(KeyCode::Char('j')));
-        assert_eq!(new_state.scroll_offsets.tool_calls, 1);
+        assert_eq!(new_state.selected_agent_index, Some(1));
     }
 
     #[test]
-    fn scroll_in_agent_detail_reasoning() {
+    fn j_clamps_agent_selection_at_max() {
         let mut state = AppState::new();
-        state.view = ViewState::AgentDetail {
-            agent_id: "a04".to_string(),
-        };
+        state.view = ViewState::AgentDetail;
+        state.focus = PanelFocus::Left;
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.selected_agent_index = Some(1);
+
+        let new_state = handle_key(state, key(KeyCode::Char('j')));
+        assert_eq!(new_state.selected_agent_index, Some(1));
+    }
+
+    #[test]
+    fn k_moves_agent_selection_up() {
+        let mut state = AppState::new();
+        state.view = ViewState::AgentDetail;
+        state.focus = PanelFocus::Left;
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.selected_agent_index = Some(1);
+
+        let new_state = handle_key(state, key(KeyCode::Char('k')));
+        assert_eq!(new_state.selected_agent_index, Some(0));
+    }
+
+    #[test]
+    fn agent_selection_change_resets_event_scroll() {
+        let mut state = AppState::new();
+        state.view = ViewState::AgentDetail;
+        state.focus = PanelFocus::Left;
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.selected_agent_index = Some(0);
+        state.scroll_offsets.agent_events = 15;
+
+        let new_state = handle_key(state, key(KeyCode::Char('j')));
+        assert_eq!(new_state.scroll_offsets.agent_events, 0);
+    }
+
+    #[test]
+    fn j_scrolls_agent_events_right_panel() {
+        let mut state = AppState::new();
+        state.view = ViewState::AgentDetail;
         state.focus = PanelFocus::Right;
 
         let new_state = handle_key(state, key(KeyCode::Char('j')));
-        assert_eq!(new_state.scroll_offsets.reasoning, 1);
+        assert_eq!(new_state.scroll_offsets.agent_events, 1);
+    }
+
+    #[test]
+    fn k_scrolls_agent_events_right_panel() {
+        let mut state = AppState::new();
+        state.view = ViewState::AgentDetail;
+        state.focus = PanelFocus::Right;
+        state.scroll_offsets.agent_events = 8;
+
+        let new_state = handle_key(state, key(KeyCode::Char('k')));
+        assert_eq!(new_state.scroll_offsets.agent_events, 7);
     }
 
     #[test]
@@ -469,34 +483,26 @@ mod tests {
         let wave = Wave::new(1, vec![task]);
         state.task_graph = Some(TaskGraph::new(vec![wave]));
         state.selected_task_index = Some(0);
+        state.agents.insert("a04".into(), Agent::new("a04".into(), Utc::now()));
 
         let new_state = handle_key(state, key(KeyCode::Enter));
-        assert!(matches!(
-            new_state.view,
-            ViewState::AgentDetail { agent_id } if agent_id == "a04"
-        ));
+        assert!(matches!(new_state.view, ViewState::AgentDetail));
+        assert_eq!(new_state.selected_agent_index, Some(0));
     }
 
     #[test]
     fn enter_on_agent_detail_is_noop() {
         let mut state = AppState::new();
-        state.view = ViewState::AgentDetail {
-            agent_id: "a04".to_string(),
-        };
+        state.view = ViewState::AgentDetail;
 
         let new_state = handle_key(state, key(KeyCode::Enter));
-        assert!(matches!(
-            new_state.view,
-            ViewState::AgentDetail { agent_id } if agent_id == "a04"
-        ));
+        assert!(matches!(new_state.view, ViewState::AgentDetail));
     }
 
     #[test]
     fn esc_on_agent_detail_goes_back_to_dashboard() {
         let mut state = AppState::new();
-        state.view = ViewState::AgentDetail {
-            agent_id: "a04".to_string(),
-        };
+        state.view = ViewState::AgentDetail;
 
         let new_state = handle_key(state, key(KeyCode::Esc));
         assert!(matches!(new_state.view, ViewState::Dashboard));
@@ -606,8 +612,10 @@ mod tests {
     }
 
     #[test]
-    fn multiple_tasks_drill_down_correct_task() {
+    fn multiple_tasks_drill_down_selects_correct_agent() {
         let mut state = AppState::new();
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
 
         let tasks = vec![
             Task {
@@ -634,9 +642,8 @@ mod tests {
         state.selected_task_index = Some(1);
 
         let new_state = handle_key(state, key(KeyCode::Enter));
-        assert!(matches!(
-            new_state.view,
-            ViewState::AgentDetail { agent_id } if agent_id == "a02"
-        ));
+        assert!(matches!(new_state.view, ViewState::AgentDetail));
+        // a02 is at index 1 in BTreeMap (sorted keys: a01, a02)
+        assert_eq!(new_state.selected_agent_index, Some(1));
     }
 }

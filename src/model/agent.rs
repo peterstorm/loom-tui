@@ -7,6 +7,8 @@ pub struct Agent {
     pub id: String,
     #[serde(default)]
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub agent_type: Option<String>,
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
@@ -19,6 +21,7 @@ impl Default for Agent {
         Self {
             id: String::new(),
             task_id: None,
+            agent_type: None,
             started_at: Utc::now(),
             finished_at: None,
             messages: Vec::new(),
@@ -31,6 +34,7 @@ impl Agent {
         Self {
             id,
             task_id: None,
+            agent_type: None,
             started_at,
             finished_at: None,
             messages: Vec::new(),
@@ -47,9 +51,19 @@ impl Agent {
         self
     }
 
+    pub fn with_agent_type(mut self, agent_type: String) -> Self {
+        self.agent_type = Some(agent_type);
+        self
+    }
+
     pub fn finish(mut self, finished_at: DateTime<Utc>) -> Self {
         self.finished_at = Some(finished_at);
         self
+    }
+
+    /// Display name: agent_type if available, otherwise short ID
+    pub fn display_name(&self) -> &str {
+        self.agent_type.as_deref().unwrap_or(&self.id)
     }
 }
 

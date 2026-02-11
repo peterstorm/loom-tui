@@ -16,6 +16,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+
 fn main() -> Result<()> {
     // Install color-eyre panic handler for better error messages
     color_eyre::install()?;

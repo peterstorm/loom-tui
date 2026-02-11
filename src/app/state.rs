@@ -55,6 +55,9 @@ pub struct AppState {
 
     /// Index of selected task in current view's task list
     pub selected_task_index: Option<usize>,
+
+    /// Index of selected agent in agent detail view
+    pub selected_agent_index: Option<usize>,
 }
 
 /// View state variants
@@ -63,8 +66,8 @@ pub enum ViewState {
     /// Main dashboard view
     Dashboard,
 
-    /// Agent detail view for specific agent
-    AgentDetail { agent_id: String },
+    /// Agent detail view with selectable agent list
+    AgentDetail,
 
     /// Sessions archive view
     Sessions,
@@ -102,11 +105,11 @@ pub struct ScrollState {
     /// Scroll offset for event stream
     pub event_stream: usize,
 
-    /// Scroll offset for tool call list (agent detail)
-    pub tool_calls: usize,
+    /// Scroll offset for agent list (agent detail left)
+    pub agent_list: usize,
 
-    /// Scroll offset for reasoning panel (agent detail)
-    pub reasoning: usize,
+    /// Scroll offset for agent events (agent detail right)
+    pub agent_events: usize,
 
     /// Scroll offset for sessions table
     pub sessions: usize,
@@ -138,6 +141,7 @@ impl AppState {
             started_at: Instant::now(),
             should_quit: false,
             selected_task_index: None,
+            selected_agent_index: None,
         }
     }
 
@@ -168,8 +172,8 @@ impl ScrollState {
     pub fn reset(&mut self) {
         self.task_list = 0;
         self.event_stream = 0;
-        self.tool_calls = 0;
-        self.reasoning = 0;
+        self.agent_list = 0;
+        self.agent_events = 0;
         self.sessions = 0;
     }
 }
@@ -213,11 +217,8 @@ mod tests {
 
     #[test]
     fn test_app_state_with_view_agent_detail() {
-        let agent_id = "a04".to_string();
-        let state = AppState::with_view(ViewState::AgentDetail {
-            agent_id: agent_id.clone(),
-        });
-        assert!(matches!(&state.view, ViewState::AgentDetail { agent_id: id } if id == &agent_id));
+        let state = AppState::with_view(ViewState::AgentDetail);
+        assert!(matches!(state.view, ViewState::AgentDetail));
     }
 
     #[test]
@@ -239,8 +240,8 @@ mod tests {
         let scroll = ScrollState::default();
         assert_eq!(scroll.task_list, 0);
         assert_eq!(scroll.event_stream, 0);
-        assert_eq!(scroll.tool_calls, 0);
-        assert_eq!(scroll.reasoning, 0);
+        assert_eq!(scroll.agent_list, 0);
+        assert_eq!(scroll.agent_events, 0);
         assert_eq!(scroll.sessions, 0);
     }
 
@@ -249,16 +250,16 @@ mod tests {
         let mut scroll = ScrollState::default();
         scroll.task_list = 10;
         scroll.event_stream = 20;
-        scroll.tool_calls = 5;
-        scroll.reasoning = 15;
+        scroll.agent_list = 5;
+        scroll.agent_events = 15;
         scroll.sessions = 3;
 
         scroll.reset();
 
         assert_eq!(scroll.task_list, 0);
         assert_eq!(scroll.event_stream, 0);
-        assert_eq!(scroll.tool_calls, 0);
-        assert_eq!(scroll.reasoning, 0);
+        assert_eq!(scroll.agent_list, 0);
+        assert_eq!(scroll.agent_events, 0);
         assert_eq!(scroll.sessions, 0);
     }
 
@@ -266,14 +267,7 @@ mod tests {
     fn test_view_state_equality() {
         assert_eq!(ViewState::Dashboard, ViewState::Dashboard);
         assert_eq!(ViewState::Sessions, ViewState::Sessions);
-        assert_eq!(
-            ViewState::AgentDetail {
-                agent_id: "a04".to_string()
-            },
-            ViewState::AgentDetail {
-                agent_id: "a04".to_string()
-            }
-        );
+        assert_eq!(ViewState::AgentDetail, ViewState::AgentDetail);
         assert_ne!(ViewState::Dashboard, ViewState::Sessions);
     }
 

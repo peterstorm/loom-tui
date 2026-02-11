@@ -10,10 +10,9 @@ use ratatui::{
 use crate::app::state::AppState;
 use crate::model::{theme::Theme, SessionStatus};
 
-/// Render the sessions archive view.
-/// Displays a table of archived sessions with metadata.
-pub fn render_sessions(frame: &mut Frame, state: &AppState) {
-    let area = frame.area();
+/// Render the sessions archive view into the given content area.
+/// Global header is rendered by the view dispatcher.
+pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Empty state: no archived sessions
     if state.sessions.is_empty() {
@@ -183,7 +182,7 @@ mod tests {
         let state = AppState::new();
 
         terminal
-            .draw(|frame| render_sessions(frame, &state))
+            .draw(|frame| render_sessions(frame, &state, frame.area()))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -218,7 +217,7 @@ mod tests {
         ];
 
         terminal
-            .draw(|frame| render_sessions(frame, &state))
+            .draw(|frame| render_sessions(frame, &state, frame.area()))
             .unwrap();
 
         let buffer = terminal.backend().buffer();

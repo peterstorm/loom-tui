@@ -2,7 +2,8 @@ use chrono::Utc;
 
 use crate::app::{handle_key, AppState};
 use crate::event::AppEvent;
-use crate::model::Agent;
+use crate::model::{Agent, AgentMessage, HookEventKind, MessageKind, ToolCall};
+use std::time::Duration;
 
 /// Pure update function following Elm Architecture.
 /// Takes current state and event, returns new state.
@@ -22,11 +23,99 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
         }
 
         AppEvent::HookEventReceived(event) => {
+            // Derive agent lifecycle and tool calls from hook events
+            let agent_id = event.agent_id.clone().or_else(|| {
+                // Heuristic: attribute to single active agent
+                let active: Vec<_> = state
+                    .agents
+                    .iter()
+                    .filter(|(_, a)| a.finished_at.is_none())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if active.len() == 1 {
+                    Some(active[0].clone())
+                } else {
+                    None
+                }
+            });
+
+            match &event.kind {
+                HookEventKind::SubagentStart { ref task_description } => {
+                    if let Some(ref id) = event.agent_id {
+                        let agent_type = task_description.clone();
+                        state
+                            .agents
+                            .entry(id.clone())
+                            .and_modify(|a| {
+                                if a.agent_type.is_none() {
+                                    a.agent_type = agent_type.clone();
+                                }
+                            })
+                            .or_insert_with(|| {
+                                let mut a = Agent::new(id.clone(), event.timestamp);
+                                a.agent_type = agent_type;
+                                a
+                            });
+                    }
+                }
+                HookEventKind::SubagentStop => {
+                    if let Some(ref id) = event.agent_id {
+                        state.agents.entry(id.clone()).and_modify(|agent| {
+                            if agent.finished_at.is_none() {
+                                agent.finished_at = Some(event.timestamp);
+                            }
+                        });
+                    }
+                }
+                HookEventKind::PreToolUse {
+                    tool_name,
+                    input_summary,
+                } => {
+                    if let Some(ref id) = agent_id {
+                        state.agents.entry(id.clone()).and_modify(|agent| {
+                            agent.messages.push(AgentMessage::tool(
+                                event.timestamp,
+                                ToolCall::new(tool_name.clone(), input_summary.clone()),
+                            ));
+                        });
+                    }
+                }
+                HookEventKind::PostToolUse {
+                    tool_name,
+                    result_summary,
+                    duration_ms,
+                } => {
+                    if let Some(ref id) = agent_id {
+                        state.agents.entry(id.clone()).and_modify(|agent| {
+                            // Update last matching pending tool call
+                            if let Some(msg) = agent.messages.iter_mut().rev().find(|m| {
+                                matches!(&m.kind, MessageKind::Tool(tc) if tc.tool_name == *tool_name && tc.success.is_none())
+                            }) {
+                                if let MessageKind::Tool(ref mut tc) = msg.kind {
+                                    tc.result_summary = Some(result_summary.clone());
+                                    tc.success = Some(true);
+                                    if let Some(ms) = duration_ms {
+                                        tc.duration = Some(Duration::from_millis(*ms));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
+
+            // Enrich event with attributed agent_id before storing
+            let mut enriched = event;
+            if enriched.agent_id.is_none() {
+                enriched.agent_id = agent_id;
+            }
+
             // Ring buffer eviction: pop oldest if at capacity
             if state.events.len() >= 10_000 {
                 state.events.pop_front();
             }
-            state.events.push_back(event);
+            state.events.push_back(enriched);
             state
         }
 
@@ -387,5 +476,161 @@ mod tests {
         }
 
         assert_eq!(state.errors.len(), 100);
+    }
+
+    #[test]
+    fn hook_subagent_start_creates_agent() {
+        let state = AppState::new();
+        let event = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+
+        let new_state = update(state, AppEvent::HookEventReceived(event));
+
+        assert_eq!(new_state.agents.len(), 1);
+        assert!(new_state.agents.get("a01").unwrap().finished_at.is_none());
+    }
+
+    #[test]
+    fn hook_subagent_stop_finishes_agent() {
+        let state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let stop =
+            HookEvent::new(Utc::now(), HookEventKind::subagent_stop()).with_agent("a01".into());
+
+        let state = update(state, AppEvent::HookEventReceived(start));
+        let state = update(state, AppEvent::HookEventReceived(stop));
+
+        assert!(state.agents.get("a01").unwrap().finished_at.is_some());
+    }
+
+    #[test]
+    fn hook_subagent_start_idempotent() {
+        let state = AppState::new();
+        let ts = Utc::now();
+        let e1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let e2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+
+        let state = update(state, AppEvent::HookEventReceived(e1));
+        let state = update(state, AppEvent::HookEventReceived(e2));
+
+        // Should still be 1 agent, not replaced
+        assert_eq!(state.agents.len(), 1);
+    }
+
+    #[test]
+    fn hook_pre_tool_use_with_agent_id() {
+        let state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let tool = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+        )
+        .with_agent("a01".into());
+
+        let state = update(state, AppEvent::HookEventReceived(start));
+        let state = update(state, AppEvent::HookEventReceived(tool));
+
+        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+        match &state.agents.get("a01").unwrap().messages[0].kind {
+            MessageKind::Tool(tc) => {
+                assert_eq!(tc.tool_name, "Read");
+                assert_eq!(tc.input_summary, "file.rs");
+                assert!(tc.success.is_none()); // pending
+            }
+            _ => panic!("Expected Tool message"),
+        }
+    }
+
+    #[test]
+    fn hook_post_tool_use_updates_pending() {
+        let state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let pre = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+        )
+        .with_agent("a01".into());
+        let post = HookEvent::new(
+            Utc::now(),
+            HookEventKind::post_tool_use("Read".into(), "ok".into(), Some(250)),
+        )
+        .with_agent("a01".into());
+
+        let state = update(state, AppEvent::HookEventReceived(start));
+        let state = update(state, AppEvent::HookEventReceived(pre));
+        let state = update(state, AppEvent::HookEventReceived(post));
+
+        let msg = &state.agents.get("a01").unwrap().messages[0];
+        match &msg.kind {
+            MessageKind::Tool(tc) => {
+                assert_eq!(tc.success, Some(true));
+                assert_eq!(
+                    tc.duration,
+                    Some(std::time::Duration::from_millis(250))
+                );
+                assert_eq!(tc.result_summary, Some("ok".into()));
+            }
+            _ => panic!("Expected Tool message"),
+        }
+    }
+
+    #[test]
+    fn hook_tool_use_attributed_to_single_active_agent() {
+        let state = AppState::new();
+        // Start an agent
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        // Tool use WITHOUT agent_id (like real Claude Code hook events)
+        let tool = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
+        );
+
+        let state = update(state, AppEvent::HookEventReceived(start));
+        let state = update(state, AppEvent::HookEventReceived(tool));
+
+        // Should be attributed to a01 (only active agent)
+        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+    }
+
+    #[test]
+    fn hook_tool_use_not_attributed_with_multiple_active_agents() {
+        let state = AppState::new();
+        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a02".into());
+        // Tool use without agent_id
+        let tool = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
+        );
+
+        let state = update(state, AppEvent::HookEventReceived(s1));
+        let state = update(state, AppEvent::HookEventReceived(s2));
+        let state = update(state, AppEvent::HookEventReceived(tool));
+
+        // Can't attribute — both agents should have 0 messages
+        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
+        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 0);
+    }
+
+    #[test]
+    fn hook_tool_use_not_attributed_when_no_agents() {
+        let state = AppState::new();
+        let tool = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+        );
+
+        let state = update(state, AppEvent::HookEventReceived(tool));
+
+        // No agents, no attribution, no panic
+        assert!(state.agents.is_empty());
     }
 }

@@ -6,9 +6,8 @@
 
 set -e
 
-# Resolve temp directory (cross-platform)
-TMPDIR="${TMPDIR:-/tmp}"
-EVENT_DIR="$TMPDIR/loom-tui"
+# Always use /tmp (not $TMPDIR) — TUI hardcodes /tmp, nix-shell changes $TMPDIR
+EVENT_DIR="/tmp/loom-tui"
 EVENT_FILE="$EVENT_DIR/events.jsonl"
 
 # Create event directory if missing
@@ -17,73 +16,151 @@ mkdir -p "$EVENT_DIR"
 # Read hook JSON from stdin
 HOOK_JSON=$(cat)
 
-# Extract hook name from environment (Claude Code sets this)
-HOOK_NAME="${CLAUDE_HOOK_NAME:-unknown}"
+# Extract hook event name from JSON payload (preferred) or env var (fallback)
+HOOK_NAME=$(echo "$HOOK_JSON" | jq -r '.hook_event_name // empty' 2>/dev/null || echo "")
+if [ -z "$HOOK_NAME" ]; then
+  HOOK_NAME="${CLAUDE_HOOK_NAME:-unknown}"
+fi
 
-# Extract session_id if present in JSON
-SESSION_ID=$(echo "$HOOK_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
-
-# Extract agent_id if present in JSON
-AGENT_ID=$(echo "$HOOK_JSON" | jq -r '.subagent_id // .agent_id // empty' 2>/dev/null || echo "")
-
-# Map hook name to event kind and extract relevant fields
-case "$HOOK_NAME" in
-  session-start)
-    EVENT_KIND="SessionStart"
-    ;;
-  session-end)
-    EVENT_KIND="SessionEnd"
-    ;;
-  subagent-start)
-    EVENT_KIND="SubagentStart"
-    TASK_DESC=$(echo "$HOOK_JSON" | jq -r '.task_description // empty' 2>/dev/null || echo "")
-    ;;
-  subagent-stop)
-    EVENT_KIND="SubagentStop"
-    ;;
-  pre-tool-use)
-    EVENT_KIND="PreToolUse"
-    TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
-    ;;
-  post-tool-use)
-    EVENT_KIND="PostToolUse"
-    TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
-    DURATION=$(echo "$HOOK_JSON" | jq -r '.duration_ms // empty' 2>/dev/null || echo "")
-    ;;
-  stop)
-    EVENT_KIND="Stop"
-    REASON=$(echo "$HOOK_JSON" | jq -r '.reason // empty' 2>/dev/null || echo "")
-    ;;
-  notification)
-    EVENT_KIND="Notification"
-    MESSAGE=$(echo "$HOOK_JSON" | jq -r '.message // empty' 2>/dev/null || echo "")
-    ;;
-  user-prompt-submit)
-    EVENT_KIND="UserPromptSubmit"
-    ;;
-  *)
-    # Unknown hook - still capture it
-    EVENT_KIND="Unknown"
-    ;;
-esac
-
-# Build event JSON line with ISO8601 timestamp
+# Build ISO8601 timestamp
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# Construct JSON event (using jq for proper escaping)
-jq -n \
-  --arg ts "$TIMESTAMP" \
-  --arg kind "$EVENT_KIND" \
-  --arg sid "$SESSION_ID" \
-  --arg aid "$AGENT_ID" \
-  --argjson raw "$HOOK_JSON" \
-  '{
-    timestamp: $ts,
-    kind: $kind,
-    session_id: (if $sid == "" then null else $sid end),
-    agent_id: (if $aid == "" then null else $aid end),
-    raw: $raw
-  }' >> "$EVENT_FILE"
+# Extract common fields
+SESSION_ID=$(echo "$HOOK_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+AGENT_ID=$(echo "$HOOK_JSON" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
+
+# Map hook name to TUI event format (snake_case "event" tag + required fields)
+case "$HOOK_NAME" in
+  PreToolUse|pre-tool-use)
+    TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
+    # Extract meaningful summary from tool_input, varying by tool
+    INPUT=$(echo "$HOOK_JSON" | jq -r --arg tn "$TOOL_NAME" '
+      .tool_input // {} |
+      if $tn == "Edit" then
+        (.file_path // "") + "\n" +
+        ((.old_string // "" | split("\n") | .[0:30] | map("- " + .) | join("\n")) // "") +
+        (if ((.old_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end) + "\n" +
+        ((.new_string // "" | split("\n") | .[0:30] | map("+ " + .) | join("\n")) // "") +
+        (if ((.new_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
+      elif $tn == "Write" then
+        (.file_path // "") + " (new file)\n" +
+        ((.content // "" | split("\n") | .[0:30] | map("+ " + .) | join("\n")) // "") +
+        (if ((.content // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
+      elif .file_path then .file_path
+      elif .command then (.description // .command)
+      elif .pattern then .pattern
+      elif .prompt then (.description // .prompt)
+      elif .query then .query
+      elif .url then .url
+      elif .skill then .skill
+      elif .subject then .subject
+      else tostring
+      end' 2>/dev/null | head -c 4000)
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg tn "$TOOL_NAME" \
+      --arg inp "$INPUT" \
+      '{timestamp: $ts, event: "pre_tool_use", tool_name: $tn, input_summary: $inp, session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  PostToolUse|post-tool-use)
+    TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
+    # Extract clean human-readable result from tool_response
+    RESULT=$(echo "$HOOK_JSON" | jq -r '
+      .tool_response // .tool_output // .output // {} |
+      if type == "string" then .
+      elif type == "object" then
+        if .filePath then "ok: " + (.filePath | split("/") | last)
+        elif .stdout then (.stdout | split("\n") | map(select(. != "")) | last // "ok")
+        elif .content then (.content | if length > 100 then .[0:100] + "..." else . end)
+        elif .error then "error: " + .error
+        else "ok"
+        end
+      else tostring
+      end' 2>/dev/null | head -c 2000)
+    DURATION=$(echo "$HOOK_JSON" | jq -r '.duration_ms // empty' 2>/dev/null || echo "")
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg tn "$TOOL_NAME" \
+      --arg res "$RESULT" \
+      --arg dur "$DURATION" \
+      '{timestamp: $ts, event: "post_tool_use", tool_name: $tn, result_summary: $res, duration_ms: (if $dur == "" then null else ($dur | tonumber) end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  SubagentStart|subagent-start)
+    TASK_DESC=$(echo "$HOOK_JSON" | jq -r '.agent_type // .task_description // empty' 2>/dev/null || echo "")
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg td "$TASK_DESC" \
+      '{timestamp: $ts, event: "subagent_start", task_description: (if $td == "" then null else $td end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  SubagentStop|subagent-stop)
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      '{timestamp: $ts, event: "subagent_stop", session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  Stop|stop)
+    REASON=$(echo "$HOOK_JSON" | jq -r '.reason // empty' 2>/dev/null || echo "")
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg r "$REASON" \
+      '{timestamp: $ts, event: "stop", reason: (if $r == "" then null else $r end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  Notification|notification)
+    MESSAGE=$(echo "$HOOK_JSON" | jq -r '.message // ""' 2>/dev/null || echo "")
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg msg "$MESSAGE" \
+      '{timestamp: $ts, event: "notification", message: $msg, session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  UserPromptSubmit|user-prompt-submit)
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      '{timestamp: $ts, event: "user_prompt_submit", session_id: (if $sid == "" then null else $sid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  session-start|SessionStart)
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      '{timestamp: $ts, event: "session_start", session_id: (if $sid == "" then null else $sid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  session-end|SessionEnd)
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      '{timestamp: $ts, event: "session_end", session_id: (if $sid == "" then null else $sid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+  *)
+    # Unknown hook - emit as notification
+    jq -cn \
+      --arg ts "$TIMESTAMP" \
+      --arg sid "$SESSION_ID" \
+      --arg aid "$AGENT_ID" \
+      --arg hn "$HOOK_NAME" \
+      '{timestamp: $ts, event: "notification", message: ("unknown hook: " + $hn), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      >> "$EVENT_FILE"
+    ;;
+esac
 
 # Always exit 0 (passthrough)
 exit 0

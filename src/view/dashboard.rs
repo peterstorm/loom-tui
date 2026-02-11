@@ -1,43 +1,25 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     Frame,
 };
 
 use crate::app::AppState;
 
 use super::components::{
-    render_banner, render_event_stream, render_footer, render_header, render_task_list,
-    render_wave_river,
+    render_banner, render_event_stream, render_footer, render_task_list, render_wave_river,
 };
 
-/// Render dashboard view.
-/// Pure function: takes state and frame, renders dashboard layout.
-///
-/// Layout structure:
-/// ```text
-/// ┌─────────────────────────────────┐
-/// │ Header (project, wave, progress)│
-/// ├─────────────────────────────────┤
-/// │ Wave River (horizontal swimlane)│
-/// ├──────────────┬──────────────────┤
-/// │              │                  │
-/// │  Task List   │  Event Stream    │
-/// │  (scrollable)│  (scrollable)    │
-/// │              │                  │
-/// ├──────────────┴──────────────────┤
-/// │ Footer (keybindings)            │
-/// └─────────────────────────────────┘
-/// ```
-pub fn render_dashboard(frame: &mut Frame, state: &AppState) {
+/// Render dashboard view into the given content area.
+/// Header is rendered globally by the view dispatcher.
+pub fn render_dashboard(frame: &mut Frame, state: &AppState, area: Rect) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header
-            Constraint::Length(3),  // Wave river
-            Constraint::Min(10),    // Main content area
-            Constraint::Length(1),  // Footer
+            Constraint::Length(3), // Wave river
+            Constraint::Min(10),  // Main content area
+            Constraint::Length(1), // Footer
         ])
-        .split(frame.area());
+        .split(area);
 
     // Render banner if hook status is Missing or InstallFailed
     let content_area = match &state.hook_status {
@@ -46,15 +28,15 @@ pub fn render_dashboard(frame: &mut Frame, state: &AppState) {
             let banner_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(2),  // Banner
-                    Constraint::Min(8),     // Content
+                    Constraint::Length(2), // Banner
+                    Constraint::Min(8),   // Content
                 ])
-                .split(main_layout[2]);
+                .split(main_layout[1]);
 
             render_banner(frame, banner_layout[0], state);
             banner_layout[1]
         }
-        _ => main_layout[2],
+        _ => main_layout[1],
     };
 
     // Split content area into two columns
@@ -67,11 +49,10 @@ pub fn render_dashboard(frame: &mut Frame, state: &AppState) {
         .split(content_area);
 
     // Render all components
-    render_header(frame, main_layout[0], state);
-    render_wave_river(frame, main_layout[1], state);
+    render_wave_river(frame, main_layout[0], state);
     render_task_list(frame, content_columns[0], state);
     render_event_stream(frame, content_columns[1], state);
-    render_footer(frame, main_layout[3], state);
+    render_footer(frame, main_layout[2], state);
 }
 
 #[cfg(test)]
@@ -90,7 +71,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_dashboard(frame, &state);
+                render_dashboard(frame, &state, frame.area());
             })
             .unwrap();
     }
@@ -104,7 +85,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_dashboard(frame, &state);
+                render_dashboard(frame, &state, frame.area());
             })
             .unwrap();
     }
@@ -118,7 +99,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_dashboard(frame, &state);
+                render_dashboard(frame, &state, frame.area());
             })
             .unwrap();
     }
@@ -132,7 +113,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_dashboard(frame, &state);
+                render_dashboard(frame, &state, frame.area());
             })
             .unwrap();
     }

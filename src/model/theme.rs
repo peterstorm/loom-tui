@@ -26,6 +26,7 @@ impl Theme {
     pub const PANEL_BORDER: Color = Color::Rgb(60, 60, 70);
     pub const ACTIVE_BORDER: Color = Color::Cyan;
     pub const MUTED_TEXT: Color = Color::Rgb(120, 120, 130);
+    pub const SELECTION_BG: Color = Color::Rgb(40, 40, 55);
 
     // General colors
     pub const BACKGROUND: Color = Color::Rgb(20, 20, 25);
@@ -34,6 +35,8 @@ impl Theme {
     pub const WARNING: Color = Color::Yellow;
     pub const ERROR: Color = Color::Red;
     pub const INFO: Color = Color::Cyan;
+    pub const SEPARATOR: Color = Color::Rgb(50, 50, 60);
+    pub const AGENT_LABEL: Color = Color::Rgb(180, 140, 255); // soft purple
 
     /// Get color for task status
     pub fn task_status_color(status: &crate::model::TaskStatus) -> Color {

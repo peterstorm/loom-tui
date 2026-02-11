@@ -1,3 +1,4 @@
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
 
 use crate::app::state::{AppState, ViewState};
@@ -12,19 +13,31 @@ pub use dashboard::render_dashboard;
 pub use sessions::render_sessions;
 
 /// Main view dispatcher.
-/// Routes to specific view based on current ViewState.
+/// Renders global header on all views, then routes content area to specific view.
 /// Overlays filter bar and help if active.
 pub fn render(state: &AppState, frame: &mut Frame) {
-    // Main view dispatch based on ViewState
+    // Global header + content split
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Global header
+            Constraint::Min(0),   // Content area
+        ])
+        .split(frame.area());
+
+    // Always render global header
+    components::header::render_header(frame, layout[0], state);
+
+    // Route content area to specific view
     match &state.view {
         ViewState::Dashboard => {
-            dashboard::render_dashboard(frame, state);
+            dashboard::render_dashboard(frame, state, layout[1]);
         }
-        ViewState::AgentDetail { agent_id } => {
-            agent_detail::render_agent_detail(frame, state, agent_id);
+        ViewState::AgentDetail => {
+            agent_detail::render_agent_detail(frame, state, layout[1]);
         }
         ViewState::Sessions => {
-            sessions::render_sessions(frame, state);
+            sessions::render_sessions(frame, state, layout[1]);
         }
     }
 

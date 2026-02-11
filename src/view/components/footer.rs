@@ -56,7 +56,7 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
             spans.push(Span::styled("?", Style::default().fg(Theme::INFO)));
             spans.push(Span::raw(":help"));
         }
-        ViewState::AgentDetail { .. } => {
+        ViewState::AgentDetail => {
             spans.push(Span::styled("Esc", Style::default().fg(Theme::INFO)));
             spans.push(Span::raw(":back "));
 
@@ -133,9 +133,7 @@ mod tests {
 
     #[test]
     fn build_footer_text_agent_detail() {
-        let state = AppState::with_view(ViewState::AgentDetail {
-            agent_id: "a01".to_string(),
-        });
+        let state = AppState::with_view(ViewState::AgentDetail);
         let line = build_footer_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 

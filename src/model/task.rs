@@ -97,6 +97,12 @@ pub enum ReviewStatus {
     },
 }
 
+impl Default for TaskStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
 impl Default for ReviewStatus {
     fn default() -> Self {
         Self::Pending

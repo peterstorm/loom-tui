@@ -1,21 +1,19 @@
+pub mod agent_list;
 pub mod banner;
 pub mod event_stream;
 pub mod filter_bar;
 pub mod footer;
 pub mod header;
 pub mod help_overlay;
-pub mod reasoning_panel;
 pub mod task_list;
-pub mod tool_call_list;
 pub mod wave_river;
 
+pub use agent_list::render_agent_list;
 pub use banner::render_banner;
-pub use event_stream::render_event_stream;
+pub use event_stream::{render_agent_event_stream, render_event_stream};
 pub use filter_bar::render_filter_bar;
 pub use footer::render_footer;
 pub use header::render_header;
 pub use help_overlay::render_help_overlay;
-pub use reasoning_panel::render_reasoning_panel;
 pub use task_list::render_task_list;
-pub use tool_call_list::render_tool_call_list;
 pub use wave_river::render_wave_river;

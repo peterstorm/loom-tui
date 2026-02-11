@@ -55,9 +55,6 @@ impl Paths {
     /// );
     /// ```
     pub fn resolve(project_root: &Path) -> Self {
-        let tmpdir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-        let tmpdir_path = PathBuf::from(tmpdir);
-
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let home_path = PathBuf::from(home);
 
@@ -69,7 +66,9 @@ impl Paths {
 
             transcripts: project_root.join(".claude").join("state").join("subagents"),
 
-            events: tmpdir_path.join("loom-tui").join("events.jsonl"),
+            // Always use /tmp (not $TMPDIR) so TUI and hook scripts agree on path.
+            // Hooks run outside nix-shell where TMPDIR differs.
+            events: PathBuf::from("/tmp").join("loom-tui").join("events.jsonl"),
 
             active_agents: PathBuf::from("/tmp").join("claude-subagents"),
 
@@ -137,9 +136,10 @@ mod tests {
             Path::new("/projects/my-app/.claude/state/subagents")
         );
 
+        // events always uses /tmp, not $TMPDIR (hooks run outside nix-shell)
         assert_eq!(
             paths.events,
-            Path::new("/var/tmp/loom-tui/events.jsonl")
+            Path::new("/tmp/loom-tui/events.jsonl")
         );
 
         // active_agents always uses /tmp, not $TMPDIR

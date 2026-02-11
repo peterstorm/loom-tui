@@ -17,7 +17,7 @@ fn dashboard_renders_without_panic_empty_state() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -46,7 +46,7 @@ fn dashboard_renders_without_panic_with_tasks() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -74,7 +74,7 @@ fn dashboard_renders_without_panic_with_events() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -88,7 +88,7 @@ fn dashboard_renders_with_hook_missing_banner() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -102,7 +102,7 @@ fn dashboard_renders_with_hook_failed_banner() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -116,7 +116,7 @@ fn dashboard_renders_with_small_terminal() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -130,7 +130,7 @@ fn dashboard_renders_with_minimal_terminal() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -212,9 +212,7 @@ fn footer_renders_for_agent_detail() {
     let backend = TestBackend::new(80, 1);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let state = AppState::with_view(ViewState::AgentDetail {
-        agent_id: "a01".into(),
-    });
+    let state = AppState::with_view(ViewState::AgentDetail);
 
     terminal
         .draw(|frame| {
@@ -408,7 +406,7 @@ fn banner_renders_for_failed_install() {
         .unwrap();
 }
 
-// Layout calculation tests - verify no panics with various state combinations
+// Layout calculation tests
 
 #[test]
 fn dashboard_layout_with_all_status_types() {
@@ -442,7 +440,7 @@ fn dashboard_layout_with_all_status_types() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -464,7 +462,7 @@ fn dashboard_layout_with_long_task_descriptions() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -476,7 +474,6 @@ fn dashboard_layout_with_many_events() {
 
     let mut state = AppState::new();
 
-    // Add 100 events
     for i in 0..100 {
         state.events.push_back(HookEvent::new(
             Utc::now(),
@@ -486,7 +483,7 @@ fn dashboard_layout_with_many_events() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
@@ -511,12 +508,12 @@ fn dashboard_layout_with_scroll_offsets() {
 
     terminal
         .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state);
+            loom_tui::view::render_dashboard(frame, &state, frame.area());
         })
         .unwrap();
 }
 
-// View dispatch tests (T12)
+// View dispatch tests
 
 #[test]
 fn view_dispatch_sessions() {
@@ -547,9 +544,7 @@ fn view_dispatch_agent_detail() {
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let state = AppState::with_view(ViewState::AgentDetail {
-        agent_id: "a01".to_string(),
-    });
+    let state = AppState::with_view(ViewState::AgentDetail);
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
@@ -570,7 +565,6 @@ fn view_render_with_filter_overlay() {
 
     let buffer = terminal.backend().buffer();
 
-    // Convert buffer to string for easier searching
     let buffer_str: String = (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
@@ -580,7 +574,6 @@ fn view_render_with_filter_overlay() {
         .collect::<Vec<String>>()
         .join("\n");
 
-    // Filter bar should be visible
     assert!(buffer_str.contains("test"), "Filter text should be visible");
 }
 
@@ -598,7 +591,6 @@ fn view_render_with_help_overlay() {
 
     let buffer = terminal.backend().buffer();
 
-    // Convert buffer to string for easier searching
     let buffer_str: String = (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
@@ -608,7 +600,6 @@ fn view_render_with_help_overlay() {
         .collect::<Vec<String>>()
         .join("\n");
 
-    // Help overlay should be visible
     assert!(
         buffer_str.contains("NAVIGATION"),
         "Help overlay should be visible"
@@ -627,6 +618,4 @@ fn view_render_with_both_overlays() {
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
         .unwrap();
-
-    // Both overlays should render without panic, with help on top
 }

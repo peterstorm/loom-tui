@@ -1,15 +1,71 @@
-use crate::model::{AgentMessage, HookEvent, TaskGraph};
+use crate::model::{AgentMessage, HookEvent, Task, TaskGraph, Wave};
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Parse task graph JSON file into TaskGraph model.
+/// Supports both native TUI format and loom orchestration format.
 ///
 /// # Functional Core
 /// Pure function - no I/O, just string parsing.
-///
-/// # Errors
-/// Returns error string if JSON is malformed or doesn't match schema.
 pub fn parse_task_graph(content: &str) -> Result<TaskGraph, String> {
-    serde_json::from_str(content).map_err(|e| format!("JSON parse error: {}", e))
+    if let Ok(graph) = serde_json::from_str::<TaskGraph>(content) {
+        return Ok(graph);
+    }
+    parse_loom_format(content)
+}
+
+#[derive(Deserialize)]
+struct LoomFormat {
+    tasks: Vec<LoomTask>,
+}
+
+#[derive(Deserialize)]
+struct LoomTask {
+    id: String,
+    description: String,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default = "default_wave")]
+    wave: u32,
+    #[serde(default)]
+    status: crate::model::TaskStatus,
+    #[serde(default)]
+    review_status: crate::model::ReviewStatus,
+    #[serde(default)]
+    files_modified: Vec<String>,
+    #[serde(default)]
+    tests_passed: Option<bool>,
+}
+
+fn default_wave() -> u32 {
+    1
+}
+
+fn parse_loom_format(content: &str) -> Result<TaskGraph, String> {
+    let loom: LoomFormat =
+        serde_json::from_str(content).map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let mut wave_map: BTreeMap<u32, Vec<Task>> = BTreeMap::new();
+    for lt in loom.tasks {
+        let task = Task {
+            id: lt.id,
+            description: lt.description,
+            agent_id: lt.agent,
+            status: lt.status,
+            review_status: lt.review_status,
+            files_modified: lt.files_modified,
+            tests_passed: lt.tests_passed,
+        };
+        wave_map.entry(lt.wave).or_default().push(task);
+    }
+
+    let waves: Vec<Wave> = wave_map
+        .into_iter()
+        .map(|(num, tasks)| Wave::new(num, tasks))
+        .collect();
+
+    Ok(TaskGraph::new(waves))
 }
 
 /// Parse agent transcript JSONL file into vector of messages.
@@ -296,6 +352,58 @@ invalid
             }
             _ => panic!("Expected Tool message"),
         }
+    }
+
+    #[test]
+    fn test_parse_task_graph_loom_format() {
+        let json = r#"{
+            "current_phase": "execute",
+            "tasks": [
+                {
+                    "id": "T1",
+                    "description": "Create scaffold",
+                    "agent": "dotfiles-agent",
+                    "wave": 1,
+                    "status": "completed",
+                    "review_status": "passed",
+                    "files_modified": ["Cargo.toml"],
+                    "tests_passed": true
+                },
+                {
+                    "id": "T2",
+                    "description": "Implement models",
+                    "agent": "code-implementer-agent",
+                    "wave": 1,
+                    "status": "completed",
+                    "spec_anchors": ["FR-020"],
+                    "depends_on": []
+                },
+                {
+                    "id": "T3",
+                    "description": "Wire main loop",
+                    "agent": "code-implementer-agent",
+                    "wave": 2,
+                    "status": "running"
+                }
+            ]
+        }"#;
+
+        let result = parse_task_graph(json);
+        assert!(result.is_ok());
+
+        let graph = result.unwrap();
+        assert_eq!(graph.waves.len(), 2);
+        assert_eq!(graph.total_tasks, 3);
+
+        // Wave 1 has 2 tasks
+        assert_eq!(graph.waves[0].number, 1);
+        assert_eq!(graph.waves[0].tasks.len(), 2);
+        assert_eq!(graph.waves[0].tasks[0].agent_id, Some("dotfiles-agent".into()));
+
+        // Wave 2 has 1 task
+        assert_eq!(graph.waves[1].number, 2);
+        assert_eq!(graph.waves[1].tasks.len(), 1);
+        assert_eq!(graph.waves[1].tasks[0].id, "T3");
     }
 
     #[test]

@@ -1,0 +1,523 @@
+use chrono::Utc;
+use loom_tui::app::{update, AppState, ViewState};
+use loom_tui::event::AppEvent;
+use loom_tui::model::{
+    Agent, AgentMessage, HookEvent, HookEventKind, SessionArchive, SessionMeta, SessionStatus,
+    Task, TaskGraph, TaskStatus, ToolCall, Wave,
+};
+use std::collections::BTreeMap;
+
+#[test]
+fn task_graph_updated_sets_graph() {
+    let state = AppState::new();
+    let graph = TaskGraph {
+        waves: vec![
+            Wave {
+                number: 1,
+                tasks: vec![Task {
+                    id: "T1".into(),
+                    description: "Task 1".into(),
+                    agent_id: Some("a01".into()),
+                    status: TaskStatus::Running,
+                    review_status: loom_tui::model::ReviewStatus::Pending,
+                    files_modified: vec![],
+                    tests_passed: None,
+                }],
+            },
+            Wave {
+                number: 2,
+                tasks: vec![],
+            },
+        ],
+        total_tasks: 1,
+        completed_tasks: 0,
+    };
+
+    let new_state = update(state, AppEvent::TaskGraphUpdated(graph.clone()));
+
+    assert!(new_state.task_graph.is_some());
+    let stored_graph = new_state.task_graph.unwrap();
+    assert_eq!(stored_graph.waves.len(), 2);
+    assert_eq!(stored_graph.total_tasks, 1);
+    assert_eq!(stored_graph.waves[0].tasks[0].id, "T1");
+}
+
+#[test]
+fn task_graph_updated_replaces_existing() {
+    let mut state = AppState::new();
+    state.task_graph = Some(TaskGraph {
+        waves: vec![],
+        total_tasks: 0,
+        completed_tasks: 0,
+    });
+
+    let new_graph = TaskGraph {
+        waves: vec![Wave {
+            number: 1,
+            tasks: vec![],
+        }],
+        total_tasks: 5,
+        completed_tasks: 2,
+    };
+
+    let new_state = update(state, AppEvent::TaskGraphUpdated(new_graph));
+
+    assert_eq!(new_state.task_graph.unwrap().total_tasks, 5);
+}
+
+#[test]
+fn transcript_updated_adds_messages_to_existing_agent() {
+    let mut state = AppState::new();
+    let agent = Agent::new("a01".into(), Utc::now());
+    state.agents.insert("a01".into(), agent);
+
+    let messages = vec![
+        AgentMessage::reasoning(Utc::now(), "analyzing problem".into()),
+        AgentMessage::tool(
+            Utc::now(),
+            ToolCall::new("Read".into(), "file.rs".into()),
+        ),
+    ];
+
+    let new_state = update(
+        state,
+        AppEvent::TranscriptUpdated {
+            agent_id: "a01".into(),
+            messages: messages.clone(),
+        },
+    );
+
+    let agent = new_state.agents.get("a01").unwrap();
+    assert_eq!(agent.messages.len(), 2);
+    assert!(matches!(
+        agent.messages[0].kind,
+        loom_tui::model::MessageKind::Reasoning { .. }
+    ));
+}
+
+#[test]
+fn transcript_updated_replaces_existing_messages() {
+    let mut state = AppState::new();
+    let mut agent = Agent::new("a01".into(), Utc::now());
+    agent.messages = vec![AgentMessage::reasoning(Utc::now(), "old".into())];
+    state.agents.insert("a01".into(), agent);
+
+    let new_messages = vec![AgentMessage::reasoning(Utc::now(), "new".into())];
+
+    let new_state = update(
+        state,
+        AppEvent::TranscriptUpdated {
+            agent_id: "a01".into(),
+            messages: new_messages,
+        },
+    );
+
+    let agent = new_state.agents.get("a01").unwrap();
+    assert_eq!(agent.messages.len(), 1);
+}
+
+#[test]
+fn hook_event_received_appends_to_buffer() {
+    let state = AppState::new();
+    let event1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
+    let event2 = HookEvent::new(
+        Utc::now(),
+        HookEventKind::Notification {
+            message: "test".into(),
+        },
+    );
+
+    let state = update(state, AppEvent::HookEventReceived(event1));
+    let state = update(state, AppEvent::HookEventReceived(event2));
+
+    assert_eq!(state.events.len(), 2);
+}
+
+#[test]
+fn hook_event_evicts_oldest_at_capacity() {
+    let mut state = AppState::new();
+
+    // Fill to exactly 10,000
+    for i in 0..10_000 {
+        let event = HookEvent::new(
+            Utc::now(),
+            HookEventKind::Notification {
+                message: format!("event {}", i),
+            },
+        );
+        state.events.push_back(event);
+    }
+
+    // Front should be event 0
+    assert!(matches!(
+        &state.events.front().unwrap().kind,
+        HookEventKind::Notification { message } if message.contains("event 0")
+    ));
+
+    // Add one more
+    let new_event = HookEvent::new(
+        Utc::now(),
+        HookEventKind::Notification {
+            message: "event 10000".into(),
+        },
+    );
+    let new_state = update(state, AppEvent::HookEventReceived(new_event));
+
+    // Should still be 10,000
+    assert_eq!(new_state.events.len(), 10_000);
+
+    // Front should now be event 1 (event 0 evicted)
+    assert!(matches!(
+        &new_state.events.front().unwrap().kind,
+        HookEventKind::Notification { message } if message.contains("event 1")
+    ));
+
+    // Back should be event 10000
+    assert!(matches!(
+        &new_state.events.back().unwrap().kind,
+        HookEventKind::Notification { message } if message.contains("event 10000")
+    ));
+}
+
+#[test]
+fn agent_started_creates_new_agent() {
+    let state = AppState::new();
+    let new_state = update(state, AppEvent::AgentStarted("a01".into()));
+
+    assert_eq!(new_state.agents.len(), 1);
+    let agent = new_state.agents.get("a01").unwrap();
+    assert_eq!(agent.id, "a01");
+    assert!(agent.finished_at.is_none());
+    assert!(agent.messages.is_empty());
+}
+
+#[test]
+fn agent_started_uses_current_timestamp() {
+    let before = Utc::now();
+    let state = AppState::new();
+    let new_state = update(state, AppEvent::AgentStarted("a01".into()));
+    let after = Utc::now();
+
+    let agent = new_state.agents.get("a01").unwrap();
+    assert!(agent.started_at >= before);
+    assert!(agent.started_at <= after);
+}
+
+#[test]
+fn agent_stopped_sets_finished_timestamp() {
+    let mut state = AppState::new();
+    state
+        .agents
+        .insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+
+    let before = Utc::now();
+    let new_state = update(state, AppEvent::AgentStopped("a01".into()));
+    let after = Utc::now();
+
+    let agent = new_state.agents.get("a01").unwrap();
+    assert!(agent.finished_at.is_some());
+    let finished = agent.finished_at.unwrap();
+    assert!(finished >= before);
+    assert!(finished <= after);
+}
+
+#[test]
+fn key_event_no_op_until_t6() {
+    let state = AppState::new();
+    let original_view = state.view.clone();
+
+    let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('q'));
+    let new_state = update(state, AppEvent::Key(key));
+
+    // State should be unchanged
+    assert_eq!(new_state.view, original_view);
+    assert_eq!(new_state.agents.len(), 0);
+}
+
+#[test]
+fn tick_event_is_passive() {
+    let mut state = AppState::new();
+    state.events.push_back(HookEvent::new(
+        Utc::now(),
+        HookEventKind::Notification {
+            message: "test".into(),
+        },
+    ));
+
+    let original_len = state.events.len();
+    let new_state = update(state, AppEvent::Tick);
+
+    assert_eq!(new_state.events.len(), original_len);
+}
+
+#[test]
+fn parse_error_adds_formatted_message() {
+    let state = AppState::new();
+    let new_state = update(
+        state,
+        AppEvent::ParseError {
+            source: "task_graph.json".into(),
+            error: "unexpected token at line 5".into(),
+        },
+    );
+
+    assert_eq!(new_state.errors.len(), 1);
+    assert_eq!(
+        new_state.errors.front().unwrap(),
+        "task_graph.json: unexpected token at line 5"
+    );
+}
+
+#[test]
+fn parse_error_evicts_oldest_at_capacity() {
+    let mut state = AppState::new();
+
+    // Fill to exactly 100
+    for i in 0..100 {
+        state.errors.push_back(format!("error {}", i));
+    }
+
+    assert_eq!(state.errors.front().unwrap(), "error 0");
+
+    // Add one more
+    let new_state = update(
+        state,
+        AppEvent::ParseError {
+            source: "file".into(),
+            error: "error 100".into(),
+        },
+    );
+
+    assert_eq!(new_state.errors.len(), 100);
+    assert_eq!(new_state.errors.front().unwrap(), "error 1");
+    assert!(new_state.errors.back().unwrap().contains("error 100"));
+}
+
+#[test]
+fn session_loaded_sets_active_session() {
+    let state = AppState::new();
+    let meta = SessionMeta::new("session-123".into(), Utc::now(), "/home/user/proj".into())
+        .with_status(SessionStatus::Completed);
+
+    let archive = SessionArchive::new(meta.clone());
+    let new_state = update(state, AppEvent::SessionLoaded(archive));
+
+    assert!(new_state.active_session.is_some());
+    assert_eq!(new_state.active_session.unwrap().id, "session-123");
+}
+
+#[test]
+fn session_loaded_sets_task_graph() {
+    let state = AppState::new();
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let graph = TaskGraph {
+        waves: vec![],
+        total_tasks: 10,
+        completed_tasks: 5,
+    };
+
+    let archive = SessionArchive::new(meta).with_task_graph(graph);
+    let new_state = update(state, AppEvent::SessionLoaded(archive));
+
+    assert!(new_state.task_graph.is_some());
+    assert_eq!(new_state.task_graph.unwrap().total_tasks, 10);
+}
+
+#[test]
+fn session_loaded_sets_agents() {
+    let state = AppState::new();
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+
+    let mut agents = BTreeMap::new();
+    agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+    agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+
+    let archive = SessionArchive::new(meta).with_agents(agents);
+    let new_state = update(state, AppEvent::SessionLoaded(archive));
+
+    assert_eq!(new_state.agents.len(), 2);
+    assert!(new_state.agents.contains_key("a01"));
+    assert!(new_state.agents.contains_key("a02"));
+}
+
+#[test]
+fn session_loaded_converts_events_to_deque() {
+    let state = AppState::new();
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+
+    let events = vec![
+        HookEvent::new(Utc::now(), HookEventKind::SessionStart),
+        HookEvent::new(Utc::now(), HookEventKind::SessionEnd),
+    ];
+
+    let archive = SessionArchive::new(meta).with_events(events);
+    let new_state = update(state, AppEvent::SessionLoaded(archive));
+
+    assert_eq!(new_state.events.len(), 2);
+}
+
+#[test]
+fn session_loaded_clears_previous_events() {
+    let mut state = AppState::new();
+    state.events.push_back(HookEvent::new(
+        Utc::now(),
+        HookEventKind::Notification {
+            message: "old".into(),
+        },
+    ));
+
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let archive = SessionArchive::new(meta);
+
+    let new_state = update(state, AppEvent::SessionLoaded(archive));
+
+    // Events should be cleared
+    assert_eq!(new_state.events.len(), 0);
+}
+
+#[test]
+fn session_list_refreshed_updates_sessions() {
+    let state = AppState::new();
+    let sessions = vec![
+        SessionMeta::new("s1".into(), Utc::now(), "/proj1".into()),
+        SessionMeta::new("s2".into(), Utc::now(), "/proj2".into()),
+        SessionMeta::new("s3".into(), Utc::now(), "/proj3".into()),
+    ];
+
+    let new_state = update(state, AppEvent::SessionListRefreshed(sessions.clone()));
+
+    assert_eq!(new_state.sessions.len(), 3);
+    assert_eq!(new_state.sessions[0].id, "s1");
+    assert_eq!(new_state.sessions[2].id, "s3");
+}
+
+#[test]
+fn session_list_refreshed_replaces_existing_list() {
+    let mut state = AppState::new();
+    state
+        .sessions
+        .push(SessionMeta::new("old".into(), Utc::now(), "/old".into()));
+
+    let new_sessions = vec![SessionMeta::new("new".into(), Utc::now(), "/new".into())];
+
+    let new_state = update(state, AppEvent::SessionListRefreshed(new_sessions));
+
+    assert_eq!(new_state.sessions.len(), 1);
+    assert_eq!(new_state.sessions[0].id, "new");
+}
+
+#[test]
+fn multiple_updates_compose_correctly() {
+    let state = AppState::new();
+
+    // Start agent
+    let state = update(state, AppEvent::AgentStarted("a01".into()));
+    assert_eq!(state.agents.len(), 1);
+
+    // Update transcript
+    let messages = vec![AgentMessage::reasoning(Utc::now(), "thinking".into())];
+    let state = update(
+        state,
+        AppEvent::TranscriptUpdated {
+            agent_id: "a01".into(),
+            messages,
+        },
+    );
+    assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+
+    // Add event
+    let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
+    let state = update(state, AppEvent::HookEventReceived(event));
+    assert_eq!(state.events.len(), 1);
+
+    // Stop agent
+    let state = update(state, AppEvent::AgentStopped("a01".into()));
+    assert!(state.agents.get("a01").unwrap().finished_at.is_some());
+
+    // All state should be preserved
+    assert_eq!(state.agents.len(), 1);
+    assert_eq!(state.events.len(), 1);
+    assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+}
+
+#[test]
+fn update_preserves_unmodified_fields() {
+    let mut state = AppState::new();
+    state.view = ViewState::Sessions;
+    state.auto_scroll = false;
+    state.show_help = true;
+
+    let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
+    let new_state = update(state, AppEvent::HookEventReceived(event));
+
+    // These fields should be preserved
+    assert_eq!(new_state.view, ViewState::Sessions);
+    assert_eq!(new_state.auto_scroll, false);
+    assert_eq!(new_state.show_help, true);
+}
+
+#[test]
+fn property_event_buffer_never_exceeds_10000() {
+    let mut state = AppState::new();
+
+    // Stress test: add way more than capacity
+    for i in 0..20_000 {
+        let event = HookEvent::new(
+            Utc::now(),
+            HookEventKind::Notification {
+                message: format!("{}", i),
+            },
+        );
+        state = update(state, AppEvent::HookEventReceived(event));
+        assert!(state.events.len() <= 10_000);
+    }
+
+    assert_eq!(state.events.len(), 10_000);
+}
+
+#[test]
+fn property_error_buffer_never_exceeds_100() {
+    let mut state = AppState::new();
+
+    for i in 0..500 {
+        state = update(
+            state,
+            AppEvent::ParseError {
+                source: "test".into(),
+                error: format!("error {}", i),
+            },
+        );
+        assert!(state.errors.len() <= 100);
+    }
+
+    assert_eq!(state.errors.len(), 100);
+}
+
+#[test]
+fn property_update_never_panics() {
+    let mut state = AppState::new();
+
+    // Throw a variety of events at it
+    let events: Vec<AppEvent> = vec![
+        AppEvent::AgentStarted("a01".into()),
+        AppEvent::AgentStopped("nonexistent".into()),
+        AppEvent::TranscriptUpdated {
+            agent_id: "nonexistent".into(),
+            messages: vec![],
+        },
+        AppEvent::HookEventReceived(HookEvent::new(Utc::now(), HookEventKind::SessionStart)),
+        AppEvent::ParseError {
+            source: "test".into(),
+            error: "error".into(),
+        },
+        AppEvent::Tick,
+        AppEvent::Key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('x'),
+        )),
+        AppEvent::SessionListRefreshed(vec![]),
+    ];
+
+    for event in events {
+        state = update(state, event); // Should never panic
+    }
+}

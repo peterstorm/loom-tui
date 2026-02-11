@@ -1,0 +1,68 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "description": "Create project scaffold",
+      "agent": "scaffold-agent",
+      "wave": 1,
+      "depends_on": [],
+      "status": "completed",
+      "files_modified": [
+        "Cargo.toml",
+        "src/main.rs",
+        "src/lib.rs"
+      ],
+      "tests_passed": true
+    },
+    {
+      "id": "T2",
+      "description": "Implement domain models",
+      "agent": "code-implementer-agent",
+      "wave": 1,
+      "depends_on": [],
+      "status": "running",
+      "files_modified": [
+        "src/model/mod.rs",
+        "src/model/task.rs"
+      ],
+      "tests_passed": null
+    },
+    {
+      "id": "T3",
+      "description": "Implement AppEvent and AppState",
+      "agent": "code-implementer-agent",
+      "wave": 1,
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T4",
+      "description": "Implement update logic",
+      "wave": 2,
+      "depends_on": ["T2", "T3"],
+      "status": "pending"
+    },
+    {
+      "id": "T5",
+      "description": "Broken task for testing",
+      "wave": 2,
+      "depends_on": ["T2"],
+      "status": "failed",
+      "reason": "Compilation error",
+      "retry_count": 2
+    }
+  ],
+  "wave_gates": {
+    "1": {
+      "impl_complete": false,
+      "tests_passed": null,
+      "reviews_complete": false
+    },
+    "2": {
+      "impl_complete": false,
+      "tests_passed": null,
+      "reviews_complete": false
+    }
+  },
+  "current_wave": 1
+}

@@ -137,10 +137,14 @@ case "$HOOK_NAME" in
       >> "$EVENT_FILE"
     ;;
   session-start|SessionStart)
+    CWD=$(echo "$HOOK_JSON" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+    TRANSCRIPT_PATH=$(echo "$HOOK_JSON" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
-      '{timestamp: $ts, event: "session_start", session_id: (if $sid == "" then null else $sid end)}' \
+      --arg cwd "$CWD" \
+      --arg tp "$TRANSCRIPT_PATH" \
+      '{timestamp: $ts, event: "session_start", session_id: (if $sid == "" then null else $sid end), cwd: (if $cwd == "" then null else $cwd end), transcript_path: (if $tp == "" then null else $tp end)}' \
       >> "$EVENT_FILE"
     ;;
   session-end|SessionEnd)

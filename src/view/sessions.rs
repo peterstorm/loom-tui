@@ -65,18 +65,11 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
                 SessionStatus::Cancelled => Theme::MUTED_TEXT,
             };
 
-            // For active session, show live counts from current state
-            let (agent_count, task_count, duration) = if session.status == SessionStatus::Active {
-                let agents = state.agents.len() as u32;
-                let tasks = state.task_graph.as_ref()
-                    .map(|g| g.total_tasks as u32)
-                    .unwrap_or(0);
-                let dur = (chrono::Utc::now() - session.timestamp)
-                    .to_std()
-                    .ok();
-                (agents, tasks, dur)
+            // All counts tracked per-session; active sessions get live duration
+            let duration = if session.status == SessionStatus::Active {
+                (chrono::Utc::now() - session.timestamp).to_std().ok()
             } else {
-                (session.agent_count, session.task_count, session.duration)
+                session.duration
             };
 
             // Show loading indicator for session being loaded
@@ -94,8 +87,8 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
                 session.timestamp.format("%Y-%m-%d %H:%M").to_string(),
                 format_duration(duration),
                 status_str,
-                agent_count.to_string(),
-                task_count.to_string(),
+                session.agent_count.to_string(),
+                session.task_count.to_string(),
                 session.project_path.clone(),
             ])
             .style(style)

@@ -6,31 +6,40 @@ use crate::model::{Agent, AgentMessage, ArchivedSession, HookEventKind, MessageK
 use crate::session;
 use std::time::Duration;
 
-/// Pure update function following Elm Architecture.
-/// Takes current state and event, returns new state.
-/// No I/O, no side effects - fully deterministic and unit testable.
-pub fn update(mut state: AppState, event: AppEvent) -> AppState {
+/// Update function following Elm Architecture.
+/// Mutates state in place — no cloning needed.
+pub fn update(state: &mut AppState, event: AppEvent) {
+    let mut agents_changed = false;
+
     match event {
         AppEvent::TaskGraphUpdated(graph) => {
+            let total = graph.total_tasks as u32;
             state.task_graph = Some(graph);
-            state
+            // Update task count on all active sessions (task graph is project-level)
+            for meta in state.active_sessions.values_mut() {
+                meta.task_count = total;
+            }
         }
 
         AppEvent::TranscriptUpdated { agent_id, messages } => {
             state.agents.entry(agent_id).and_modify(|agent| {
                 agent.messages = messages;
             });
-            state
         }
 
         AppEvent::HookEventReceived(event) => {
-            // Derive agent lifecycle and tool calls from hook events
+            // Derive agent lifecycle and tool calls from hook events.
+            // Only attribute orphan events to an agent if they share the same session_id,
+            // so direct tool calls from the main process don't bleed into subagent activity.
+            let event_session = event.session_id.as_deref();
             let agent_id = event.agent_id.clone().or_else(|| {
-                // Heuristic: attribute to most recently started active agent
                 state
                     .agents
                     .iter()
-                    .filter(|(_, a)| a.finished_at.is_none())
+                    .filter(|(_, a)| {
+                        a.finished_at.is_none()
+                            && a.session_id.as_deref() == event_session
+                    })
                     .max_by_key(|(_, a)| a.started_at)
                     .map(|(id, _)| id.clone())
             });
@@ -41,13 +50,11 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                     ref task_description,
                 } => {
                     if let Some(ref id) = event.agent_id {
-                        // agent_type: short label (e.g. "Explore")
-                        // task_description: the actual prompt/task text
-                        // Fallback: if only task_description provided, use it as agent_type too
                         let resolved_type = agent_type
                             .clone()
                             .or_else(|| task_description.clone());
                         let desc = task_description.clone();
+                        let is_new = !state.agents.contains_key(id);
                         state
                             .agents
                             .entry(id.clone())
@@ -63,8 +70,19 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                                 let mut a = Agent::new(id.clone(), event.timestamp);
                                 a.agent_type = resolved_type;
                                 a.task_description = desc;
+                                a.session_id = event.session_id.clone();
                                 a
                             });
+                        agents_changed = true;
+
+                        // Increment per-session agent count
+                        if is_new {
+                            if let Some(ref sid) = event.session_id {
+                                if let Some(meta) = state.active_sessions.get_mut(sid) {
+                                    meta.agent_count += 1;
+                                }
+                            }
+                        }
                     }
                 }
                 HookEventKind::SubagentStop => {
@@ -74,6 +92,7 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                                 agent.finished_at = Some(event.timestamp);
                             }
                         });
+                        agents_changed = true;
                     }
                 }
                 HookEventKind::PreToolUse {
@@ -96,7 +115,6 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                 } => {
                     if let Some(ref id) = agent_id {
                         state.agents.entry(id.clone()).and_modify(|agent| {
-                            // Update last matching pending tool call
                             if let Some(msg) = agent.messages.iter_mut().rev().find(|m| {
                                 matches!(&m.kind, MessageKind::Tool(tc) if tc.tool_name == *tool_name && tc.success.is_none())
                             }) {
@@ -115,17 +133,22 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                     let session_id = event.session_id.clone()
                         .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")));
 
-                    // Extract project path from raw event cwd, fall back to TUI project
                     let project_path = event.raw.get("cwd")
                         .and_then(|v| v.as_str())
                         .map(String::from)
                         .unwrap_or_else(|| state.project_path.clone());
 
-                    let meta = SessionMeta::new(
+                    let transcript_path = event.raw.get("transcript_path")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(|| derive_transcript_path(&project_path, &session_id));
+
+                    let mut meta = SessionMeta::new(
                         session_id.clone(),
                         event.timestamp,
                         project_path,
                     );
+                    meta.transcript_path = transcript_path;
                     state.active_sessions.insert(session_id, meta);
                 }
                 HookEventKind::SessionEnd => {
@@ -133,16 +156,12 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                         .unwrap_or_default();
                     if let Some(mut meta) = state.active_sessions.remove(&session_id) {
                         meta.status = SessionStatus::Completed;
-                        meta.agent_count = state.agents.len() as u32;
-                        meta.event_count = state.events.len() as u32;
-                        meta.task_count = state.task_graph.as_ref()
-                            .map(|g| g.total_tasks as u32)
-                            .unwrap_or(0);
+                        // agent_count, event_count, task_count already tracked incrementally
                         let dur = (event.timestamp - meta.timestamp)
                             .to_std()
                             .unwrap_or_default();
                         meta.duration = Some(dur);
-                        let archive = session::build_archive(&state, meta.clone());
+                        let archive = session::build_archive(state, meta.clone());
                         let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
                             .with_data(archive);
                         state.sessions.insert(0, archived);
@@ -157,50 +176,58 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                 enriched.agent_id = agent_id;
             }
 
+            // Increment per-session event count + backfill project_path from cwd
+            if let Some(ref sid) = enriched.session_id {
+                if let Some(meta) = state.active_sessions.get_mut(sid) {
+                    meta.event_count += 1;
+                    // Backfill project_path from cwd if still default
+                    if meta.project_path == state.project_path || meta.project_path.is_empty() {
+                        if let Some(cwd) = enriched.raw.get("cwd").and_then(|v| v.as_str()) {
+                            if !cwd.is_empty() {
+                                meta.project_path = cwd.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+
             // Ring buffer eviction: pop oldest if at capacity
             if state.events.len() >= 10_000 {
                 state.events.pop_front();
             }
             state.events.push_back(enriched);
-            state
         }
 
         AppEvent::AgentStarted(agent_id) => {
             let agent = Agent::new(agent_id.clone(), Utc::now());
             state.agents.insert(agent_id, agent);
-            state
+            agents_changed = true;
         }
 
         AppEvent::AgentStopped(agent_id) => {
             state.agents.entry(agent_id).and_modify(|agent| {
                 agent.finished_at = Some(Utc::now());
             });
-            state
+            agents_changed = true;
         }
 
         AppEvent::Key(key) => {
-            // Delegate to navigation handler
-            handle_key(state, key)
+            handle_key(state, key);
         }
 
         AppEvent::Tick => {
             // Elapsed time computed in view from started_at
-            // Tick is passive - no state changes needed
-            state
         }
 
         AppEvent::ParseError { source, error } => {
-            // Ring buffer eviction for errors: pop oldest if at capacity
             if state.errors.len() >= 100 {
                 state.errors.pop_front();
             }
             let error_msg = format!("{}: {}", source, error);
             state.errors.push_back(error_msg);
-            state
         }
 
         AppEvent::SessionLoaded(archive) => {
-            // Find matching ArchivedSession by meta.id and populate data
             if let Some(session) = state.sessions.iter_mut().find(|s| s.meta.id == archive.meta.id) {
                 session.data = Some(archive);
             }
@@ -209,7 +236,6 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
             state.scroll_offsets.session_detail_left = 0;
             state.scroll_offsets.session_detail_right = 0;
             state.focus = crate::app::PanelFocus::Left;
-            state
         }
 
         AppEvent::SessionListRefreshed(archives) => {
@@ -220,7 +246,6 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                     ArchivedSession::new(meta, std::path::PathBuf::new()).with_data(a)
                 })
                 .collect();
-            state
         }
 
         AppEvent::SessionMetasLoaded(metas) => {
@@ -228,13 +253,32 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                 .into_iter()
                 .map(|(path, meta)| ArchivedSession::new(meta, path))
                 .collect();
-            state
         }
 
         AppEvent::LoadSessionRequested(idx) => {
             state.loading_session = Some(idx);
-            state
         }
+    }
+
+    if agents_changed {
+        state.recompute_sorted_keys();
+    }
+}
+
+/// Derive transcript path from cwd + session_id when not provided by hook.
+/// Claude Code stores transcripts at ~/.claude/projects/{project_hash}/{session_id}.jsonl
+/// where project_hash is the cwd with `/` replaced by `-`.
+fn derive_transcript_path(cwd: &str, session_id: &str) -> Option<String> {
+    if cwd.is_empty() || session_id.is_empty() {
+        return None;
+    }
+    let project_hash = cwd.replace('/', "-");
+    let home = std::env::var("HOME").ok()?;
+    let path = format!("{}/.claude/projects/{}/{}.jsonl", home, project_hash, session_id);
+    if std::path::Path::new(&path).exists() {
+        Some(path)
+    } else {
+        None
     }
 }
 
@@ -249,7 +293,7 @@ mod tests {
 
     #[test]
     fn update_task_graph() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let graph = TaskGraph {
             waves: vec![Wave {
                 number: 1,
@@ -259,10 +303,10 @@ mod tests {
             completed_tasks: 0,
         };
 
-        let new_state = update(state, AppEvent::TaskGraphUpdated(graph.clone()));
+        update(&mut state, AppEvent::TaskGraphUpdated(graph.clone()));
 
-        assert!(new_state.task_graph.is_some());
-        assert_eq!(new_state.task_graph.unwrap().waves.len(), 1);
+        assert!(state.task_graph.is_some());
+        assert_eq!(state.task_graph.unwrap().waves.len(), 1);
     }
 
     #[test]
@@ -276,41 +320,39 @@ mod tests {
             "test reasoning".into(),
         )];
 
-        let new_state = update(
-            state,
+        update(
+            &mut state,
             AppEvent::TranscriptUpdated {
                 agent_id: "a01".into(),
                 messages: messages.clone(),
             },
         );
 
-        assert_eq!(new_state.agents.get("a01").unwrap().messages.len(), 1);
+        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
     }
 
     #[test]
     fn update_transcript_nonexistent_agent_no_panic() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let messages = vec![AgentMessage::reasoning(
             Utc::now(),
             "test reasoning".into(),
         )];
 
-        let new_state = update(
-            state,
+        update(
+            &mut state,
             AppEvent::TranscriptUpdated {
                 agent_id: "nonexistent".into(),
                 messages,
             },
         );
 
-        // Should not panic, just be a no-op since agent doesn't exist
-        assert!(new_state.agents.is_empty());
+        assert!(state.agents.is_empty());
     }
 
     #[test]
     fn hook_event_ring_buffer_eviction() {
         let mut state = AppState::new();
-        // Fill to capacity
         for i in 0..10_000 {
             let event = HookEvent::new(
                 Utc::now(),
@@ -321,7 +363,6 @@ mod tests {
             state.events.push_back(event);
         }
 
-        // Add one more - should evict oldest
         let new_event = HookEvent::new(
             Utc::now(),
             HookEventKind::Notification {
@@ -329,34 +370,33 @@ mod tests {
             },
         );
 
-        let new_state = update(state, AppEvent::HookEventReceived(new_event.clone()));
+        update(&mut state, AppEvent::HookEventReceived(new_event));
 
-        assert_eq!(new_state.events.len(), 10_000);
-        // Last event should be the newest one
+        assert_eq!(state.events.len(), 10_000);
         assert!(matches!(
-            &new_state.events.back().unwrap().kind,
+            &state.events.back().unwrap().kind,
             HookEventKind::Notification { message } if message == "newest"
         ));
     }
 
     #[test]
     fn hook_event_below_capacity_no_eviction() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
 
-        let new_state = update(state, AppEvent::HookEventReceived(event));
+        update(&mut state, AppEvent::HookEventReceived(event));
 
-        assert_eq!(new_state.events.len(), 1);
+        assert_eq!(state.events.len(), 1);
     }
 
     #[test]
     fn agent_started_inserts_new_agent() {
-        let state = AppState::new();
-        let new_state = update(state, AppEvent::AgentStarted("a01".into()));
+        let mut state = AppState::new();
+        update(&mut state, AppEvent::AgentStarted("a01".into()));
 
-        assert_eq!(new_state.agents.len(), 1);
-        assert!(new_state.agents.contains_key("a01"));
-        assert!(new_state.agents.get("a01").unwrap().finished_at.is_none());
+        assert_eq!(state.agents.len(), 1);
+        assert!(state.agents.contains_key("a01"));
+        assert!(state.agents.get("a01").unwrap().finished_at.is_none());
     }
 
     #[test]
@@ -365,81 +405,70 @@ mod tests {
         let agent = Agent::new("a01".into(), Utc::now());
         state.agents.insert("a01".into(), agent);
 
-        let new_state = update(state, AppEvent::AgentStopped("a01".into()));
+        update(&mut state, AppEvent::AgentStopped("a01".into()));
 
-        assert!(new_state.agents.get("a01").unwrap().finished_at.is_some());
+        assert!(state.agents.get("a01").unwrap().finished_at.is_some());
     }
 
     #[test]
     fn agent_stopped_nonexistent_no_panic() {
-        let state = AppState::new();
-        let new_state = update(state, AppEvent::AgentStopped("nonexistent".into()));
+        let mut state = AppState::new();
+        update(&mut state, AppEvent::AgentStopped("nonexistent".into()));
 
-        // Should not panic
-        assert!(new_state.agents.is_empty());
+        assert!(state.agents.is_empty());
     }
 
     #[test]
     fn key_event_delegates_to_navigation() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('1'));
 
-        let new_state = update(state, AppEvent::Key(key));
+        update(&mut state, AppEvent::Key(key));
 
-        // Key events are delegated to handle_key in navigation module
-        // '1' switches to dashboard (which is already the default, so unchanged)
-        assert!(matches!(new_state.view, crate::app::ViewState::Dashboard));
+        assert!(matches!(state.view, crate::app::ViewState::Dashboard));
     }
 
     #[test]
     fn tick_event_is_noop() {
-        let state = AppState::new();
-        let new_state = update(state.clone(), AppEvent::Tick);
+        let mut state = AppState::new();
+        let initial_len = state.events.len();
+        update(&mut state, AppEvent::Tick);
 
-        // Tick doesn't change state - elapsed time computed in view
-        assert_eq!(new_state.events.len(), state.events.len());
+        assert_eq!(state.events.len(), initial_len);
     }
 
     #[test]
     fn parse_error_ring_buffer_eviction() {
         let mut state = AppState::new();
-        // Fill to capacity
         for i in 0..100 {
             state.errors.push_back(format!("error {}", i));
         }
 
-        let new_state = update(
-            state,
+        update(
+            &mut state,
             AppEvent::ParseError {
                 source: "test".into(),
                 error: "newest error".into(),
             },
         );
 
-        assert_eq!(new_state.errors.len(), 100);
-        assert!(new_state
-            .errors
-            .back()
-            .unwrap()
-            .contains("newest error"));
+        assert_eq!(state.errors.len(), 100);
+        assert!(state.errors.back().unwrap().contains("newest error"));
     }
 
     #[test]
     fn parse_error_below_capacity_no_eviction() {
-        let state = AppState::new();
-        let new_state = update(
-            state,
+        let mut state = AppState::new();
+        update(
+            &mut state,
             AppEvent::ParseError {
                 source: "file.json".into(),
                 error: "invalid JSON".into(),
             },
         );
 
-        assert_eq!(new_state.errors.len(), 1);
-        assert_eq!(
-            new_state.errors.front().unwrap(),
-            "file.json: invalid JSON"
-        );
+        assert_eq!(state.errors.len(), 1);
+        assert_eq!(state.errors.front().unwrap(), "file.json: invalid JSON");
     }
 
     #[test]
@@ -457,7 +486,6 @@ mod tests {
 
         let events = vec![HookEvent::new(Utc::now(), HookEventKind::SessionStart)];
 
-        // Pre-populate with meta-only entry
         state.sessions.push(crate::model::ArchivedSession::new(
             meta.clone(),
             std::path::PathBuf::new(),
@@ -469,14 +497,14 @@ mod tests {
             .with_agents(agents)
             .with_events(events);
 
-        let new_state = update(state, AppEvent::SessionLoaded(archive));
+        update(&mut state, AppEvent::SessionLoaded(archive));
 
-        let data = new_state.sessions[0].data.as_ref().unwrap();
+        let data = state.sessions[0].data.as_ref().unwrap();
         assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 5);
         assert_eq!(data.agents.len(), 1);
         assert_eq!(data.events.len(), 1);
-        assert!(new_state.loading_session.is_none());
-        assert!(matches!(new_state.view, ViewState::SessionDetail));
+        assert!(state.loading_session.is_none());
+        assert!(matches!(state.view, ViewState::SessionDetail));
     }
 
     #[test]
@@ -490,32 +518,31 @@ mod tests {
         state.loading_session = Some(0);
 
         let archive = SessionArchive::new(meta);
-        let new_state = update(state, AppEvent::SessionLoaded(archive));
+        update(&mut state, AppEvent::SessionLoaded(archive));
 
-        assert!(new_state.loading_session.is_none());
-        assert!(matches!(new_state.view, ViewState::SessionDetail));
+        assert!(state.loading_session.is_none());
+        assert!(matches!(state.view, ViewState::SessionDetail));
     }
 
     #[test]
     fn session_list_refreshed() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let sessions = vec![
             SessionArchive::new(SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
             SessionArchive::new(SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
         ];
 
-        let new_state = update(state, AppEvent::SessionListRefreshed(sessions.clone()));
+        update(&mut state, AppEvent::SessionListRefreshed(sessions));
 
-        assert_eq!(new_state.sessions.len(), 2);
-        assert_eq!(new_state.sessions[0].meta.id, "s1");
-        assert_eq!(new_state.sessions[1].meta.id, "s2");
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.sessions[0].meta.id, "s1");
+        assert_eq!(state.sessions[1].meta.id, "s2");
     }
 
     #[test]
     fn ring_buffer_property_never_exceeds_capacity() {
         let mut state = AppState::new();
 
-        // Add 15,000 events (50% over capacity)
         for i in 0..15_000 {
             let event = HookEvent::new(
                 Utc::now(),
@@ -523,7 +550,7 @@ mod tests {
                     message: format!("{}", i),
                 },
             );
-            state = update(state, AppEvent::HookEventReceived(event));
+            update(&mut state, AppEvent::HookEventReceived(event));
         }
 
         assert_eq!(state.events.len(), 10_000);
@@ -533,10 +560,9 @@ mod tests {
     fn error_ring_buffer_property_never_exceeds_capacity() {
         let mut state = AppState::new();
 
-        // Add 200 errors (100% over capacity)
         for i in 0..200 {
-            state = update(
-                state,
+            update(
+                &mut state,
                 AppEvent::ParseError {
                     source: "test".into(),
                     error: format!("error {}", i),
@@ -549,49 +575,48 @@ mod tests {
 
     #[test]
     fn hook_subagent_start_creates_agent() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let event = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
             .with_agent("a01".into());
 
-        let new_state = update(state, AppEvent::HookEventReceived(event));
+        update(&mut state, AppEvent::HookEventReceived(event));
 
-        assert_eq!(new_state.agents.len(), 1);
-        assert!(new_state.agents.get("a01").unwrap().finished_at.is_none());
+        assert_eq!(state.agents.len(), 1);
+        assert!(state.agents.get("a01").unwrap().finished_at.is_none());
     }
 
     #[test]
     fn hook_subagent_stop_finishes_agent() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
             .with_agent("a01".into());
         let stop =
             HookEvent::new(Utc::now(), HookEventKind::subagent_stop()).with_agent("a01".into());
 
-        let state = update(state, AppEvent::HookEventReceived(start));
-        let state = update(state, AppEvent::HookEventReceived(stop));
+        update(&mut state, AppEvent::HookEventReceived(start));
+        update(&mut state, AppEvent::HookEventReceived(stop));
 
         assert!(state.agents.get("a01").unwrap().finished_at.is_some());
     }
 
     #[test]
     fn hook_subagent_start_idempotent() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let ts = Utc::now();
         let e1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
             .with_agent("a01".into());
         let e2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
             .with_agent("a01".into());
 
-        let state = update(state, AppEvent::HookEventReceived(e1));
-        let state = update(state, AppEvent::HookEventReceived(e2));
+        update(&mut state, AppEvent::HookEventReceived(e1));
+        update(&mut state, AppEvent::HookEventReceived(e2));
 
-        // Should still be 1 agent, not replaced
         assert_eq!(state.agents.len(), 1);
     }
 
     #[test]
     fn hook_pre_tool_use_with_agent_id() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
             .with_agent("a01".into());
         let tool = HookEvent::new(
@@ -600,15 +625,15 @@ mod tests {
         )
         .with_agent("a01".into());
 
-        let state = update(state, AppEvent::HookEventReceived(start));
-        let state = update(state, AppEvent::HookEventReceived(tool));
+        update(&mut state, AppEvent::HookEventReceived(start));
+        update(&mut state, AppEvent::HookEventReceived(tool));
 
         assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
         match &state.agents.get("a01").unwrap().messages[0].kind {
             MessageKind::Tool(tc) => {
                 assert_eq!(tc.tool_name, "Read");
                 assert_eq!(tc.input_summary, "file.rs");
-                assert!(tc.success.is_none()); // pending
+                assert!(tc.success.is_none());
             }
             _ => panic!("Expected Tool message"),
         }
@@ -616,7 +641,7 @@ mod tests {
 
     #[test]
     fn hook_post_tool_use_updates_pending() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
             .with_agent("a01".into());
         let pre = HookEvent::new(
@@ -630,9 +655,9 @@ mod tests {
         )
         .with_agent("a01".into());
 
-        let state = update(state, AppEvent::HookEventReceived(start));
-        let state = update(state, AppEvent::HookEventReceived(pre));
-        let state = update(state, AppEvent::HookEventReceived(post));
+        update(&mut state, AppEvent::HookEventReceived(start));
+        update(&mut state, AppEvent::HookEventReceived(pre));
+        update(&mut state, AppEvent::HookEventReceived(post));
 
         let msg = &state.agents.get("a01").unwrap().messages[0];
         match &msg.kind {
@@ -650,55 +675,52 @@ mod tests {
 
     #[test]
     fn hook_tool_use_attributed_to_single_active_agent() {
-        let state = AppState::new();
-        // Start an agent
+        let mut state = AppState::new();
         let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
             .with_agent("a01".into());
-        // Tool use WITHOUT agent_id (like real Claude Code hook events)
         let tool = HookEvent::new(
             Utc::now(),
             HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
         );
 
-        let state = update(state, AppEvent::HookEventReceived(start));
-        let state = update(state, AppEvent::HookEventReceived(tool));
+        update(&mut state, AppEvent::HookEventReceived(start));
+        update(&mut state, AppEvent::HookEventReceived(tool));
 
-        // Should be attributed to a01 (only active agent)
         assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
     }
 
     #[test]
-    fn hook_tool_use_not_attributed_with_multiple_active_agents() {
-        let state = AppState::new();
-        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+    fn hook_tool_use_attributed_to_most_recent_agent() {
+        let mut state = AppState::new();
+        let t1 = Utc::now();
+        let t2 = t1 + chrono::Duration::seconds(1);
+        let s1 = HookEvent::new(t1, HookEventKind::subagent_start(None))
             .with_agent("a01".into());
-        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+        let s2 = HookEvent::new(t2, HookEventKind::subagent_start(None))
             .with_agent("a02".into());
-        // Tool use without agent_id
         let tool = HookEvent::new(
             Utc::now(),
             HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
         );
 
-        let state = update(state, AppEvent::HookEventReceived(s1));
-        let state = update(state, AppEvent::HookEventReceived(s2));
-        let state = update(state, AppEvent::HookEventReceived(tool));
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+        update(&mut state, AppEvent::HookEventReceived(tool));
 
-        // Can't attribute — both agents should have 0 messages
         assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
-        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 0);
+        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 1);
     }
 
     #[test]
     fn concurrent_session_starts_both_tracked() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
             .with_session("s1".into());
         let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
             .with_session("s2".into());
 
-        let state = update(state, AppEvent::HookEventReceived(e1));
-        let state = update(state, AppEvent::HookEventReceived(e2));
+        update(&mut state, AppEvent::HookEventReceived(e1));
+        update(&mut state, AppEvent::HookEventReceived(e2));
 
         assert_eq!(state.active_sessions.len(), 2);
         assert!(state.active_sessions.contains_key("s1"));
@@ -707,7 +729,7 @@ mod tests {
 
     #[test]
     fn session_end_removes_correct_session() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
             .with_session("s1".into());
         let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
@@ -715,14 +737,13 @@ mod tests {
         let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
             .with_session("s1".into());
 
-        let state = update(state, AppEvent::HookEventReceived(e1));
-        let state = update(state, AppEvent::HookEventReceived(e2));
-        let state = update(state, AppEvent::HookEventReceived(end));
+        update(&mut state, AppEvent::HookEventReceived(e1));
+        update(&mut state, AppEvent::HookEventReceived(e2));
+        update(&mut state, AppEvent::HookEventReceived(end));
 
         assert_eq!(state.active_sessions.len(), 1);
         assert!(!state.active_sessions.contains_key("s1"));
         assert!(state.active_sessions.contains_key("s2"));
-        // s1 should be archived
         assert_eq!(state.sessions.len(), 1);
         assert_eq!(state.sessions[0].meta.id, "s1");
     }
@@ -738,25 +759,151 @@ mod tests {
 
         let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
             .with_session("s1".into());
-        let state = update(state, AppEvent::HookEventReceived(e));
+        update(&mut state, AppEvent::HookEventReceived(e));
 
-        // Live state should NOT be cleared
         assert_eq!(state.agents.len(), 1);
-        // events: 1 original + 1 SessionStart event
         assert_eq!(state.events.len(), 2);
     }
 
     #[test]
+    fn subagent_start_increments_per_session_agent_count() {
+        let mut state = AppState::new();
+        let s1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let s2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s2".into());
+
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+
+        // 2 agents in session s1
+        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into())
+            .with_session("s1".into());
+        let a2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a02".into())
+            .with_session("s1".into());
+        // 1 agent in session s2
+        let a3 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a03".into())
+            .with_session("s2".into());
+
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+        update(&mut state, AppEvent::HookEventReceived(a3));
+
+        assert_eq!(state.active_sessions["s1"].agent_count, 2);
+        assert_eq!(state.active_sessions["s2"].agent_count, 1);
+    }
+
+    #[test]
+    fn subagent_start_idempotent_does_not_double_count() {
+        let mut state = AppState::new();
+        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        update(&mut state, AppEvent::HookEventReceived(s));
+
+        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into())
+            .with_session("s1".into());
+        let a1_dup = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into())
+            .with_session("s1".into());
+
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a1_dup));
+
+        assert_eq!(state.active_sessions["s1"].agent_count, 1);
+    }
+
+    #[test]
+    fn session_end_preserves_per_session_agent_count() {
+        let mut state = AppState::new();
+        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into())
+            .with_session("s1".into());
+        let a2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a02".into())
+            .with_session("s1".into());
+        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
+            .with_session("s1".into());
+
+        update(&mut state, AppEvent::HookEventReceived(s));
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+        update(&mut state, AppEvent::HookEventReceived(end));
+
+        assert_eq!(state.sessions[0].meta.agent_count, 2);
+    }
+
+    #[test]
+    fn event_count_tracked_per_session() {
+        let mut state = AppState::new();
+        let s1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let s2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s2".into());
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+
+        // 3 events for s1, 1 for s2
+        for _ in 0..3 {
+            let e = HookEvent::new(Utc::now(), HookEventKind::notification("msg".into()))
+                .with_session("s1".into());
+            update(&mut state, AppEvent::HookEventReceived(e));
+        }
+        let e = HookEvent::new(Utc::now(), HookEventKind::notification("msg".into()))
+            .with_session("s2".into());
+        update(&mut state, AppEvent::HookEventReceived(e));
+
+        // +1 each for their own SessionStart
+        assert_eq!(state.active_sessions["s1"].event_count, 4);
+        assert_eq!(state.active_sessions["s2"].event_count, 2);
+    }
+
+    #[test]
+    fn task_graph_updated_sets_per_session_task_count() {
+        let mut state = AppState::new();
+        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        update(&mut state, AppEvent::HookEventReceived(s));
+
+        let graph = crate::model::TaskGraph {
+            waves: vec![],
+            total_tasks: 7,
+            completed_tasks: 2,
+        };
+        update(&mut state, AppEvent::TaskGraphUpdated(graph));
+
+        assert_eq!(state.active_sessions["s1"].task_count, 7);
+    }
+
+    #[test]
+    fn subagent_start_sets_session_id_on_agent() {
+        let mut state = AppState::new();
+        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let a = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into())
+            .with_session("s1".into());
+        update(&mut state, AppEvent::HookEventReceived(s));
+        update(&mut state, AppEvent::HookEventReceived(a));
+
+        assert_eq!(state.agents["a01"].session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
     fn hook_tool_use_not_attributed_when_no_agents() {
-        let state = AppState::new();
+        let mut state = AppState::new();
         let tool = HookEvent::new(
             Utc::now(),
             HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
         );
 
-        let state = update(state, AppEvent::HookEventReceived(tool));
+        update(&mut state, AppEvent::HookEventReceived(tool));
 
-        // No agents, no attribution, no panic
         assert!(state.agents.is_empty());
     }
 }

@@ -17,6 +17,8 @@ pub struct Agent {
     pub finished_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub messages: Vec<AgentMessage>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl Default for Agent {
@@ -29,6 +31,7 @@ impl Default for Agent {
             started_at: Utc::now(),
             finished_at: None,
             messages: Vec::new(),
+            session_id: None,
         }
     }
 }
@@ -43,6 +46,7 @@ impl Agent {
             started_at,
             finished_at: None,
             messages: Vec::new(),
+            session_id: None,
         }
     }
 

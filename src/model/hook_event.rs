@@ -72,6 +72,9 @@ pub enum HookEventKind {
         message: String,
     },
     UserPromptSubmit,
+    AssistantText {
+        content: String,
+    },
 }
 
 impl HookEventKind {
@@ -133,6 +136,10 @@ impl HookEventKind {
 
     pub fn user_prompt_submit() -> Self {
         Self::UserPromptSubmit
+    }
+
+    pub fn assistant_text(content: String) -> Self {
+        Self::AssistantText { content }
     }
 }
 

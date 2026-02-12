@@ -41,44 +41,53 @@ pub fn render_wave_river(frame: &mut Frame, area: Rect, state: &AppState) {
 fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
     match &state.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
+            let current_wave = calculate_current_wave_num(graph);
             let mut lines = Vec::new();
 
-            // Build wave display spans
             let mut wave_spans = Vec::new();
             for (idx, wave) in graph.waves.iter().enumerate() {
                 if idx > 0 {
-                    wave_spans.push(Span::raw("  "));
+                    wave_spans.push(Span::styled("  │  ", Style::default().fg(Theme::SEPARATOR)));
                 }
 
-                // Wave number
-                wave_spans.push(Span::styled(
-                    format!("Wave {} ", wave.number),
-                    Style::default().fg(Theme::INFO),
-                ));
-
-                // Task status dots
-                wave_spans.push(Span::raw("["));
-                for (task_idx, task) in wave.tasks.iter().enumerate() {
-                    if task_idx > 0 {
-                        wave_spans.push(Span::raw(" "));
-                    }
-
-                    let (symbol, color) = task_status_symbol(&task.status);
-                    wave_spans.push(Span::styled(symbol, Style::default().fg(color)));
-                }
-                wave_spans.push(Span::raw("] "));
-
-                // Progress count
                 let completed = wave
                     .tasks
                     .iter()
                     .filter(|t| matches!(t.status, TaskStatus::Completed))
                     .count();
                 let total = wave.tasks.len();
+                let all_done = completed == total;
+
+                // Wave indicator: ✓ for done, ▶ for current, number for future
+                let (wave_icon, wave_color) = if all_done {
+                    ("✓", Theme::SUCCESS)
+                } else if wave.number == current_wave {
+                    ("▶", Theme::ACCENT_WARM)
+                } else {
+                    ("○", Theme::MUTED_TEXT)
+                };
 
                 wave_spans.push(Span::styled(
+                    format!("{} W{} ", wave_icon, wave.number),
+                    Style::default().fg(wave_color),
+                ));
+
+                // Task status dots with spacing
+                for (task_idx, task) in wave.tasks.iter().enumerate() {
+                    if task_idx > 0 {
+                        wave_spans.push(Span::raw("  "));
+                    }
+
+                    let (symbol, color) = task_status_symbol(&task.status);
+                    wave_spans.push(Span::styled(symbol, Style::default().fg(color)));
+                }
+
+                wave_spans.push(Span::raw("  "));
+
+                // Progress count
+                wave_spans.push(Span::styled(
                     format!("{}/{}", completed, total),
-                    Style::default().fg(if completed == total {
+                    Style::default().fg(if all_done {
                         Theme::SUCCESS
                     } else {
                         Theme::MUTED_TEXT
@@ -90,10 +99,21 @@ fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
             lines
         }
         _ => vec![Line::from(Span::styled(
-            "No waves",
+            "No waves — waiting for task graph",
             Style::default().fg(Theme::MUTED_TEXT),
         ))],
     }
+}
+
+/// Determine which wave is currently active (first incomplete).
+fn calculate_current_wave_num(graph: &crate::model::TaskGraph) -> u32 {
+    for wave in &graph.waves {
+        let all_complete = wave.tasks.iter().all(|t| matches!(t.status, TaskStatus::Completed));
+        if !all_complete {
+            return wave.number;
+        }
+    }
+    graph.waves.last().map(|w| w.number).unwrap_or(0)
 }
 
 /// Get symbol and color for task status.
@@ -156,7 +176,7 @@ mod tests {
         assert!(!lines.is_empty());
 
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("Wave 1"));
+        assert!(text.contains("W1"));
         assert!(text.contains("1/3"));
     }
 
@@ -179,8 +199,8 @@ mod tests {
         let lines = build_wave_river_text(&state);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains("Wave 1"));
-        assert!(text.contains("Wave 2"));
+        assert!(text.contains("W1"));
+        assert!(text.contains("W2"));
     }
 
     #[test]

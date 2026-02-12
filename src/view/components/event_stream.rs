@@ -86,6 +86,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
             Some(aid) => e.agent_id.as_deref() == Some(aid),
             None => true,
         })
+        .take(500)
         .collect();
 
     if filtered.is_empty() {
@@ -175,7 +176,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
 
 /// Strip JSON escapes and control chars from detail text for clean display.
 /// Preserves real newlines for diff-style content.
-fn clean_detail(s: &str) -> String {
+pub fn clean_detail(s: &str) -> String {
     s.replace("\\\"", "\"")
         .replace("\\t", " ")
         .replace("\\\\", "\\")
@@ -202,7 +203,7 @@ fn short_id(id: &str) -> String {
 }
 
 /// Format hook event kind into (icon, header, optional detail, color, optional tool_name).
-fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option<String>, ratatui::style::Color, Option<String>) {
+pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option<String>, ratatui::style::Color, Option<String>) {
     match kind {
         HookEventKind::SessionStart => ("●", "Session started".into(), None, Theme::SUCCESS, None),
         HookEventKind::SessionEnd => ("○", "Session ended".into(), None, Theme::INFO, None),
@@ -248,6 +249,14 @@ fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option<Str
             ("ℹ", "Note".into(), Some(message.clone()), Theme::INFO, None)
         }
         HookEventKind::UserPromptSubmit => ("→", "User prompt".into(), None, Theme::INFO, None),
+        HookEventKind::AssistantText { content } => {
+            let truncated = if content.len() > 500 {
+                format!("{}...", &content[..500])
+            } else {
+                content.clone()
+            };
+            ("💭", "Thinking".into(), Some(truncated), Theme::MUTED_TEXT, None)
+        }
     }
 }
 

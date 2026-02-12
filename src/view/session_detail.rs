@@ -20,14 +20,51 @@ use crate::model::{Agent, HookEvent, HookEventKind, SessionMeta, SessionStatus, 
 /// Borrowed view over session data — either live state or an archive.
 pub struct SessionViewData<'a> {
     pub meta: &'a SessionMeta,
-    pub agents: &'a BTreeMap<String, Agent>,
+    pub agents: AgentsRef<'a>,
     pub events: EventsRef<'a>,
     pub task_graph: Option<&'a TaskGraph>,
+}
+
+/// Either a borrowed reference or an owned filtered subset of agents.
+pub enum AgentsRef<'a> {
+    Borrowed(&'a BTreeMap<String, Agent>),
+    Filtered(BTreeMap<String, &'a Agent>),
+}
+
+impl<'a> AgentsRef<'a> {
+    pub fn len(&self) -> usize {
+        match self {
+            AgentsRef::Borrowed(m) => m.len(),
+            AgentsRef::Filtered(m) => m.len(),
+        }
+    }
+
+    pub fn values(&self) -> Vec<&Agent> {
+        match self {
+            AgentsRef::Borrowed(m) => m.values().collect(),
+            AgentsRef::Filtered(m) => m.values().copied().collect(),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Agent> {
+        match self {
+            AgentsRef::Borrowed(m) => m.get(key),
+            AgentsRef::Filtered(m) => m.get(key).copied(),
+        }
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        match self {
+            AgentsRef::Borrowed(m) => m.contains_key(key),
+            AgentsRef::Filtered(m) => m.contains_key(key),
+        }
+    }
 }
 
 pub enum EventsRef<'a> {
     Deque(&'a VecDeque<HookEvent>),
     Vec(&'a Vec<HookEvent>),
+    Owned(Vec<HookEvent>),
 }
 
 impl<'a> EventsRef<'a> {
@@ -35,20 +72,23 @@ impl<'a> EventsRef<'a> {
         match self {
             EventsRef::Deque(d) => d.len(),
             EventsRef::Vec(v) => v.len(),
+            EventsRef::Owned(v) => v.len(),
         }
     }
 
-    pub fn iter(&self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
+    pub fn iter(&'a self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
         match self {
             EventsRef::Deque(d) => Box::new(d.iter()),
             EventsRef::Vec(v) => Box::new(v.iter()),
+            EventsRef::Owned(v) => Box::new(v.iter()),
         }
     }
 
-    pub fn iter_rev(&self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
+    pub fn iter_rev(&'a self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
         match self {
             EventsRef::Deque(d) => Box::new(d.iter().rev()),
             EventsRef::Vec(v) => Box::new(v.iter().rev()),
+            EventsRef::Owned(v) => Box::new(v.iter().rev()),
         }
     }
 }
@@ -60,12 +100,21 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
     let active_count = state.active_sessions.len();
 
     if idx < active_count {
-        // Active session — use live state
+        // Active session — filter agents and events by session_id
         let meta = state.active_sessions.values().nth(idx)?;
+        let sid = &meta.id;
+        let filtered_agents: BTreeMap<String, &Agent> = state.agents.iter()
+            .filter(|(_, a)| a.session_id.as_deref() == Some(sid))
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+        let filtered_events: Vec<HookEvent> = state.events.iter()
+            .filter(|e| e.session_id.as_deref() == Some(sid))
+            .cloned()
+            .collect();
         Some(SessionViewData {
             meta,
-            agents: &state.agents,
-            events: EventsRef::Deque(&state.events),
+            agents: AgentsRef::Filtered(filtered_agents),
+            events: EventsRef::Owned(filtered_events),
             task_graph: state.task_graph.as_ref(),
         })
     } else {
@@ -75,7 +124,7 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
         let archive = session.data.as_ref()?;
         Some(SessionViewData {
             meta: &session.meta,
-            agents: &archive.agents,
+            agents: AgentsRef::Borrowed(&archive.agents),
             events: EventsRef::Vec(&archive.events),
             task_graph: archive.task_graph.as_ref(),
         })
@@ -145,9 +194,10 @@ pub fn compute_tool_stats(events: &EventsRef<'_>) -> Vec<ToolStat> {
 }
 
 /// Compute agent summaries from agent map.
-pub fn compute_agent_summary(agents: &BTreeMap<String, Agent>) -> Vec<AgentSummary> {
+pub fn compute_agent_summary(agents: &AgentsRef<'_>) -> Vec<AgentSummary> {
     agents
         .values()
+        .into_iter()
         .map(|agent| {
             let tool_count = agent
                 .messages
@@ -336,7 +386,7 @@ fn render_agent_table(
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    let summaries = compute_agent_summary(data.agents);
+    let summaries = compute_agent_summary(&data.agents);
 
     if summaries.is_empty() {
         let p = Paragraph::new("No agents")
@@ -508,7 +558,8 @@ fn render_events_list(
         first = false;
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, color) = format_event_short(&event.kind);
+        let (icon, header, detail, event_color, _tool_name) =
+            crate::view::components::event_stream::format_event_lines(&event.kind);
 
         let agent_label = event.agent_id.as_ref().map(|aid| {
             data.agents
@@ -519,8 +570,8 @@ fn render_events_list(
 
         let mut spans = vec![
             Span::styled(format!("{} ", timestamp), Style::default().fg(Theme::MUTED_TEXT)),
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled(header, Style::default().fg(color)),
+            Span::styled(format!("{} ", icon), Style::default().fg(event_color)),
+            Span::styled(header, Style::default().fg(event_color)),
         ];
 
         if let Some(ref label) = agent_label {
@@ -531,6 +582,34 @@ fn render_events_list(
         }
 
         lines.push(Line::from(spans));
+
+        // Detail line with content (input/output summaries)
+        if let Some(detail_text) = detail {
+            let clean = crate::view::components::event_stream::clean_detail(&detail_text);
+            if !clean.is_empty() {
+                let has_diff_lines = clean.contains("\n- ") || clean.contains("\n+ ");
+                if has_diff_lines {
+                    for line in clean.split('\n') {
+                        let color = if line.starts_with("- ") {
+                            Theme::ERROR
+                        } else if line.starts_with("+ ") {
+                            Theme::SUCCESS
+                        } else {
+                            Theme::MUTED_TEXT
+                        };
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(color),
+                        )));
+                    }
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        clean,
+                        Style::default().fg(Theme::MUTED_TEXT),
+                    )));
+                }
+            }
+        }
     }
 
     let p = Paragraph::new(lines)
@@ -549,29 +628,6 @@ fn render_events_list(
         .scroll((scroll_offset as u16, 0));
 
     frame.render_widget(p, area);
-}
-
-/// Compact event formatting for session detail event list.
-fn format_event_short(kind: &HookEventKind) -> (&'static str, String, ratatui::style::Color) {
-    match kind {
-        HookEventKind::SessionStart => ("●", "Session started".into(), Theme::SUCCESS),
-        HookEventKind::SessionEnd => ("○", "Session ended".into(), Theme::INFO),
-        HookEventKind::SubagentStart { task_description, .. } => {
-            let desc = task_description.as_deref().unwrap_or("Agent started");
-            ("▶", desc.to_string(), Theme::SUCCESS)
-        }
-        HookEventKind::SubagentStop => ("■", "Agent stopped".into(), Theme::MUTED_TEXT),
-        HookEventKind::PreToolUse { tool_name, .. } => {
-            ("⚡", tool_name.clone(), Theme::tool_color(tool_name))
-        }
-        HookEventKind::PostToolUse { tool_name, duration_ms, .. } => {
-            let dur = duration_ms.map(|ms| format!(" ({}ms)", ms)).unwrap_or_default();
-            ("✓", format!("{}{}", tool_name, dur), Theme::tool_color(tool_name))
-        }
-        HookEventKind::Stop { .. } => ("⏹", "Stopped".into(), Theme::WARNING),
-        HookEventKind::Notification { message } => ("ℹ", message.clone(), Theme::INFO),
-        HookEventKind::UserPromptSubmit => ("→", "User prompt".into(), Theme::INFO),
-    }
 }
 
 fn short_id(id: &str) -> String {
@@ -648,7 +704,9 @@ mod tests {
         state.active_sessions.insert("s1".into(), meta);
         state.selected_session_index = Some(0);
         state.view = crate::app::state::ViewState::SessionDetail;
-        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        let mut a = Agent::new("a01".into(), Utc::now());
+        a.session_id = Some("s1".into());
+        state.agents.insert("a01".into(), a);
 
         terminal
             .draw(|frame| render_session_detail(frame, &state, frame.area()))
@@ -735,7 +793,8 @@ mod tests {
     #[test]
     fn compute_agent_summary_empty() {
         let agents = BTreeMap::new();
-        let summaries = compute_agent_summary(&agents);
+        let agents_ref = AgentsRef::Borrowed(&agents);
+        let summaries = compute_agent_summary(&agents_ref);
         assert!(summaries.is_empty());
     }
 
@@ -754,7 +813,8 @@ mod tests {
 
         agents.insert("a01".into(), agent);
 
-        let summaries = compute_agent_summary(&agents);
+        let agents_ref = AgentsRef::Borrowed(&agents);
+        let summaries = compute_agent_summary(&agents_ref);
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].agent_type, "Explore");
         assert!(summaries[0].finished);
@@ -773,7 +833,9 @@ mod tests {
         let mut state = AppState::new();
         state.active_sessions.insert("s1".into(), SessionMeta::new("s1".into(), Utc::now(), "/proj".into()));
         state.selected_session_index = Some(0);
-        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        let mut a = Agent::new("a01".into(), Utc::now());
+        a.session_id = Some("s1".into());
+        state.agents.insert("a01".into(), a);
 
         let data = get_selected_session_data(&state).unwrap();
         assert_eq!(data.meta.id, "s1");

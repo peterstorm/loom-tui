@@ -83,12 +83,8 @@ fn build_help_text() -> Vec<Line<'static>> {
         Line::from("  Dashboard:"),
         Line::from("    Enter on task  - Jump to agent detail"),
         Line::from(""),
-        Line::from("  Agent Detail:"),
-        Line::from("    w          - Toggle wide mode"),
-        Line::from(""),
         Line::from("  Sessions:"),
         Line::from("    Enter      - Load archived session"),
-        Line::from("    d          - Delete selected session"),
         Line::from(""),
     ]
 }

@@ -67,6 +67,12 @@ pub struct AppState {
 
     /// Index of session currently being loaded from disk (shows loading indicator)
     pub loading_session: Option<usize>,
+
+    /// Cached sorted agent keys (recomputed when agent_keys_dirty)
+    pub cached_sorted_keys: Vec<String>,
+
+    /// Whether agent keys need re-sorting
+    pub agent_keys_dirty: bool,
 }
 
 /// View state variants
@@ -163,6 +169,8 @@ impl AppState {
             selected_agent_index: None,
             selected_session_index: None,
             loading_session: None,
+            cached_sorted_keys: Vec::new(),
+            agent_keys_dirty: true,
         }
     }
 
@@ -189,8 +197,13 @@ impl AppState {
     }
 
     /// Agent keys sorted: active first (by started_at desc), then finished (by started_at desc).
-    /// Use this everywhere agent index is needed to keep selection consistent.
-    pub fn sorted_agent_keys(&self) -> Vec<String> {
+    /// Returns cached result — call `recompute_sorted_keys()` after modifying agents.
+    pub fn sorted_agent_keys(&self) -> &[String] {
+        &self.cached_sorted_keys
+    }
+
+    /// Recompute cached sorted agent keys. Call after any agent mutation.
+    pub fn recompute_sorted_keys(&mut self) {
         let mut keys: Vec<_> = self.agents.keys().cloned().collect();
         keys.sort_by(|a, b| {
             let aa = &self.agents[a];
@@ -201,7 +214,8 @@ impl AppState {
                 .cmp(&a_active)
                 .then(bb.started_at.cmp(&aa.started_at))
         });
-        keys
+        self.cached_sorted_keys = keys;
+        self.agent_keys_dirty = false;
     }
 }
 

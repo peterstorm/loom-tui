@@ -8,13 +8,23 @@ use crate::event::AppEvent;
 use crate::paths::Paths;
 use crate::session;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 /// Result type for watcher operations
 pub type WatcherResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+
+/// Shared map of session_id → transcript_path for active sessions.
+/// Updated by main loop, read by transcript polling thread.
+pub type TranscriptPathMap = Arc<Mutex<BTreeMap<String, PathBuf>>>;
+
+/// Create a new empty transcript path map.
+pub fn new_transcript_path_map() -> TranscriptPathMap {
+    Arc::new(Mutex::new(BTreeMap::new()))
+}
 
 /// Starts file watching for all paths and returns a channel for receiving events.
 /// Debounces file changes at 200ms per NFR-012.
@@ -24,7 +34,10 @@ pub type WatcherResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 ///
 /// # Returns
 /// Channel receiver for AppEvent stream
-pub fn start_watching(paths: &Paths) -> WatcherResult<mpsc::Receiver<AppEvent>> {
+pub fn start_watching(
+    paths: &Paths,
+    transcript_paths: TranscriptPathMap,
+) -> WatcherResult<mpsc::Receiver<AppEvent>> {
     let (tx, rx) = mpsc::channel();
 
     // Shared tail state for incremental event reads
@@ -83,6 +96,9 @@ pub fn start_watching(paths: &Paths) -> WatcherResult<mpsc::Receiver<AppEvent>> 
         }
     });
 
+    // Poll Claude Code transcript files for assistant reasoning text
+    start_transcript_polling(transcript_paths, tx);
+
     // Keep watcher alive by moving it to a separate thread
     std::thread::spawn(move || {
         let _watcher = watcher;
@@ -92,6 +108,41 @@ pub fn start_watching(paths: &Paths) -> WatcherResult<mpsc::Receiver<AppEvent>> 
     });
 
     Ok(rx)
+}
+
+/// Start polling Claude Code transcript files for assistant reasoning text.
+/// Runs on a 200ms interval, iterates transcript paths from the shared map,
+/// and emits AssistantText events for new content.
+pub fn start_transcript_polling(
+    transcript_paths: TranscriptPathMap,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let mut tail_state = TailState::new();
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let paths_snapshot: Vec<(String, PathBuf)> = match transcript_paths.lock() {
+                Ok(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                Err(_) => continue,
+            };
+
+            for (session_id, path) in &paths_snapshot {
+                if !path.exists() {
+                    continue;
+                }
+                let new_content = match tail_state.read_new_lines(path) {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => continue,
+                };
+
+                let events =
+                    parsers::parse_claude_transcript_incremental(&new_content, session_id);
+                for event in events {
+                    let _ = tx.send(AppEvent::HookEventReceived(event));
+                }
+            }
+        }
+    });
 }
 
 /// Read existing files on startup so the TUI doesn't start empty.

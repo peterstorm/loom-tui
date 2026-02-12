@@ -1,5 +1,7 @@
-use crate::model::{AgentMessage, HookEvent, Task, TaskGraph, Wave};
+use crate::model::{AgentMessage, HookEvent, HookEventKind, Task, TaskGraph, Wave};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -167,6 +169,79 @@ pub fn extract_active_agent_ids(paths: &[&Path]) -> Vec<String> {
                 .map(|s| s.to_string())
         })
         .collect()
+}
+
+/// Parse Claude Code transcript JSONL incrementally, extracting assistant text blocks.
+///
+/// # Functional Core
+/// Pure function — takes raw content + byte offset, returns HookEvents.
+/// Only extracts `type: "text"` blocks from `type: "assistant"` entries.
+/// Skips `type: "thinking"` blocks (too verbose). Truncates to 500 chars per block.
+///
+/// # Arguments
+/// * `content` - Raw JSONL content (full file or tail segment)
+/// * `session_id` - Session ID to attribute events to
+///
+/// # Returns
+/// Vector of HookEvents with AssistantText kind, plus the number of bytes consumed.
+pub fn parse_claude_transcript_incremental(
+    content: &str,
+    session_id: &str,
+) -> Vec<HookEvent> {
+    let mut events = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let entry: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Only process assistant entries
+        if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let timestamp: DateTime<Utc> = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(Utc::now);
+
+        // Extract text blocks from message.content[]
+        let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
+            Some(Value::Array(blocks)) => blocks,
+            _ => continue,
+        };
+
+        for block in content_blocks {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if block_type != "text" {
+                continue;
+            }
+
+            let text = match block.get("text").and_then(|v| v.as_str()) {
+                Some(t) if !t.trim().is_empty() => t,
+                _ => continue,
+            };
+
+            let truncated = if text.len() > 500 {
+                format!("{}...", &text[..500])
+            } else {
+                text.to_string()
+            };
+
+            let event = HookEvent::new(timestamp, HookEventKind::assistant_text(truncated))
+                .with_session(session_id.to_string());
+            events.push(event);
+        }
+    }
+
+    events
 }
 
 #[cfg(test)]
@@ -419,6 +494,78 @@ invalid
         assert_eq!(graph.waves[1].number, 2);
         assert_eq!(graph.waves[1].tasks.len(), 1);
         assert_eq!(graph.waves[1].tasks[0].id, "T3");
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_extracts_text_blocks() {
+        let jsonl = r#"{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"text","text":"Let me read the file."}]},"sessionId":"s1"}"#;
+
+        let events = parse_claude_transcript_incremental(jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            HookEventKind::AssistantText { content } => {
+                assert_eq!(content, "Let me read the file.");
+            }
+            _ => panic!("Expected AssistantText"),
+        }
+        assert_eq!(events[0].session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_skips_thinking_blocks() {
+        let jsonl = r#"{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"thinking","thinking":"internal thought"},{"type":"text","text":"visible"}]}}"#;
+
+        let events = parse_claude_transcript_incremental(jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            HookEventKind::AssistantText { content } => {
+                assert_eq!(content, "visible");
+            }
+            _ => panic!("Expected AssistantText"),
+        }
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_skips_non_assistant() {
+        let jsonl = r#"{"type":"human","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"text","text":"user message"}]}}
+{"type":"tool_result","timestamp":"2026-02-11T10:00:01Z","message":{"content":[]}}"#;
+
+        let events = parse_claude_transcript_incremental(jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_truncates_long_text() {
+        let long_text = "x".repeat(600);
+        let jsonl = format!(
+            r#"{{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            long_text
+        );
+
+        let events = parse_claude_transcript_incremental(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            HookEventKind::AssistantText { content } => {
+                assert!(content.len() <= 503); // 500 + "..."
+                assert!(content.ends_with("..."));
+            }
+            _ => panic!("Expected AssistantText"),
+        }
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_empty_content() {
+        let jsonl = "";
+        let events = parse_claude_transcript_incremental(jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_claude_transcript_skips_malformed_lines() {
+        let jsonl = "not json\n{\"type\":\"assistant\",\"timestamp\":\"2026-02-11T10:00:00Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}";
+
+        let events = parse_claude_transcript_incremental(jsonl, "s1");
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

@@ -34,56 +34,93 @@ pub fn render_task_list(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// Pure function: build task list items from state.
+/// Highlights the selected task and applies filter if active.
 fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
     match &state.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
             let mut items = Vec::new();
+            let mut task_index: usize = 0;
+            let filter = state.filter.as_deref().unwrap_or("");
 
             for wave in &graph.waves {
-                // Wave header
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("═══ Wave {} ═══", wave.number),
-                    Style::default()
-                        .fg(Theme::INFO)
-                        .add_modifier(Modifier::BOLD),
-                ))));
+                // Collect visible tasks for this wave (after filter)
+                let wave_tasks: Vec<_> = wave.tasks.iter().enumerate().filter(|(_, task)| {
+                    if filter.is_empty() {
+                        return true;
+                    }
+                    let lower = filter.to_lowercase();
+                    task.description.to_lowercase().contains(&lower)
+                        || task.id.to_lowercase().contains(&lower)
+                        || task.agent_id.as_ref().map(|a| a.to_lowercase().contains(&lower)).unwrap_or(false)
+                }).collect();
+
+                if wave_tasks.is_empty() && !filter.is_empty() {
+                    // Skip entirely empty waves when filtering
+                    task_index += wave.tasks.len();
+                    continue;
+                }
+
+                // Wave header — compact style
+                let completed = wave.tasks.iter().filter(|t| matches!(t.status, TaskStatus::Completed)).count();
+                let total = wave.tasks.len();
+                items.push(ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("── Wave {} ", wave.number),
+                        Style::default().fg(Theme::INFO).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}/{} ", completed, total),
+                        Style::default().fg(if completed == total { Theme::SUCCESS } else { Theme::MUTED_TEXT }),
+                    ),
+                    Span::styled(
+                        "─".repeat(20),
+                        Style::default().fg(Theme::SEPARATOR),
+                    ),
+                ])));
 
                 // Tasks in wave
-                for task in &wave.tasks {
+                for (original_idx, task) in wave_tasks {
+                    let flat_idx = task_index + original_idx;
+                    let is_selected = state.selected_task_index == Some(flat_idx);
+
                     let (status_symbol, status_color) = task_status_display(&task.status);
+                    let bg = if is_selected { Theme::SELECTION_BG } else { Theme::BACKGROUND };
 
                     let mut spans = vec![
-                        Span::styled(status_symbol.to_string(), Style::default().fg(status_color)),
-                        Span::raw(" "),
-                        Span::styled(task.id.clone(), Style::default().fg(Theme::INFO)),
-                        Span::raw(" "),
+                        Span::styled("  ", Style::default().bg(bg)),
+                        Span::styled(status_symbol.to_string(), Style::default().fg(status_color).bg(bg)),
+                        Span::styled(" ", Style::default().bg(bg)),
+                        Span::styled(task.id.clone(), Style::default().fg(Theme::INFO).bg(bg)),
+                        Span::styled(" ", Style::default().bg(bg)),
                     ];
 
-                    // Add truncated description
                     let description = if task.description.len() > 50 {
                         format!("{}...", &task.description[..47])
                     } else {
                         task.description.clone()
                     };
-                    spans.push(Span::raw(description));
+                    spans.push(Span::styled(description, Style::default().fg(Theme::TEXT).bg(bg)));
 
-                    // Add agent ID if present
                     if let Some(ref agent_id) = task.agent_id {
-                        spans.push(Span::raw(" "));
                         spans.push(Span::styled(
-                            format!("[{}]", agent_id),
-                            Style::default().fg(Theme::MUTED_TEXT),
+                            format!("  {}", &agent_id[..agent_id.len().min(7)]),
+                            Style::default().fg(Theme::AGENT_LABEL).bg(bg),
                         ));
                     }
 
                     items.push(ListItem::new(Line::from(spans)));
                 }
+
+                task_index += wave.tasks.len();
+
+                // Spacing between waves
+                items.push(ListItem::new(Line::from("")));
             }
 
             items
         }
         _ => vec![ListItem::new(Line::from(Span::styled(
-            "No tasks loaded",
+            "No tasks — waiting for task graph",
             Style::default().fg(Theme::MUTED_TEXT),
         )))],
     }
@@ -147,8 +184,8 @@ mod tests {
 
         let items = build_task_list_items(&state);
 
-        // Should have 2 wave headers + 2 tasks = 4 items
-        assert_eq!(items.len(), 4);
+        // 2 wave headers + 2 tasks + 2 spacing lines = 6
+        assert_eq!(items.len(), 6);
     }
 
     #[test]
@@ -171,8 +208,8 @@ mod tests {
 
         let items = build_task_list_items(&state);
 
-        // Should have 1 wave header + 1 task = 2 items
-        assert_eq!(items.len(), 2);
+        // 1 wave header + 1 task + 1 spacing = 3
+        assert_eq!(items.len(), 3);
     }
 
     #[test]
@@ -188,8 +225,8 @@ mod tests {
 
         let items = build_task_list_items(&state);
 
-        // Verify truncation happened (indirectly - just check we didn't panic)
-        assert_eq!(items.len(), 2);
+        // 1 wave header + 1 task + 1 spacing = 3
+        assert_eq!(items.len(), 3);
     }
 
     #[test]

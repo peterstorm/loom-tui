@@ -1,7 +1,7 @@
 use chrono::Utc;
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem},
     Frame,
@@ -52,7 +52,7 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
             let agent = &state.agents[key];
             let is_active = agent.finished_at.is_none();
             let (icon, icon_color) = if is_active {
-                ("◐", Theme::SUCCESS)
+                ("◐", Theme::ACCENT_WARM)
             } else {
                 ("●", Theme::MUTED_TEXT)
             };
@@ -69,28 +69,43 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
                 String::new()
             };
 
+            // Count tool events for this agent
+            let tool_count = state.events.iter()
+                .filter(|e| e.agent_id.as_deref() == Some(key))
+                .filter(|e| matches!(&e.kind, crate::model::HookEventKind::PostToolUse { .. }))
+                .count();
+
             let is_selected = selected == Some(idx);
             let bg = if is_selected {
                 Theme::SELECTION_BG
             } else {
                 Theme::BACKGROUND
             };
+            let name_style = if is_selected {
+                Style::default().fg(Theme::ACCENT).bg(bg).add_modifier(Modifier::BOLD)
+            } else if is_active {
+                Style::default().fg(Theme::TEXT).bg(bg)
+            } else {
+                Style::default().fg(Theme::MUTED_TEXT).bg(bg)
+            };
 
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("{} ", icon), Style::default().fg(icon_color).bg(bg)),
-                Span::styled(
-                    name,
-                    Style::default()
-                        .fg(if is_active { Theme::TEXT } else { Theme::MUTED_TEXT })
-                        .bg(bg),
-                ),
+                Span::styled(name, name_style),
                 Span::styled(
                     format!("  {}", elapsed),
                     Style::default().fg(Theme::MUTED_TEXT).bg(bg),
                 ),
-            ]);
+            ];
 
-            ListItem::new(line)
+            if tool_count > 0 {
+                spans.push(Span::styled(
+                    format!("  {} tools", tool_count),
+                    Style::default().fg(Theme::MUTED_TEXT).bg(bg),
+                ));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect()
 }
@@ -124,6 +139,7 @@ mod tests {
         a1.agent_type = Some("Explore".into());
         state.agents.insert("a01".into(), a1);
         state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.recompute_sorted_keys();
         state.selected_agent_index = Some(0);
 
         let items = build_agent_items(&state);

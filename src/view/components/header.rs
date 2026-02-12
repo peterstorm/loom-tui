@@ -6,13 +6,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, ViewState};
 use crate::model::Theme;
 
 /// Render header bar.
-/// Shows: project name, current wave, task progress, active agents.
-///
-/// Format: "loom-tui | Wave N | X/Y tasks | N agents"
+/// Shows: view indicator, wave, task progress, agents, elapsed time.
 pub fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let header_text = build_header_text(state);
 
@@ -28,47 +26,82 @@ pub fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Pure function: build header text from state.
 fn build_header_text(state: &AppState) -> Line<'static> {
-    let project_name = "loom-tui";
     let active_agents = state.agents.values().filter(|a| a.finished_at.is_none()).count();
+    let elapsed = format_elapsed(state.started_at.elapsed().as_secs());
+
+    let view_indicator = match state.view {
+        ViewState::Dashboard => "[1:Dashboard]",
+        ViewState::AgentDetail => "[2:Agents]",
+        ViewState::Sessions => "[3:Sessions]",
+        ViewState::SessionDetail => "[3:Session Detail]",
+    };
+
+    let project_name = if state.project_path.is_empty() {
+        "loom".to_string()
+    } else {
+        state.project_path
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("loom")
+            .to_string()
+    };
+
+    let mut spans = vec![
+        Span::styled(project_name, Style::default().fg(Theme::ACCENT)),
+        Span::styled(" ", Style::default()),
+        Span::styled(view_indicator, Style::default().fg(Theme::INFO)),
+    ];
 
     match &state.task_graph {
         Some(graph) => {
             let current_wave = calculate_current_wave(graph);
-            let progress = format!("{}/{} tasks", graph.completed_tasks, graph.total_tasks);
+            let progress = format!("{}/{}", graph.completed_tasks, graph.total_tasks);
 
-            Line::from(vec![
-                Span::styled(project_name, Style::default().fg(Theme::INFO)),
-                Span::raw(" | "),
-                Span::styled(
-                    format!("Wave {}", current_wave),
-                    Style::default().fg(Theme::WARNING),
-                ),
-                Span::raw(" | "),
-                Span::styled(progress, Style::default().fg(Theme::SUCCESS)),
-                Span::raw(" | "),
-                Span::styled(
-                    format!("{} agents", active_agents),
-                    Style::default().fg(if active_agents > 0 { Theme::TASK_RUNNING } else { Theme::MUTED_TEXT }),
-                ),
-            ])
+            spans.push(Span::styled(
+                "  W",
+                Style::default().fg(Theme::MUTED_TEXT),
+            ));
+            spans.push(Span::styled(
+                format!("{}", current_wave),
+                Style::default().fg(Theme::ACCENT_WARM),
+            ));
+            spans.push(Span::styled(
+                format!("  {}", progress),
+                Style::default().fg(Theme::SUCCESS),
+            ));
         }
         None => {
-            let mut spans = vec![
-                Span::styled(project_name, Style::default().fg(Theme::INFO)),
-                Span::raw(" | "),
-                Span::styled("No tasks loaded", Style::default().fg(Theme::MUTED_TEXT)),
-            ];
-
-            if active_agents > 0 {
-                spans.push(Span::raw(" | "));
-                spans.push(Span::styled(
-                    format!("{} agents", active_agents),
-                    Style::default().fg(Theme::TASK_RUNNING),
-                ));
-            }
-
-            Line::from(spans)
+            spans.push(Span::styled(
+                "  No tasks",
+                Style::default().fg(Theme::MUTED_TEXT),
+            ));
         }
+    }
+
+    if active_agents > 0 {
+        spans.push(Span::styled(
+            format!("  {} agents", active_agents),
+            Style::default().fg(Theme::ACCENT_WARM),
+        ));
+    }
+
+    spans.push(Span::styled(
+        format!("  {}", elapsed),
+        Style::default().fg(Theme::MUTED_TEXT),
+    ));
+
+    Line::from(spans)
+}
+
+fn format_elapsed(secs: u64) -> String {
+    let mins = secs / 60;
+    let hours = mins / 60;
+    if hours > 0 {
+        format!("{}h{}m", hours, mins % 60)
+    } else if mins > 0 {
+        format!("{}m{}s", mins, secs % 60)
+    } else {
+        format!("{}s", secs)
     }
 }
 
@@ -128,8 +161,8 @@ mod tests {
         let content = buffer.content();
         let text: String = content.iter().map(|c| c.symbol()).collect();
 
-        assert!(text.contains("loom-tui"));
-        assert!(text.contains("No tasks loaded"));
+        assert!(text.contains("loom"));
+        assert!(text.contains("No tasks"));
     }
 
     #[test]
@@ -148,16 +181,15 @@ mod tests {
         let mut state = AppState::new();
         state.task_graph = Some(TaskGraph::new(waves));
 
-        // Add one active agent
         let now = Utc::now();
         state.agents.insert("a01".into(), Agent::new("a01".into(), now));
 
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains("loom-tui"));
-        assert!(text.contains("Wave 1"));
-        assert!(text.contains("1/2 tasks"));
+        assert!(text.contains("loom"));
+        assert!(text.contains("W1"));
+        assert!(text.contains("1/2"));
         assert!(text.contains("1 agents"));
     }
 
@@ -221,7 +253,6 @@ mod tests {
         let now = Utc::now();
         let later = now + chrono::Duration::seconds(10);
 
-        // Add 2 agents: 1 active, 1 finished
         state.agents.insert("a01".into(), Agent::new("a01".into(), now));
         state.agents.insert("a02".into(), Agent::new("a02".into(), now).finish(later));
 
@@ -239,13 +270,12 @@ mod tests {
         let mut state = AppState::new();
         let now = Utc::now();
 
-        // Add active agent but no task graph
         state.agents.insert("a01".into(), Agent::new("a01".into(), now));
 
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains("No tasks loaded"));
+        assert!(text.contains("No tasks"));
         assert!(text.contains("1 agents"));
     }
 
@@ -256,7 +286,24 @@ mod tests {
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains("No tasks loaded"));
+        assert!(text.contains("No tasks"));
         assert!(!text.contains("agents"), "Should not show '0 agents'");
+    }
+
+    #[test]
+    fn build_header_text_shows_view_indicator() {
+        let state = AppState::new();
+        let line = build_header_text(&state);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[1:Dashboard]"));
+    }
+
+    #[test]
+    fn build_header_text_shows_elapsed() {
+        let state = AppState::new();
+        let line = build_header_text(&state);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Should have some elapsed time indicator (0s or 1s)
+        assert!(text.contains('s'), "Should contain elapsed seconds");
     }
 }

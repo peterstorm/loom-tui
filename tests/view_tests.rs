@@ -153,8 +153,8 @@ fn header_renders_with_no_tasks() {
     let buffer = result.buffer;
     let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
 
-    assert!(content.contains("loom-tui"));
-    assert!(content.contains("No tasks loaded"));
+    assert!(content.contains("loom"));
+    assert!(content.contains("No tasks"));
 }
 
 #[test]
@@ -182,10 +182,9 @@ fn header_renders_with_tasks() {
     let buffer = result.buffer;
     let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
 
-    assert!(content.contains("loom-tui"));
-    assert!(content.contains("Wave 1"));
-    assert!(content.contains("1/2 tasks"));
-    assert!(content.contains("0 agents"));
+    assert!(content.contains("loom"));
+    assert!(content.contains("W1"));
+    assert!(content.contains("1/2"));
 }
 
 #[test]
@@ -271,8 +270,8 @@ fn wave_river_renders_multiple_waves() {
     let buffer = result.buffer;
     let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
 
-    assert!(content.contains("Wave 1"));
-    assert!(content.contains("Wave 2"));
+    assert!(content.contains("W1"));
+    assert!(content.contains("W2"));
 }
 
 #[test]

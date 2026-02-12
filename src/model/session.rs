@@ -27,6 +27,8 @@ pub struct SessionMeta {
     pub wave_count: Option<u32>,
     #[serde(default)]
     pub failed_tasks: Vec<String>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 impl SessionMeta {
@@ -44,6 +46,7 @@ impl SessionMeta {
             loom_plan_id: None,
             wave_count: None,
             failed_tasks: Vec::new(),
+            transcript_path: None,
         }
     }
 

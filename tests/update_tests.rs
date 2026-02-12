@@ -2,10 +2,11 @@ use chrono::Utc;
 use loom_tui::app::{update, AppState, ViewState};
 use loom_tui::event::AppEvent;
 use loom_tui::model::{
-    Agent, AgentMessage, HookEvent, HookEventKind, SessionArchive, SessionMeta, SessionStatus,
-    Task, TaskGraph, TaskStatus, ToolCall, Wave,
+    Agent, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionMeta,
+    SessionStatus, Task, TaskGraph, TaskStatus, ToolCall, Wave,
 };
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 #[test]
 fn task_graph_updated_sets_graph() {
@@ -294,21 +295,29 @@ fn parse_error_evicts_oldest_at_capacity() {
 }
 
 #[test]
-fn session_loaded_sets_active_session() {
-    let state = AppState::new();
+fn session_loaded_populates_data_and_navigates() {
+    let mut state = AppState::new();
     let meta = SessionMeta::new("session-123".into(), Utc::now(), "/home/user/proj".into())
         .with_status(SessionStatus::Completed);
 
-    let archive = SessionArchive::new(meta.clone());
+    // Pre-populate with meta-only archived session
+    state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
+    state.loading_session = Some(0);
+
+    let archive = SessionArchive::new(meta);
     let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-    assert!(new_state.active_session.is_some());
-    assert_eq!(new_state.active_session.unwrap().id, "session-123");
+    // Data should be populated
+    assert!(new_state.sessions[0].data.is_some());
+    assert_eq!(new_state.sessions[0].meta.id, "session-123");
+    // Loading cleared and navigated to detail
+    assert!(new_state.loading_session.is_none());
+    assert!(matches!(new_state.view, ViewState::SessionDetail));
 }
 
 #[test]
-fn session_loaded_sets_task_graph() {
-    let state = AppState::new();
+fn session_loaded_sets_task_graph_in_archive() {
+    let mut state = AppState::new();
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
     let graph = TaskGraph {
         waves: vec![],
@@ -316,33 +325,39 @@ fn session_loaded_sets_task_graph() {
         completed_tasks: 5,
     };
 
+    state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
+
     let archive = SessionArchive::new(meta).with_task_graph(graph);
     let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-    assert!(new_state.task_graph.is_some());
-    assert_eq!(new_state.task_graph.unwrap().total_tasks, 10);
+    let data = new_state.sessions[0].data.as_ref().unwrap();
+    assert!(data.task_graph.is_some());
+    assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 10);
 }
 
 #[test]
-fn session_loaded_sets_agents() {
-    let state = AppState::new();
+fn session_loaded_sets_agents_in_archive() {
+    let mut state = AppState::new();
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
 
     let mut agents = BTreeMap::new();
     agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
     agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
 
+    state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
+
     let archive = SessionArchive::new(meta).with_agents(agents);
     let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-    assert_eq!(new_state.agents.len(), 2);
-    assert!(new_state.agents.contains_key("a01"));
-    assert!(new_state.agents.contains_key("a02"));
+    let data = new_state.sessions[0].data.as_ref().unwrap();
+    assert_eq!(data.agents.len(), 2);
+    assert!(data.agents.contains_key("a01"));
+    assert!(data.agents.contains_key("a02"));
 }
 
 #[test]
-fn session_loaded_converts_events_to_deque() {
-    let state = AppState::new();
+fn session_loaded_stores_events_in_archive() {
+    let mut state = AppState::new();
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
 
     let events = vec![
@@ -350,45 +365,42 @@ fn session_loaded_converts_events_to_deque() {
         HookEvent::new(Utc::now(), HookEventKind::SessionEnd),
     ];
 
+    state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
+
     let archive = SessionArchive::new(meta).with_events(events);
     let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-    assert_eq!(new_state.events.len(), 2);
+    let data = new_state.sessions[0].data.as_ref().unwrap();
+    assert_eq!(data.events.len(), 2);
 }
 
 #[test]
-fn session_loaded_clears_previous_events() {
+fn session_loaded_clears_loading_flag() {
     let mut state = AppState::new();
-    state.events.push_back(HookEvent::new(
-        Utc::now(),
-        HookEventKind::Notification {
-            message: "old".into(),
-        },
-    ));
-
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-    let archive = SessionArchive::new(meta);
+    state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
+    state.loading_session = Some(0);
 
+    let archive = SessionArchive::new(meta);
     let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-    // Events should be cleared
-    assert_eq!(new_state.events.len(), 0);
+    assert!(new_state.loading_session.is_none());
 }
 
 #[test]
 fn session_list_refreshed_updates_sessions() {
     let state = AppState::new();
     let sessions = vec![
-        SessionMeta::new("s1".into(), Utc::now(), "/proj1".into()),
-        SessionMeta::new("s2".into(), Utc::now(), "/proj2".into()),
-        SessionMeta::new("s3".into(), Utc::now(), "/proj3".into()),
+        SessionArchive::new(SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
+        SessionArchive::new(SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
+        SessionArchive::new(SessionMeta::new("s3".into(), Utc::now(), "/proj3".into())),
     ];
 
-    let new_state = update(state, AppEvent::SessionListRefreshed(sessions.clone()));
+    let new_state = update(state, AppEvent::SessionListRefreshed(sessions));
 
     assert_eq!(new_state.sessions.len(), 3);
-    assert_eq!(new_state.sessions[0].id, "s1");
-    assert_eq!(new_state.sessions[2].id, "s3");
+    assert_eq!(new_state.sessions[0].meta.id, "s1");
+    assert_eq!(new_state.sessions[2].meta.id, "s3");
 }
 
 #[test]
@@ -396,14 +408,43 @@ fn session_list_refreshed_replaces_existing_list() {
     let mut state = AppState::new();
     state
         .sessions
-        .push(SessionMeta::new("old".into(), Utc::now(), "/old".into()));
+        .push(ArchivedSession::new(SessionMeta::new("old".into(), Utc::now(), "/old".into()), PathBuf::new()));
 
-    let new_sessions = vec![SessionMeta::new("new".into(), Utc::now(), "/new".into())];
+    let new_sessions = vec![SessionArchive::new(SessionMeta::new("new".into(), Utc::now(), "/new".into()))];
 
     let new_state = update(state, AppEvent::SessionListRefreshed(new_sessions));
 
     assert_eq!(new_state.sessions.len(), 1);
-    assert_eq!(new_state.sessions[0].id, "new");
+    assert_eq!(new_state.sessions[0].meta.id, "new");
+}
+
+#[test]
+fn session_metas_loaded_creates_archived_sessions() {
+    let state = AppState::new();
+    let metas = vec![
+        (PathBuf::from("/sessions/s1.json"), SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
+        (PathBuf::from("/sessions/s2.json"), SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
+    ];
+
+    let new_state = update(state, AppEvent::SessionMetasLoaded(metas));
+
+    assert_eq!(new_state.sessions.len(), 2);
+    assert_eq!(new_state.sessions[0].meta.id, "s1");
+    assert_eq!(new_state.sessions[0].path, PathBuf::from("/sessions/s1.json"));
+    assert!(new_state.sessions[0].data.is_none()); // Not loaded yet
+    assert_eq!(new_state.sessions[1].meta.id, "s2");
+}
+
+#[test]
+fn load_session_requested_sets_loading_flag() {
+    let mut state = AppState::new();
+    state.sessions.push(ArchivedSession::new(
+        SessionMeta::new("s1".into(), Utc::now(), "/proj".into()),
+        PathBuf::from("/sessions/s1.json"),
+    ));
+
+    let new_state = update(state, AppEvent::LoadSessionRequested(0));
+    assert_eq!(new_state.loading_session, Some(0));
 }
 
 #[test]
@@ -425,8 +466,8 @@ fn multiple_updates_compose_correctly() {
     );
     assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
 
-    // Add event
-    let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
+    // Add event (use Notification, not SessionStart which resets state)
+    let event = HookEvent::new(Utc::now(), HookEventKind::Notification { message: "test".into() });
     let state = update(state, AppEvent::HookEventReceived(event));
     assert_eq!(state.events.len(), 1);
 
@@ -515,6 +556,8 @@ fn property_update_never_panics() {
             crossterm::event::KeyCode::Char('x'),
         )),
         AppEvent::SessionListRefreshed(vec![]),
+        AppEvent::SessionMetasLoaded(vec![]),
+        AppEvent::LoadSessionRequested(0),
     ];
 
     for event in events {

@@ -77,7 +77,20 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
             spans.push(Span::raw(":scroll "));
 
             spans.push(Span::styled("Enter", Style::default().fg(Theme::INFO)));
-            spans.push(Span::raw(":load "));
+            spans.push(Span::raw(":detail "));
+
+            spans.push(Span::styled("?", Style::default().fg(Theme::INFO)));
+            spans.push(Span::raw(":help"));
+        }
+        ViewState::SessionDetail => {
+            spans.push(Span::styled("Esc", Style::default().fg(Theme::INFO)));
+            spans.push(Span::raw(":back "));
+
+            spans.push(Span::styled("h/l", Style::default().fg(Theme::INFO)));
+            spans.push(Span::raw(":focus "));
+
+            spans.push(Span::styled("j/k", Style::default().fg(Theme::INFO)));
+            spans.push(Span::raw(":scroll "));
 
             spans.push(Span::styled("?", Style::default().fg(Theme::INFO)));
             spans.push(Span::raw(":help"));
@@ -150,6 +163,17 @@ mod tests {
 
         assert!(text.contains("Esc:back"));
         assert!(text.contains("j/k:scroll"));
-        assert!(text.contains("Enter:load"));
+        assert!(text.contains("Enter:detail"));
+    }
+
+    #[test]
+    fn build_footer_text_session_detail() {
+        let state = AppState::with_view(ViewState::SessionDetail);
+        let line = build_footer_text(&state);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+
+        assert!(text.contains("Esc:back"));
+        assert!(text.contains("h/l:focus"));
+        assert!(text.contains("j/k:scroll"));
     }
 }

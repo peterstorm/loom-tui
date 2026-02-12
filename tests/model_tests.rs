@@ -201,7 +201,7 @@ fn parse_hook_events_jsonl() {
 
     // Verify subagent start with task description
     match &events[1].kind {
-        HookEventKind::SubagentStart { task_description } => {
+        HookEventKind::SubagentStart { task_description, .. } => {
             assert_eq!(task_description, &Some("Create project scaffold".to_string()));
             assert_eq!(events[1].agent_id, Some("a01".to_string()));
         }

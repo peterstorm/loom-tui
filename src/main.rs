@@ -9,6 +9,7 @@ use loom_tui::{
     event::AppEvent,
     hook_install::{detect_hook, install_hook},
     paths::Paths,
+    session,
     view::render,
     watcher,
 };
@@ -35,7 +36,8 @@ fn main() -> Result<()> {
     let hook_status = detect_hook(&project_root);
 
     // Initialize application state
-    let mut state = AppState::with_hook_status(hook_status);
+    let mut state = AppState::with_hook_status(hook_status)
+        .with_project_path(project_root.display().to_string());
 
     // Terminal initialization
     enable_raw_mode()?;
@@ -80,6 +82,10 @@ fn run_event_loop(
     tick_rate: Duration,
     last_tick: &mut Instant,
 ) -> Result<()> {
+    // Channel for background session loads
+    let (load_tx, load_rx) = std::sync::mpsc::channel::<AppEvent>();
+    let mut load_in_flight = false;
+
     loop {
         // Render current state
         terminal.draw(|frame| {
@@ -114,6 +120,36 @@ fn run_event_loop(
         // Drain file watcher events
         while let Ok(event) = watcher_rx.try_recv() {
             *state = update(state.clone(), event);
+        }
+
+        // Drain background session load results
+        while let Ok(event) = load_rx.try_recv() {
+            *state = update(state.clone(), event);
+            load_in_flight = false;
+        }
+
+        // Spawn background session load if requested and not already in flight
+        if let Some(idx) = state.loading_session {
+            if !load_in_flight {
+                if let Some(session) = state.sessions.get(idx) {
+                    let path = session.path.clone();
+                    let tx = load_tx.clone();
+                    load_in_flight = true;
+                    std::thread::spawn(move || {
+                        match session::load_session(&path) {
+                            Ok(archive) => {
+                                let _ = tx.send(AppEvent::SessionLoaded(archive));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppEvent::ParseError {
+                                    source: path.display().to_string(),
+                                    error: e,
+                                });
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         // Tick event

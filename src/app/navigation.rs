@@ -1,6 +1,9 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{AppState, PanelFocus, ViewState};
+
+/// Half-page jump size for Ctrl+D / Ctrl+U
+const PAGE_JUMP: usize = 20;
 
 /// Pure navigation state transition function.
 /// Takes current state + keyboard event, returns new state.
@@ -29,10 +32,16 @@ pub fn handle_key(mut state: AppState, key: KeyEvent) -> AppState {
         KeyCode::Char('2') => switch_to_agent_detail(state),
         KeyCode::Char('3') => {
             state.view = ViewState::Sessions;
+            let has_sessions = !state.active_sessions.is_empty() || !state.sessions.is_empty();
+            if state.selected_session_index.is_none() && has_sessions {
+                state.selected_session_index = Some(0);
+            }
             state
         }
         KeyCode::Tab | KeyCode::Char('l') => toggle_focus_right(state),
         KeyCode::Char('h') => toggle_focus_left(state),
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => scroll_page_down(state),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => scroll_page_up(state),
         KeyCode::Char('j') | KeyCode::Down => scroll_down(state),
         KeyCode::Char('k') | KeyCode::Up => scroll_up(state),
         KeyCode::Enter => drill_down(state),
@@ -132,8 +141,22 @@ fn scroll_down(mut state: AppState) -> AppState {
             }
         },
         ViewState::Sessions => {
-            state.scroll_offsets.sessions = state.scroll_offsets.sessions.saturating_add(1);
+            let session_count = state.active_sessions.len() + state.sessions.len();
+            if session_count > 0 {
+                let current = state.selected_session_index.unwrap_or(0);
+                state.selected_session_index = Some((current + 1).min(session_count - 1));
+            }
         }
+        ViewState::SessionDetail => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.session_detail_left =
+                    state.scroll_offsets.session_detail_left.saturating_add(1);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.session_detail_right =
+                    state.scroll_offsets.session_detail_right.saturating_add(1);
+            }
+        },
     }
     state
 }
@@ -167,8 +190,109 @@ fn scroll_up(mut state: AppState) -> AppState {
             }
         },
         ViewState::Sessions => {
-            state.scroll_offsets.sessions = state.scroll_offsets.sessions.saturating_sub(1);
+            let current = state.selected_session_index.unwrap_or(0);
+            state.selected_session_index = Some(current.saturating_sub(1));
         }
+        ViewState::SessionDetail => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.session_detail_left =
+                    state.scroll_offsets.session_detail_left.saturating_sub(1);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.session_detail_right =
+                    state.scroll_offsets.session_detail_right.saturating_sub(1);
+            }
+        },
+    }
+    state
+}
+
+/// Scroll down by PAGE_JUMP lines (Ctrl+D).
+fn scroll_page_down(mut state: AppState) -> AppState {
+    match state.view {
+        ViewState::Dashboard => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.task_list = state.scroll_offsets.task_list.saturating_add(PAGE_JUMP);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.event_stream = state.scroll_offsets.event_stream.saturating_add(PAGE_JUMP);
+                state.auto_scroll = false;
+            }
+        },
+        ViewState::AgentDetail => match state.focus {
+            PanelFocus::Left => {
+                let agent_count = state.agents.len();
+                if agent_count > 0 {
+                    let current = state.selected_agent_index.unwrap_or(0);
+                    let new_idx = (current + PAGE_JUMP).min(agent_count - 1);
+                    if new_idx != current {
+                        state.scroll_offsets.agent_events = 0;
+                    }
+                    state.selected_agent_index = Some(new_idx);
+                }
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.agent_events = state.scroll_offsets.agent_events.saturating_add(PAGE_JUMP);
+                state.auto_scroll = false;
+            }
+        },
+        ViewState::Sessions => {
+            let session_count = state.active_sessions.len() + state.sessions.len();
+            if session_count > 0 {
+                let current = state.selected_session_index.unwrap_or(0);
+                state.selected_session_index = Some((current + PAGE_JUMP).min(session_count - 1));
+            }
+        }
+        ViewState::SessionDetail => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.session_detail_left = state.scroll_offsets.session_detail_left.saturating_add(PAGE_JUMP);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.session_detail_right = state.scroll_offsets.session_detail_right.saturating_add(PAGE_JUMP);
+            }
+        },
+    }
+    state
+}
+
+/// Scroll up by PAGE_JUMP lines (Ctrl+U).
+fn scroll_page_up(mut state: AppState) -> AppState {
+    match state.view {
+        ViewState::Dashboard => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.task_list = state.scroll_offsets.task_list.saturating_sub(PAGE_JUMP);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.event_stream = state.scroll_offsets.event_stream.saturating_sub(PAGE_JUMP);
+                state.auto_scroll = false;
+            }
+        },
+        ViewState::AgentDetail => match state.focus {
+            PanelFocus::Left => {
+                let current = state.selected_agent_index.unwrap_or(0);
+                let new_idx = current.saturating_sub(PAGE_JUMP);
+                if new_idx != current {
+                    state.scroll_offsets.agent_events = 0;
+                }
+                state.selected_agent_index = Some(new_idx);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.agent_events = state.scroll_offsets.agent_events.saturating_sub(PAGE_JUMP);
+                state.auto_scroll = false;
+            }
+        },
+        ViewState::Sessions => {
+            let current = state.selected_session_index.unwrap_or(0);
+            state.selected_session_index = Some(current.saturating_sub(PAGE_JUMP));
+        }
+        ViewState::SessionDetail => match state.focus {
+            PanelFocus::Left => {
+                state.scroll_offsets.session_detail_left = state.scroll_offsets.session_detail_left.saturating_sub(PAGE_JUMP);
+            }
+            PanelFocus::Right => {
+                state.scroll_offsets.session_detail_right = state.scroll_offsets.session_detail_right.saturating_sub(PAGE_JUMP);
+            }
+        },
     }
     state
 }
@@ -176,7 +300,8 @@ fn scroll_up(mut state: AppState) -> AppState {
 /// Drill down into selected item.
 /// Dashboard: Enter on task with agent -> switch to AgentDetail, select that agent
 /// AgentDetail: no drill-down (no-op)
-/// Sessions: Enter on session -> load session
+/// Sessions: Enter on session -> SessionDetail (active or archived)
+/// SessionDetail: no-op
 fn drill_down(mut state: AppState) -> AppState {
     match state.view {
         ViewState::Dashboard => {
@@ -191,8 +316,8 @@ fn drill_down(mut state: AppState) -> AppState {
                     if let Some(task) = all_tasks.get(task_idx) {
                         if let Some(ref agent_id) = task.agent_id {
                             let agent_idx = state
-                                .agents
-                                .keys()
+                                .sorted_agent_keys()
+                                .iter()
                                 .position(|k| k == agent_id);
                             state.selected_agent_index = agent_idx;
                             state.view = ViewState::AgentDetail;
@@ -202,7 +327,33 @@ fn drill_down(mut state: AppState) -> AppState {
             }
         }
         ViewState::AgentDetail => {}
-        ViewState::Sessions => {}
+        ViewState::Sessions => {
+            if let Some(idx) = state.selected_session_index {
+                let active_count = state.active_sessions.len();
+                if idx < active_count {
+                    // Active session — navigate directly (live data)
+                    state.view = ViewState::SessionDetail;
+                    state.scroll_offsets.session_detail_left = 0;
+                    state.scroll_offsets.session_detail_right = 0;
+                    state.focus = PanelFocus::Left;
+                } else {
+                    let archive_idx = idx - active_count;
+                    if let Some(session) = state.sessions.get(archive_idx) {
+                        if session.data.is_some() {
+                            // Already loaded — navigate directly
+                            state.view = ViewState::SessionDetail;
+                            state.scroll_offsets.session_detail_left = 0;
+                            state.scroll_offsets.session_detail_right = 0;
+                            state.focus = PanelFocus::Left;
+                        } else {
+                            // Not loaded — set loading flag (main loop handles I/O)
+                            state.loading_session = Some(archive_idx);
+                        }
+                    }
+                }
+            }
+        }
+        ViewState::SessionDetail => {}
     }
     state
 }
@@ -215,6 +366,9 @@ fn go_back(mut state: AppState) -> AppState {
         }
         ViewState::Sessions => {
             state.view = ViewState::Dashboard;
+        }
+        ViewState::SessionDetail => {
+            state.view = ViewState::Sessions;
         }
         ViewState::Dashboard => {}
     }
@@ -242,7 +396,8 @@ fn toggle_auto_scroll(mut state: AppState) -> AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Agent, Task, TaskGraph, TaskStatus, Wave};
+    use crate::model::{Agent, ArchivedSession, SessionMeta, Task, TaskGraph, TaskStatus, Wave};
+    use std::path::PathBuf;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -462,9 +617,14 @@ mod tests {
     fn scroll_in_sessions_view() {
         let mut state = AppState::new();
         state.view = ViewState::Sessions;
+        state.sessions = vec![
+            ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ];
+        state.selected_session_index = Some(0);
 
         let new_state = handle_key(state, key(KeyCode::Char('j')));
-        assert_eq!(new_state.scroll_offsets.sessions, 1);
+        assert_eq!(new_state.selected_session_index, Some(1));
     }
 
     #[test]
@@ -601,6 +761,60 @@ mod tests {
 
         let new_state = handle_key(state, key(KeyCode::Enter));
         assert_eq!(new_state.filter.unwrap(), "test");
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_d_page_scrolls_down_dashboard_left() {
+        let state = AppState::new();
+        let new_state = handle_key(state, ctrl(KeyCode::Char('d')));
+        assert_eq!(new_state.scroll_offsets.task_list, PAGE_JUMP);
+    }
+
+    #[test]
+    fn ctrl_u_page_scrolls_up_dashboard_left() {
+        let mut state = AppState::new();
+        state.scroll_offsets.task_list = 30;
+        let new_state = handle_key(state, ctrl(KeyCode::Char('u')));
+        assert_eq!(new_state.scroll_offsets.task_list, 30 - PAGE_JUMP);
+    }
+
+    #[test]
+    fn ctrl_d_page_scrolls_down_dashboard_right() {
+        let mut state = AppState::new();
+        state.focus = PanelFocus::Right;
+        let new_state = handle_key(state, ctrl(KeyCode::Char('d')));
+        assert_eq!(new_state.scroll_offsets.event_stream, PAGE_JUMP);
+        assert!(!new_state.auto_scroll);
+    }
+
+    #[test]
+    fn ctrl_u_page_scrolls_up_saturates_at_zero() {
+        let state = AppState::new();
+        let new_state = handle_key(state, ctrl(KeyCode::Char('u')));
+        assert_eq!(new_state.scroll_offsets.task_list, 0);
+    }
+
+    #[test]
+    fn ctrl_d_page_scrolls_session_detail() {
+        let mut state = AppState::new();
+        state.view = ViewState::SessionDetail;
+        state.focus = PanelFocus::Right;
+        let new_state = handle_key(state, ctrl(KeyCode::Char('d')));
+        assert_eq!(new_state.scroll_offsets.session_detail_right, PAGE_JUMP);
+    }
+
+    #[test]
+    fn ctrl_u_page_scrolls_session_detail() {
+        let mut state = AppState::new();
+        state.view = ViewState::SessionDetail;
+        state.focus = PanelFocus::Left;
+        state.scroll_offsets.session_detail_left = 25;
+        let new_state = handle_key(state, ctrl(KeyCode::Char('u')));
+        assert_eq!(new_state.scroll_offsets.session_detail_left, 25 - PAGE_JUMP);
     }
 
     #[test]

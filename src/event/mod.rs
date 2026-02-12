@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crossterm::event::KeyEvent;
 
 use crate::model::{AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
@@ -36,6 +38,12 @@ pub enum AppEvent {
     /// Session loaded from archive
     SessionLoaded(SessionArchive),
 
-    /// Session list refreshed from disk
-    SessionListRefreshed(Vec<SessionMeta>),
+    /// Session list refreshed from disk (full archives — legacy/session-end path)
+    SessionListRefreshed(Vec<SessionArchive>),
+
+    /// Lightweight session metas loaded at startup
+    SessionMetasLoaded(Vec<(PathBuf, SessionMeta)>),
+
+    /// Request to load a full session archive by index
+    LoadSessionRequested(usize),
 }

@@ -23,9 +23,10 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(area);
 
-    // Resolve selected agent
+    // Resolve selected agent via sorted order
+    let sorted_keys = state.sorted_agent_keys();
     let selected_agent = state.selected_agent_index.and_then(|idx| {
-        state.agents.keys().nth(idx).and_then(|k| state.agents.get(k))
+        sorted_keys.get(idx).and_then(|k| state.agents.get(k))
     });
 
     render_agent_header(frame, chunks[0], selected_agent, state);
@@ -83,9 +84,17 @@ fn render_agent_header(
             };
 
             let task_info = agent
-                .task_id
+                .task_description
                 .as_ref()
-                .map(|tid| format!(" | Task: {}", tid))
+                .or(agent.task_id.as_ref())
+                .map(|desc| {
+                    let truncated = if desc.len() > 60 {
+                        format!("{}…", &desc[..60])
+                    } else {
+                        desc.clone()
+                    };
+                    format!(" | {}", truncated)
+                })
                 .unwrap_or_default();
 
             Line::from(vec![
@@ -98,7 +107,7 @@ fn render_agent_header(
                 Span::styled(status.0, Style::default().fg(status.1)),
                 Span::raw(" | Duration: "),
                 Span::styled(duration, Style::default().fg(Theme::INFO)),
-                Span::raw(task_info),
+                Span::styled(task_info, Style::default().fg(Theme::MUTED_TEXT)),
             ])
         }
         None => Line::from(Span::styled(

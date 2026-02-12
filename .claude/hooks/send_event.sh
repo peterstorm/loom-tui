@@ -92,15 +92,13 @@ case "$HOOK_NAME" in
       >> "$EVENT_FILE"
     ;;
   SubagentStart|subagent-start)
-    AGENT_TYPE=$(echo "$HOOK_JSON" | jq -r '.agent_type // empty' 2>/dev/null || echo "")
-    TASK_DESC=$(echo "$HOOK_JSON" | jq -r '.task_description // .prompt // empty' 2>/dev/null || echo "")
+    TASK_DESC=$(echo "$HOOK_JSON" | jq -r '.agent_type // .task_description // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
       --arg aid "$AGENT_ID" \
-      --arg at "$AGENT_TYPE" \
       --arg td "$TASK_DESC" \
-      '{timestamp: $ts, event: "subagent_start", agent_type: (if $at == "" then null else $at end), task_description: (if $td == "" then null else $td end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      '{timestamp: $ts, event: "subagent_start", task_description: (if $td == "" then null else $td end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
       >> "$EVENT_FILE"
     ;;
   SubagentStop|subagent-stop)
@@ -139,12 +137,10 @@ case "$HOOK_NAME" in
       >> "$EVENT_FILE"
     ;;
   session-start|SessionStart)
-    CWD=$(echo "$HOOK_JSON" | jq -r '.cwd // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
-      --arg cwd "$CWD" \
-      '{timestamp: $ts, event: "session_start", session_id: (if $sid == "" then null else $sid end), cwd: (if $cwd == "" then null else $cwd end)}' \
+      '{timestamp: $ts, event: "session_start", session_id: (if $sid == "" then null else $sid end)}' \
       >> "$EVENT_FILE"
     ;;
   session-end|SessionEnd)

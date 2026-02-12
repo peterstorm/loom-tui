@@ -49,6 +49,8 @@ pub enum HookEventKind {
     SessionEnd,
     SubagentStart {
         #[serde(default)]
+        agent_type: Option<String>,
+        #[serde(default)]
         task_description: Option<String>,
     },
     SubagentStop,
@@ -82,7 +84,20 @@ impl HookEventKind {
     }
 
     pub fn subagent_start(task_description: Option<String>) -> Self {
-        Self::SubagentStart { task_description }
+        Self::SubagentStart {
+            agent_type: None,
+            task_description,
+        }
+    }
+
+    pub fn subagent_start_full(
+        agent_type: Option<String>,
+        task_description: Option<String>,
+    ) -> Self {
+        Self::SubagentStart {
+            agent_type,
+            task_description,
+        }
     }
 
     pub fn subagent_stop() -> Self {

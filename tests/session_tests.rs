@@ -2,8 +2,8 @@ use chrono::Utc;
 use loom_tui::app::AppState;
 use loom_tui::model::{SessionArchive, SessionMeta, SessionStatus, TaskGraph};
 use loom_tui::session::{
-    auto_save_tick, build_archive, delete_session, generate_filename, list_sessions, load_session,
-    save_session,
+    auto_save_tick, build_archive, delete_session, generate_filename, list_session_metas,
+    list_sessions, load_session, save_session,
 };
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -129,9 +129,9 @@ fn list_sessions_sorted_by_timestamp_newest_first() {
     // List should be sorted newest first
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 3);
-    assert_eq!(sessions[0].id, "s3");
-    assert_eq!(sessions[1].id, "s2");
-    assert_eq!(sessions[2].id, "s1");
+    assert_eq!(sessions[0].meta.id, "s3");
+    assert_eq!(sessions[1].meta.id, "s2");
+    assert_eq!(sessions[2].meta.id, "s1");
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn list_sessions_skips_corrupt_files() {
     // List should return only valid session
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id, "s1");
+    assert_eq!(sessions[0].meta.id, "s1");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn list_sessions_skips_non_json_files() {
     // List should return only JSON files
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id, "s1");
+    assert_eq!(sessions[0].meta.id, "s1");
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn full_workflow_save_list_load_delete() {
     // List sessions
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id, "s1");
+    assert_eq!(sessions[0].meta.id, "s1");
 
     // Load session
     let loaded = load_session(&path).unwrap();
@@ -273,4 +273,79 @@ fn full_workflow_save_list_load_delete() {
     delete_session(&path).unwrap();
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert!(sessions.is_empty());
+}
+
+// ============================================================================
+// list_session_metas tests
+// ============================================================================
+
+#[test]
+fn list_session_metas_returns_correct_meta_and_path() {
+    let tmpdir = TempDir::new().unwrap();
+
+    let meta1 = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta2 = SessionMeta::new("s2".into(), Utc::now(), "/proj".into());
+
+    save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta1)).unwrap();
+    save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(meta2)).unwrap();
+
+    let metas = list_session_metas(tmpdir.path()).unwrap();
+    assert_eq!(metas.len(), 2);
+
+    // Each entry has correct path and meta
+    for (path, meta) in &metas {
+        assert!(path.exists());
+        assert!(path.extension().unwrap() == "json");
+        assert!(!meta.id.is_empty());
+    }
+}
+
+#[test]
+fn list_session_metas_sorted_newest_first() {
+    let tmpdir = TempDir::new().unwrap();
+
+    let now = Utc::now();
+    let earlier = now - chrono::Duration::hours(1);
+    let later = now + chrono::Duration::hours(1);
+
+    let m1 = SessionMeta::new("s1".into(), earlier, "/proj".into());
+    let m2 = SessionMeta::new("s2".into(), now, "/proj".into());
+    let m3 = SessionMeta::new("s3".into(), later, "/proj".into());
+
+    save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(m1)).unwrap();
+    save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(m2)).unwrap();
+    save_session(&tmpdir.path().join("s3.json"), &SessionArchive::new(m3)).unwrap();
+
+    let metas = list_session_metas(tmpdir.path()).unwrap();
+    assert_eq!(metas.len(), 3);
+    assert_eq!(metas[0].1.id, "s3"); // newest
+    assert_eq!(metas[1].1.id, "s2");
+    assert_eq!(metas[2].1.id, "s1"); // oldest
+}
+
+#[test]
+fn list_session_metas_empty_dir() {
+    let tmpdir = TempDir::new().unwrap();
+    let metas = list_session_metas(tmpdir.path()).unwrap();
+    assert!(metas.is_empty());
+}
+
+#[test]
+fn list_session_metas_missing_dir() {
+    let tmpdir = TempDir::new().unwrap();
+    let metas = list_session_metas(&tmpdir.path().join("nonexistent")).unwrap();
+    assert!(metas.is_empty());
+}
+
+#[test]
+fn list_session_metas_skips_corrupt_files() {
+    let tmpdir = TempDir::new().unwrap();
+
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta)).unwrap();
+    std::fs::write(tmpdir.path().join("corrupt.json"), "not json").unwrap();
+
+    let metas = list_session_metas(tmpdir.path()).unwrap();
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].1.id, "s1");
 }

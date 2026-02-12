@@ -43,12 +43,13 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
 
     let now = Utc::now();
     let selected = state.selected_agent_index;
+    let sorted_keys = state.sorted_agent_keys();
 
-    state
-        .agents
-        .values()
+    sorted_keys
+        .iter()
         .enumerate()
-        .map(|(idx, agent)| {
+        .map(|(idx, key)| {
+            let agent = &state.agents[key];
             let is_active = agent.finished_at.is_none();
             let (icon, icon_color) = if is_active {
                 ("◐", Theme::SUCCESS)

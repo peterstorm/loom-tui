@@ -12,3 +12,6 @@ target/
 # Memory and local state
 .memory/
 .claude/cortex-memory.local.md
+
+# direnv
+.direnv

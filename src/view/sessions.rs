@@ -8,14 +8,22 @@ use ratatui::{
 };
 
 use crate::app::state::AppState;
-use crate::model::{theme::Theme, SessionStatus};
+use crate::model::{theme::Theme, SessionMeta, SessionStatus};
 
 /// Render the sessions archive view into the given content area.
 /// Global header is rendered by the view dispatcher.
 pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
-    // Empty state: no archived sessions
-    if state.sessions.is_empty() {
+    // Combine active sessions + archived sessions for display
+    let all_sessions: Vec<&SessionMeta> = state.active_sessions.values()
+        .chain(state.sessions.iter().map(|a| &a.meta))
+        .collect();
+
+    // Track which archived sessions are loading
+    let active_count = state.active_sessions.len();
+
+    // Empty state: no sessions at all
+    if all_sessions.is_empty() {
         render_empty_state(frame, area);
         return;
     }
@@ -37,12 +45,11 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = state
-        .sessions
+    let rows: Vec<Row> = all_sessions
         .iter()
         .enumerate()
         .map(|(idx, session)| {
-            let is_selected = state.selected_task_index == Some(idx);
+            let is_selected = state.selected_session_index == Some(idx);
             let style = if is_selected {
                 Style::default()
                     .bg(Theme::ACTIVE_BORDER)
@@ -58,18 +65,44 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
                 SessionStatus::Cancelled => Theme::MUTED_TEXT,
             };
 
+            // For active session, show live counts from current state
+            let (agent_count, task_count, duration) = if session.status == SessionStatus::Active {
+                let agents = state.agents.len() as u32;
+                let tasks = state.task_graph.as_ref()
+                    .map(|g| g.total_tasks as u32)
+                    .unwrap_or(0);
+                let dur = (chrono::Utc::now() - session.timestamp)
+                    .to_std()
+                    .ok();
+                (agents, tasks, dur)
+            } else {
+                (session.agent_count, session.task_count, session.duration)
+            };
+
+            // Show loading indicator for session being loaded
+            let is_loading = idx >= active_count
+                && state.loading_session == Some(idx - active_count);
+
+            let status_str = if is_loading {
+                "Loading…".to_string()
+            } else {
+                format_status(&session.status)
+            };
+
             Row::new(vec![
                 session.id.clone(),
                 session.timestamp.format("%Y-%m-%d %H:%M").to_string(),
-                format_duration(session.duration),
-                format_status(&session.status),
-                session.agent_count.to_string(),
-                session.task_count.to_string(),
+                format_duration(duration),
+                status_str,
+                agent_count.to_string(),
+                task_count.to_string(),
                 session.project_path.clone(),
             ])
             .style(style)
             .fg(if is_selected {
                 Theme::BACKGROUND
+            } else if is_loading {
+                Theme::WARNING
             } else {
                 status_color
             })
@@ -169,10 +202,11 @@ fn format_status(status: &SessionStatus) -> String {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::SessionMeta;
+    use crate::model::{ArchivedSession, SessionMeta};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
@@ -187,7 +221,6 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
 
-        // Convert buffer to string for easier searching
         let buffer_str: String = (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
@@ -197,7 +230,6 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        // Find "No archived sessions" text in buffer
         assert!(buffer_str.contains("No archived sessions"),
                 "Empty state message should be displayed");
     }
@@ -209,11 +241,17 @@ mod tests {
 
         let mut state = AppState::new();
         state.sessions = vec![
-            SessionMeta::new("s1".into(), Utc::now(), "/proj/foo".into())
-                .with_status(SessionStatus::Completed)
-                .with_duration(Duration::from_secs(300)),
-            SessionMeta::new("s2".into(), Utc::now(), "/proj/bar".into())
-                .with_status(SessionStatus::Failed),
+            ArchivedSession::new(
+                SessionMeta::new("s1".into(), Utc::now(), "/proj/foo".into())
+                    .with_status(SessionStatus::Completed)
+                    .with_duration(Duration::from_secs(300)),
+                PathBuf::new(),
+            ),
+            ArchivedSession::new(
+                SessionMeta::new("s2".into(), Utc::now(), "/proj/bar".into())
+                    .with_status(SessionStatus::Failed),
+                PathBuf::new(),
+            ),
         ];
 
         terminal
@@ -222,7 +260,6 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
 
-        // Convert buffer to string for easier searching
         let buffer_str: String = (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
@@ -232,7 +269,6 @@ mod tests {
             .collect::<Vec<String>>()
             .join("\n");
 
-        // Check for session IDs in buffer
         assert!(buffer_str.contains("s1"), "Session s1 should be displayed");
         assert!(buffer_str.contains("s2"), "Session s2 should be displayed");
     }

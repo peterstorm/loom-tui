@@ -1,8 +1,9 @@
 use chrono::Utc;
 
-use crate::app::{handle_key, AppState};
+use crate::app::{handle_key, AppState, ViewState};
 use crate::event::AppEvent;
-use crate::model::{Agent, AgentMessage, HookEventKind, MessageKind, ToolCall};
+use crate::model::{Agent, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionMeta, SessionStatus, ToolCall};
+use crate::session;
 use std::time::Duration;
 
 /// Pure update function following Elm Architecture.
@@ -25,35 +26,43 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
         AppEvent::HookEventReceived(event) => {
             // Derive agent lifecycle and tool calls from hook events
             let agent_id = event.agent_id.clone().or_else(|| {
-                // Heuristic: attribute to single active agent
-                let active: Vec<_> = state
+                // Heuristic: attribute to most recently started active agent
+                state
                     .agents
                     .iter()
                     .filter(|(_, a)| a.finished_at.is_none())
+                    .max_by_key(|(_, a)| a.started_at)
                     .map(|(id, _)| id.clone())
-                    .collect();
-                if active.len() == 1 {
-                    Some(active[0].clone())
-                } else {
-                    None
-                }
             });
 
             match &event.kind {
-                HookEventKind::SubagentStart { ref task_description } => {
+                HookEventKind::SubagentStart {
+                    ref agent_type,
+                    ref task_description,
+                } => {
                     if let Some(ref id) = event.agent_id {
-                        let agent_type = task_description.clone();
+                        // agent_type: short label (e.g. "Explore")
+                        // task_description: the actual prompt/task text
+                        // Fallback: if only task_description provided, use it as agent_type too
+                        let resolved_type = agent_type
+                            .clone()
+                            .or_else(|| task_description.clone());
+                        let desc = task_description.clone();
                         state
                             .agents
                             .entry(id.clone())
                             .and_modify(|a| {
                                 if a.agent_type.is_none() {
-                                    a.agent_type = agent_type.clone();
+                                    a.agent_type = resolved_type.clone();
+                                }
+                                if a.task_description.is_none() {
+                                    a.task_description = desc.clone();
                                 }
                             })
                             .or_insert_with(|| {
                                 let mut a = Agent::new(id.clone(), event.timestamp);
-                                a.agent_type = agent_type;
+                                a.agent_type = resolved_type;
+                                a.task_description = desc;
                                 a
                             });
                     }
@@ -100,6 +109,43 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
                                 }
                             }
                         });
+                    }
+                }
+                HookEventKind::SessionStart => {
+                    let session_id = event.session_id.clone()
+                        .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")));
+
+                    // Extract project path from raw event cwd, fall back to TUI project
+                    let project_path = event.raw.get("cwd")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| state.project_path.clone());
+
+                    let meta = SessionMeta::new(
+                        session_id.clone(),
+                        event.timestamp,
+                        project_path,
+                    );
+                    state.active_sessions.insert(session_id, meta);
+                }
+                HookEventKind::SessionEnd => {
+                    let session_id = event.session_id.clone()
+                        .unwrap_or_default();
+                    if let Some(mut meta) = state.active_sessions.remove(&session_id) {
+                        meta.status = SessionStatus::Completed;
+                        meta.agent_count = state.agents.len() as u32;
+                        meta.event_count = state.events.len() as u32;
+                        meta.task_count = state.task_graph.as_ref()
+                            .map(|g| g.total_tasks as u32)
+                            .unwrap_or(0);
+                        let dur = (event.timestamp - meta.timestamp)
+                            .to_std()
+                            .unwrap_or_default();
+                        meta.duration = Some(dur);
+                        let archive = session::build_archive(&state, meta.clone());
+                        let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
+                            .with_data(archive);
+                        state.sessions.insert(0, archived);
                     }
                 }
                 _ => {}
@@ -154,19 +200,39 @@ pub fn update(mut state: AppState, event: AppEvent) -> AppState {
         }
 
         AppEvent::SessionLoaded(archive) => {
-            state.active_session = Some(archive.meta);
-            state.task_graph = archive.task_graph;
-            state.agents = archive.agents;
-            // Convert Vec to VecDeque for events
-            state.events.clear();
-            for event in archive.events {
-                state.events.push_back(event);
+            // Find matching ArchivedSession by meta.id and populate data
+            if let Some(session) = state.sessions.iter_mut().find(|s| s.meta.id == archive.meta.id) {
+                session.data = Some(archive);
             }
+            state.loading_session = None;
+            state.view = ViewState::SessionDetail;
+            state.scroll_offsets.session_detail_left = 0;
+            state.scroll_offsets.session_detail_right = 0;
+            state.focus = crate::app::PanelFocus::Left;
             state
         }
 
-        AppEvent::SessionListRefreshed(sessions) => {
-            state.sessions = sessions;
+        AppEvent::SessionListRefreshed(archives) => {
+            state.sessions = archives
+                .into_iter()
+                .map(|a| {
+                    let meta = a.meta.clone();
+                    ArchivedSession::new(meta, std::path::PathBuf::new()).with_data(a)
+                })
+                .collect();
+            state
+        }
+
+        AppEvent::SessionMetasLoaded(metas) => {
+            state.sessions = metas
+                .into_iter()
+                .map(|(path, meta)| ArchivedSession::new(meta, path))
+                .collect();
+            state
+        }
+
+        AppEvent::LoadSessionRequested(idx) => {
+            state.loading_session = Some(idx);
             state
         }
     }
@@ -377,8 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn session_loaded_sets_state() {
-        let state = AppState::new();
+    fn session_loaded_populates_data() {
+        let mut state = AppState::new();
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
         let graph = TaskGraph {
             waves: vec![],
@@ -391,55 +457,58 @@ mod tests {
 
         let events = vec![HookEvent::new(Utc::now(), HookEventKind::SessionStart)];
 
+        // Pre-populate with meta-only entry
+        state.sessions.push(crate::model::ArchivedSession::new(
+            meta.clone(),
+            std::path::PathBuf::new(),
+        ));
+        state.loading_session = Some(0);
+
         let archive = SessionArchive::new(meta.clone())
-            .with_task_graph(graph.clone())
-            .with_agents(agents.clone())
-            .with_events(events.clone());
+            .with_task_graph(graph)
+            .with_agents(agents)
+            .with_events(events);
 
         let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-        assert_eq!(new_state.active_session, Some(meta));
-        assert_eq!(new_state.task_graph.unwrap().total_tasks, 5);
-        assert_eq!(new_state.agents.len(), 1);
-        assert_eq!(new_state.events.len(), 1);
+        let data = new_state.sessions[0].data.as_ref().unwrap();
+        assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 5);
+        assert_eq!(data.agents.len(), 1);
+        assert_eq!(data.events.len(), 1);
+        assert!(new_state.loading_session.is_none());
+        assert!(matches!(new_state.view, ViewState::SessionDetail));
     }
 
     #[test]
-    fn session_loaded_replaces_existing_state() {
+    fn session_loaded_clears_loading_and_navigates() {
         let mut state = AppState::new();
-        state.events.push_back(HookEvent::new(
-            Utc::now(),
-            HookEventKind::Notification {
-                message: "old event".into(),
-            },
-        ));
-        state
-            .agents
-            .insert("old".into(), Agent::new("old".into(), Utc::now()));
-
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        let archive = SessionArchive::new(meta.clone());
+        state.sessions.push(crate::model::ArchivedSession::new(
+            meta.clone(),
+            std::path::PathBuf::new(),
+        ));
+        state.loading_session = Some(0);
 
+        let archive = SessionArchive::new(meta);
         let new_state = update(state, AppEvent::SessionLoaded(archive));
 
-        // Old state should be replaced
-        assert_eq!(new_state.events.len(), 0);
-        assert_eq!(new_state.agents.len(), 0);
-        assert_eq!(new_state.active_session, Some(meta));
+        assert!(new_state.loading_session.is_none());
+        assert!(matches!(new_state.view, ViewState::SessionDetail));
     }
 
     #[test]
     fn session_list_refreshed() {
         let state = AppState::new();
         let sessions = vec![
-            SessionMeta::new("s1".into(), Utc::now(), "/proj1".into()),
-            SessionMeta::new("s2".into(), Utc::now(), "/proj2".into()),
+            SessionArchive::new(SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
+            SessionArchive::new(SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
         ];
 
         let new_state = update(state, AppEvent::SessionListRefreshed(sessions.clone()));
 
         assert_eq!(new_state.sessions.len(), 2);
-        assert_eq!(new_state.sessions, sessions);
+        assert_eq!(new_state.sessions[0].meta.id, "s1");
+        assert_eq!(new_state.sessions[1].meta.id, "s2");
     }
 
     #[test]
@@ -618,6 +687,63 @@ mod tests {
         // Can't attribute — both agents should have 0 messages
         assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
         assert_eq!(state.agents.get("a02").unwrap().messages.len(), 0);
+    }
+
+    #[test]
+    fn concurrent_session_starts_both_tracked() {
+        let state = AppState::new();
+        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s2".into());
+
+        let state = update(state, AppEvent::HookEventReceived(e1));
+        let state = update(state, AppEvent::HookEventReceived(e2));
+
+        assert_eq!(state.active_sessions.len(), 2);
+        assert!(state.active_sessions.contains_key("s1"));
+        assert!(state.active_sessions.contains_key("s2"));
+    }
+
+    #[test]
+    fn session_end_removes_correct_session() {
+        let state = AppState::new();
+        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s2".into());
+        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
+            .with_session("s1".into());
+
+        let state = update(state, AppEvent::HookEventReceived(e1));
+        let state = update(state, AppEvent::HookEventReceived(e2));
+        let state = update(state, AppEvent::HookEventReceived(end));
+
+        assert_eq!(state.active_sessions.len(), 1);
+        assert!(!state.active_sessions.contains_key("s1"));
+        assert!(state.active_sessions.contains_key("s2"));
+        // s1 should be archived
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].meta.id, "s1");
+    }
+
+    #[test]
+    fn session_start_does_not_clear_live_state() {
+        let mut state = AppState::new();
+        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.events.push_back(HookEvent::new(
+            Utc::now(),
+            HookEventKind::Notification { message: "existing".into() },
+        ));
+
+        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1".into());
+        let state = update(state, AppEvent::HookEventReceived(e));
+
+        // Live state should NOT be cleared
+        assert_eq!(state.agents.len(), 1);
+        // events: 1 original + 1 SessionStart event
+        assert_eq!(state.events.len(), 2);
     }
 
     #[test]

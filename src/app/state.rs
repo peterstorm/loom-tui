@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use crate::model::{Agent, HookEvent, SessionMeta, TaskGraph};
+use crate::model::{Agent, ArchivedSession, HookEvent, SessionMeta, TaskGraph};
 
 /// Main application state.
 /// Updated via pure `update(state, event) -> state` function.
@@ -20,11 +20,11 @@ pub struct AppState {
     /// Ring buffer of hook events (max 10,000 per NFR-005)
     pub events: VecDeque<HookEvent>,
 
-    /// List of archived sessions
-    pub sessions: Vec<SessionMeta>,
+    /// List of archived sessions (meta always available, full data loaded on demand)
+    pub sessions: Vec<ArchivedSession>,
 
-    /// Currently loaded session (if viewing archived session)
-    pub active_session: Option<SessionMeta>,
+    /// Currently active sessions keyed by session ID (supports concurrent sessions)
+    pub active_sessions: BTreeMap<String, SessionMeta>,
 
     /// Current panel focus
     pub focus: PanelFocus,
@@ -50,6 +50,9 @@ pub struct AppState {
     /// Application start time (for elapsed time display)
     pub started_at: Instant,
 
+    /// Project root path (for session metadata)
+    pub project_path: String,
+
     /// Signal to quit the application
     pub should_quit: bool,
 
@@ -58,6 +61,12 @@ pub struct AppState {
 
     /// Index of selected agent in agent detail view
     pub selected_agent_index: Option<usize>,
+
+    /// Index of selected session in sessions view
+    pub selected_session_index: Option<usize>,
+
+    /// Index of session currently being loaded from disk (shows loading indicator)
+    pub loading_session: Option<usize>,
 }
 
 /// View state variants
@@ -71,6 +80,9 @@ pub enum ViewState {
 
     /// Sessions archive view
     Sessions,
+
+    /// Session detail view (inspecting a single session)
+    SessionDetail,
 }
 
 /// Panel focus for two-panel layouts
@@ -113,6 +125,12 @@ pub struct ScrollState {
 
     /// Scroll offset for sessions table
     pub sessions: usize,
+
+    /// Scroll offset for session detail left panel (agent list)
+    pub session_detail_left: usize,
+
+    /// Scroll offset for session detail right panel (events)
+    pub session_detail_right: usize,
 }
 
 impl Default for AppState {
@@ -130,7 +148,7 @@ impl AppState {
             agents: BTreeMap::new(),
             events: VecDeque::with_capacity(10_000),
             sessions: Vec::new(),
-            active_session: None,
+            active_sessions: BTreeMap::new(),
             focus: PanelFocus::Left,
             scroll_offsets: ScrollState::default(),
             auto_scroll: true,
@@ -139,9 +157,12 @@ impl AppState {
             hook_status: HookStatus::Unknown,
             errors: VecDeque::with_capacity(100),
             started_at: Instant::now(),
+            project_path: String::new(),
             should_quit: false,
             selected_task_index: None,
             selected_agent_index: None,
+            selected_session_index: None,
+            loading_session: None,
         }
     }
 
@@ -160,6 +181,28 @@ impl AppState {
             ..Self::new()
         }
     }
+
+    /// Set project path for session metadata
+    pub fn with_project_path(mut self, path: String) -> Self {
+        self.project_path = path;
+        self
+    }
+
+    /// Agent keys sorted: active first (by started_at desc), then finished (by started_at desc).
+    /// Use this everywhere agent index is needed to keep selection consistent.
+    pub fn sorted_agent_keys(&self) -> Vec<String> {
+        let mut keys: Vec<_> = self.agents.keys().cloned().collect();
+        keys.sort_by(|a, b| {
+            let aa = &self.agents[a];
+            let bb = &self.agents[b];
+            let a_active = aa.finished_at.is_none();
+            let b_active = bb.finished_at.is_none();
+            b_active
+                .cmp(&a_active)
+                .then(bb.started_at.cmp(&aa.started_at))
+        });
+        keys
+    }
 }
 
 impl ScrollState {
@@ -175,6 +218,8 @@ impl ScrollState {
         self.agent_list = 0;
         self.agent_events = 0;
         self.sessions = 0;
+        self.session_detail_left = 0;
+        self.session_detail_right = 0;
     }
 }
 
@@ -190,7 +235,7 @@ mod tests {
         assert!(state.agents.is_empty());
         assert!(state.events.is_empty());
         assert!(state.sessions.is_empty());
-        assert!(state.active_session.is_none());
+        assert!(state.active_sessions.is_empty());
         assert!(matches!(state.focus, PanelFocus::Left));
         assert!(state.auto_scroll);
         assert!(state.filter.is_none());

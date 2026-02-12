@@ -119,8 +119,23 @@ pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, String> {
             continue;
         }
 
-        match serde_json::from_str::<HookEvent>(trimmed) {
-            Ok(event) => events.push(event),
+        // Parse as raw Value first, then deserialize struct, preserving raw for extra fields (cwd etc)
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(raw_value) => {
+                match serde_json::from_value::<HookEvent>(raw_value.clone()) {
+                    Ok(mut event) => {
+                        event.raw = raw_value;
+                        events.push(event);
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Line {}: JSON parse error: {}",
+                            line_num + 1,
+                            e
+                        ));
+                    }
+                }
+            }
             Err(e) => {
                 return Err(format!(
                     "Line {}: JSON parse error: {}",

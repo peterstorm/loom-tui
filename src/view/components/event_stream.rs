@@ -206,8 +206,12 @@ fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option<Str
     match kind {
         HookEventKind::SessionStart => ("●", "Session started".into(), None, Theme::SUCCESS, None),
         HookEventKind::SessionEnd => ("○", "Session ended".into(), None, Theme::INFO, None),
-        HookEventKind::SubagentStart { task_description } => {
-            ("▶", "Agent started".into(), task_description.clone(), Theme::SUCCESS, None)
+        HookEventKind::SubagentStart { agent_type, task_description } => {
+            let header = agent_type
+                .as_ref()
+                .map(|t| format!("Agent started ({})", t))
+                .unwrap_or_else(|| "Agent started".into());
+            ("▶", header, task_description.clone(), Theme::SUCCESS, None)
         }
         HookEventKind::SubagentStop => ("■", "Agent stopped".into(), None, Theme::MUTED_TEXT, None),
         HookEventKind::PreToolUse {

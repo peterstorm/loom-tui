@@ -3,6 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use serde::Deserialize;
+
 use crate::app::AppState;
 use crate::model::{SessionArchive, SessionMeta};
 
@@ -149,55 +151,95 @@ pub fn load_session(path: &Path) -> Result<SessionArchive, String> {
 
 /// List all session archives in directory.
 /// I/O operation: reads directory and parses each archive file.
+/// Returns full archives so callers retain agents/events/task_graph.
 ///
 /// Gracefully handles:
 /// - Empty directory (returns empty vec)
 /// - Corrupt files (skips them)
-/// - Missing directory (returns error)
+/// - Missing directory (returns empty vec)
 ///
 /// # Arguments
 /// * `dir` - Directory containing session archives
 ///
 /// # Returns
-/// * `Ok(Vec<SessionMeta>)` - List of session metadata, sorted by timestamp (newest first)
+/// * `Ok(Vec<SessionArchive>)` - Full archives sorted by timestamp (newest first)
 /// * `Err(String)` - I/O error reading directory
-pub fn list_sessions(dir: &Path) -> Result<Vec<SessionMeta>, String> {
-    // Check if directory exists
+pub fn list_sessions(dir: &Path) -> Result<Vec<SessionArchive>, String> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
 
-    // Read directory entries (I/O)
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("failed to read dir {}: {}", dir.display(), e))?;
 
     let mut sessions = Vec::new();
 
-    // Parse each JSON file
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue, // Skip unreadable entries
+            Err(_) => continue,
         };
 
         let path = entry.path();
 
-        // Only process .json files
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
 
-        // Try to load and extract metadata
         if let Ok(archive) = load_session(&path) {
-            sessions.push(extract_metadata(&archive));
+            sessions.push(archive);
         }
-        // Silently skip corrupt files
     }
 
-    // Sort by timestamp, newest first
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by(|a, b| b.meta.timestamp.cmp(&a.meta.timestamp));
 
     Ok(sessions)
+}
+
+/// Helper for deserializing only the `meta` field from a session archive JSON.
+#[derive(Deserialize)]
+struct MetaOnly {
+    meta: SessionMeta,
+}
+
+/// List session metas without deserializing full archives.
+/// Much faster than `list_sessions` — skips events/agents/task_graph.
+/// Returns `(path, meta)` tuples so full archive can be loaded later by path.
+pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read dir {}: {}", dir.display(), e))?;
+
+    let mut metas = Vec::new();
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        if let Ok(meta_only) = serde_json::from_str::<MetaOnly>(&content) {
+            metas.push((path, meta_only.meta));
+        }
+    }
+
+    metas.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+
+    Ok(metas)
 }
 
 /// Delete session archive file.

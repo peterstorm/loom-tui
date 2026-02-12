@@ -6,6 +6,7 @@ pub use tail::TailState;
 
 use crate::event::AppEvent;
 use crate::paths::Paths;
+use crate::session;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex};
@@ -67,6 +68,21 @@ pub fn start_watching(paths: &Paths) -> WatcherResult<mpsc::Receiver<AppEvent>> 
     // Initial read of existing files
     load_existing_files(paths, &tail_state, &tx);
 
+    // Periodic polling of events file — ensures real-time updates even if inotify
+    // misses appends (common on tmpfs). TailState deduplicates so no double-processing.
+    let events_path_poll = paths.events.clone();
+    let tail_state_poll = Arc::clone(&tail_state);
+    let tx_poll = tx.clone();
+
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            if events_path_poll.exists() {
+                handle_events_incremental(&events_path_poll, &tail_state_poll, &tx_poll);
+            }
+        }
+    });
+
     // Keep watcher alive by moving it to a separate thread
     std::thread::spawn(move || {
         let _watcher = watcher;
@@ -103,6 +119,20 @@ fn load_existing_files(
 
     if paths.events.exists() {
         handle_events_incremental(&paths.events, tail_state, tx);
+    }
+
+    // Load archived session metas (lightweight — skips events/agents/task_graph)
+    match session::list_session_metas(&paths.archive_dir) {
+        Ok(metas) if !metas.is_empty() => {
+            let _ = tx.send(AppEvent::SessionMetasLoaded(metas));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = tx.send(AppEvent::ParseError {
+                source: "sessions".to_string(),
+                error: e,
+            });
+        }
     }
 }
 

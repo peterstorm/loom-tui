@@ -88,6 +88,30 @@ pub struct SessionArchive {
     pub agents: BTreeMap<String, Agent>,
 }
 
+/// Lightweight session index entry. Meta is always available; full archive loaded on demand.
+#[derive(Debug, Clone)]
+pub struct ArchivedSession {
+    pub meta: SessionMeta,
+    pub path: std::path::PathBuf,
+    /// None = not yet loaded from disk
+    pub data: Option<SessionArchive>,
+}
+
+impl ArchivedSession {
+    pub fn new(meta: SessionMeta, path: std::path::PathBuf) -> Self {
+        Self {
+            meta,
+            path,
+            data: None,
+        }
+    }
+
+    pub fn with_data(mut self, archive: SessionArchive) -> Self {
+        self.data = Some(archive);
+        self
+    }
+}
+
 impl SessionArchive {
     pub fn new(meta: SessionMeta) -> Self {
         Self {

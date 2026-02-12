@@ -9,6 +9,9 @@ pub struct Agent {
     pub task_id: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// The prompt/task description the agent was spawned with
+    #[serde(default)]
+    pub task_description: Option<String>,
     pub started_at: DateTime<Utc>,
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
@@ -22,6 +25,7 @@ impl Default for Agent {
             id: String::new(),
             task_id: None,
             agent_type: None,
+            task_description: None,
             started_at: Utc::now(),
             finished_at: None,
             messages: Vec::new(),
@@ -35,6 +39,7 @@ impl Agent {
             id,
             task_id: None,
             agent_type: None,
+            task_description: None,
             started_at,
             finished_at: None,
             messages: Vec::new(),

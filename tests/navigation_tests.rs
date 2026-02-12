@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use loom_tui::app::{handle_key, AppState, PanelFocus, ViewState};
-use loom_tui::model::{Agent, Task, TaskGraph, TaskStatus, Wave};
+use loom_tui::model::{Agent, ArchivedSession, SessionArchive, SessionMeta, Task, TaskGraph, TaskStatus, Wave};
+use std::path::PathBuf;
 use chrono::Utc;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -270,20 +271,28 @@ fn k_key_scrolls_agent_events_in_right_panel() {
 fn j_key_scrolls_sessions_table() {
     let mut state = AppState::new();
     state.view = ViewState::Sessions;
-    state.scroll_offsets.sessions = 3;
+    state.sessions = vec![
+        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+    ];
+    state.selected_session_index = Some(0);
 
     let new_state = handle_key(state, key(KeyCode::Char('j')));
-    assert_eq!(new_state.scroll_offsets.sessions, 4);
+    assert_eq!(new_state.selected_session_index, Some(1));
 }
 
 #[test]
 fn k_key_scrolls_sessions_table() {
     let mut state = AppState::new();
     state.view = ViewState::Sessions;
-    state.scroll_offsets.sessions = 3;
+    state.sessions = vec![
+        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+    ];
+    state.selected_session_index = Some(1);
 
     let new_state = handle_key(state, key(KeyCode::Char('k')));
-    assert_eq!(new_state.scroll_offsets.sessions, 2);
+    assert_eq!(new_state.selected_session_index, Some(0));
 }
 
 #[test]
@@ -344,11 +353,50 @@ fn enter_on_agent_detail_is_noop() {
 }
 
 #[test]
-fn enter_on_sessions_is_noop_for_navigation() {
+fn enter_on_sessions_no_selection_is_noop() {
     let mut state = AppState::new();
     state.view = ViewState::Sessions;
 
     let new_state = handle_key(state, key(KeyCode::Enter));
+    assert!(matches!(new_state.view, ViewState::Sessions));
+}
+
+#[test]
+fn enter_on_sessions_with_loaded_data_opens_detail() {
+    let mut state = AppState::new();
+    state.view = ViewState::Sessions;
+    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    state.sessions = vec![
+        ArchivedSession::new(meta.clone(), PathBuf::new())
+            .with_data(SessionArchive::new(meta)),
+    ];
+    state.selected_session_index = Some(0);
+
+    let new_state = handle_key(state, key(KeyCode::Enter));
+    assert!(matches!(new_state.view, ViewState::SessionDetail));
+}
+
+#[test]
+fn enter_on_sessions_unloaded_sets_loading() {
+    let mut state = AppState::new();
+    state.view = ViewState::Sessions;
+    state.sessions = vec![
+        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+    ];
+    state.selected_session_index = Some(0);
+
+    let new_state = handle_key(state, key(KeyCode::Enter));
+    // Should NOT navigate — sets loading instead
+    assert!(matches!(new_state.view, ViewState::Sessions));
+    assert_eq!(new_state.loading_session, Some(0));
+}
+
+#[test]
+fn esc_from_session_detail_returns_to_sessions() {
+    let mut state = AppState::new();
+    state.view = ViewState::SessionDetail;
+
+    let new_state = handle_key(state, key(KeyCode::Esc));
     assert!(matches!(new_state.view, ViewState::Sessions));
 }
 

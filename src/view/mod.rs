@@ -6,10 +6,12 @@ use crate::app::state::{AppState, ViewState};
 pub mod agent_detail;
 pub mod components;
 pub mod dashboard;
+pub mod session_detail;
 pub mod sessions;
 
 pub use agent_detail::render_agent_detail;
 pub use dashboard::render_dashboard;
+pub use session_detail::render_session_detail;
 pub use sessions::render_sessions;
 
 /// Main view dispatcher.
@@ -38,6 +40,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
         }
         ViewState::Sessions => {
             sessions::render_sessions(frame, state, layout[1]);
+        }
+        ViewState::SessionDetail => {
+            session_detail::render_session_detail(frame, state, layout[1]);
         }
     }
 

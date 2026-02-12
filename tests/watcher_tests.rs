@@ -226,7 +226,7 @@ fn test_parse_hook_events_all_kinds() {
     assert!(matches!(events[0].kind, HookEventKind::SessionStart));
 
     match &events[1].kind {
-        HookEventKind::SubagentStart { task_description } => {
+        HookEventKind::SubagentStart { task_description, .. } => {
             assert_eq!(task_description, &Some("Implement feature X".to_string()));
         }
         _ => panic!("Expected SubagentStart"),

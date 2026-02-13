@@ -11,12 +11,73 @@ use crate::session;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 use std::time::Duration;
 
 /// Result type for watcher operations
 pub type WatcherResult<T> = Result<T, WatcherError>;
 
+/// Commands sent to the tail worker thread
+enum TailCommand {
+    ReadFile(PathBuf),
+}
+
+/// Start a dedicated worker thread that owns TailState and processes file read requests.
+/// Eliminates Arc<Mutex<TailState>> anti-pattern by using message passing.
+///
+/// # Returns
+/// - Sender for file paths to read
+fn start_tail_worker(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<TailCommand> {
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let mut tail_state = TailState::new();
+
+        while let Ok(cmd) = cmd_rx.recv() {
+            match cmd {
+                TailCommand::ReadFile(path) => {
+                    let new_content = match tail_state.read_new_lines(&path) {
+                        Ok(content) => content,
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::Error {
+                                source: path.display().to_string(),
+                                error: WatcherError::Io(e.to_string()).into(),
+                            });
+                            continue;
+                        }
+                    };
+
+                    if new_content.is_empty() {
+                        continue;
+                    }
+
+                    match parsers::parse_hook_events(&new_content) {
+                        Ok(events) => {
+                            for event in events {
+                                let enriched = if matches!(event.kind, crate::model::HookEventKind::SessionStart) {
+                                    enrich_session_start_event(event)
+                                } else {
+                                    event
+                                };
+                                if tx.send(AppEvent::HookEventReceived(enriched)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::Error {
+                                source: path.display().to_string(),
+                                error: WatcherError::Parse(e).into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    cmd_tx
+}
 
 /// Resolve the Claude Code transcript directory for a given project root.
 /// Returns ~/.claude/projects/{project_hash}/ where project_hash = cwd with / → -
@@ -61,8 +122,8 @@ pub fn start_watching(
 ) -> WatcherResult<mpsc::Receiver<AppEvent>> {
     let (tx, rx) = mpsc::channel();
 
-    // Shared tail state for incremental event reads
-    let tail_state = Arc::new(Mutex::new(TailState::new()));
+    // Start dedicated worker thread that owns TailState
+    let tail_worker = start_tail_worker(tx.clone());
 
     // Clone tx for watcher callback; keep original for initial reads
     let tx_watcher = tx.clone();
@@ -71,7 +132,7 @@ pub fn start_watching(
     let task_graph_path = paths.task_graph.clone();
     let transcripts_dir = paths.transcripts.clone();
     let events_path = paths.events.clone();
-    let tail_state_watcher = Arc::clone(&tail_state);
+    let tail_worker_watcher = tail_worker.clone();
 
     // Create notify watcher with 200ms debounce
     let mut watcher = RecommendedWatcher::new(
@@ -81,7 +142,7 @@ pub fn start_watching(
                 &task_graph_path,
                 &transcripts_dir,
                 &events_path,
-                &tail_state_watcher,
+                &tail_worker_watcher,
                 &tx_watcher,
             );
         },
@@ -100,19 +161,18 @@ pub fn start_watching(
     }
 
     // Initial read of existing files
-    load_existing_files(paths, &tail_state, &tx);
+    load_existing_files(paths, &tail_worker, &tx);
 
     // Periodic polling of events file — ensures real-time updates even if inotify
     // misses appends (common on tmpfs). TailState deduplicates so no double-processing.
     let events_path_poll = paths.events.clone();
-    let tail_state_poll = Arc::clone(&tail_state);
-    let tx_poll = tx.clone();
+    let tail_worker_poll = tail_worker.clone();
 
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(200));
             if events_path_poll.exists() {
-                handle_events_incremental(&events_path_poll, &tail_state_poll, &tx_poll);
+                let _ = tail_worker_poll.send(TailCommand::ReadFile(events_path_poll.clone()));
             }
         }
     });
@@ -211,7 +271,7 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
 /// not from .active marker files.
 fn load_existing_files(
     paths: &Paths,
-    tail_state: &Arc<Mutex<TailState>>,
+    tail_worker: &mpsc::Sender<TailCommand>,
     tx: &mpsc::Sender<AppEvent>,
 ) {
     if paths.task_graph.exists() {
@@ -230,7 +290,7 @@ fn load_existing_files(
     }
 
     if paths.events.exists() {
-        handle_events_incremental(&paths.events, tail_state, tx);
+        let _ = tail_worker.send(TailCommand::ReadFile(paths.events.clone()));
     }
 
     // Load archived session metas (lightweight — skips events/agents/task_graph)
@@ -262,7 +322,7 @@ fn handle_watch_event(
     task_graph_path: &Path,
     transcripts_dir: &Path,
     events_path: &Path,
-    tail_state: &Arc<Mutex<TailState>>,
+    tail_worker: &mpsc::Sender<TailCommand>,
     tx: &mpsc::Sender<AppEvent>,
 ) {
     match res {
@@ -278,9 +338,9 @@ fn handle_watch_event(
                 {
                     handle_transcript_update(&path, tx);
                 }
-                // Hook events file updated (incremental via TailState)
+                // Hook events file updated (send to worker thread)
                 else if path == events_path {
-                    handle_events_incremental(&path, tail_state, tx);
+                    let _ = tail_worker.send(TailCommand::ReadFile(path));
                 }
             }
         }
@@ -329,7 +389,7 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     match std::fs::read_to_string(path) {
         Ok(content) => match parsers::parse_transcript(&content) {
             Ok(messages) => {
-                let _ = tx.send(AppEvent::TranscriptUpdated { agent_id, messages });
+                let _ = tx.send(AppEvent::TranscriptUpdated { agent_id: agent_id.into(), messages });
             }
             Err(e) => {
                 let _ = tx.send(AppEvent::Error {
@@ -359,7 +419,7 @@ fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::mode
     let cwd = event.raw.get("cwd")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let session_id = event.session_id.as_deref().unwrap_or("");
+    let session_id = event.session_id.as_ref().map(|s| s.as_str()).unwrap_or("");
 
     // Derive transcript path (I/O happens here, in the shell)
     if let Some(transcript_path) = derive_transcript_path(cwd, session_id) {
@@ -370,60 +430,6 @@ fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::mode
     }
 
     event
-}
-
-/// Handle hook events file update incrementally via TailState.
-/// Only reads new content since last read, avoiding duplicate event processing.
-fn handle_events_incremental(
-    path: &Path,
-    tail_state: &Arc<Mutex<TailState>>,
-    tx: &mpsc::Sender<AppEvent>,
-) {
-    let new_content = match tail_state.lock() {
-        Ok(mut ts) => match ts.read_new_lines(path) {
-            Ok(content) => content,
-            Err(e) => {
-                let _ = tx.send(AppEvent::Error {
-                    source: path.display().to_string(),
-                    error: WatcherError::Io(e.to_string()).into(),
-                });
-                return;
-            }
-        },
-        Err(_) => {
-            let _ = tx.send(AppEvent::Error {
-                source: "tail_state".to_string(),
-                error: WatcherError::LockPoisoned.into(),
-            });
-            return;
-        }
-    };
-
-    if new_content.is_empty() {
-        return;
-    }
-
-    match parsers::parse_hook_events(&new_content) {
-        Ok(events) => {
-            for event in events {
-                // Enrich SessionStart events with transcript_path (I/O belongs in shell)
-                let enriched_event = if matches!(event.kind, crate::model::HookEventKind::SessionStart) {
-                    enrich_session_start_event(event)
-                } else {
-                    event
-                };
-                if tx.send(AppEvent::HookEventReceived(enriched_event)).is_err() {
-                    return;
-                }
-            }
-        }
-        Err(e) => {
-            let _ = tx.send(AppEvent::Error {
-                source: path.display().to_string(),
-                error: WatcherError::Parse(e).into(),
-            });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -512,96 +518,11 @@ mod tests {
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         match event {
             AppEvent::TranscriptUpdated { agent_id, messages } => {
-                assert_eq!(agent_id, "a04");
+                assert_eq!(agent_id.as_str(), "a04");
                 assert_eq!(messages.len(), 1);
             }
             _ => panic!("Expected TranscriptUpdated event"),
         }
     }
 
-    #[test]
-    fn test_handle_events_incremental_initial_read() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("events.jsonl");
-
-        let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
-{"timestamp":"2026-02-11T10:01:00Z","event":"notification","message":"hello"}"#;
-        fs::write(&path, jsonl).unwrap();
-
-        let tail_state = Arc::new(Mutex::new(TailState::new()));
-        let (tx, rx) = mpsc::channel();
-        handle_events_incremental(&path, &tail_state, &tx);
-
-        // Should receive both events
-        let _e1 = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let _e2 = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-    }
-
-    #[test]
-    fn test_handle_events_incremental_only_new() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("events.jsonl");
-
-        // Write initial content
-        fs::write(
-            &path,
-            r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}"#,
-        )
-        .unwrap();
-
-        let tail_state = Arc::new(Mutex::new(TailState::new()));
-        let (tx, rx) = mpsc::channel();
-
-        // First read
-        handle_events_incremental(&path, &tail_state, &tx);
-        let _e1 = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-
-        // Append new event
-        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(
-            f,
-            r#"
-{{"timestamp":"2026-02-11T10:01:00Z","event":"notification","message":"new"}}"#
-        )
-        .unwrap();
-
-        // Second read — should only get the new event
-        handle_events_incremental(&path, &tail_state, &tx);
-        let e2 = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        match e2 {
-            AppEvent::HookEventReceived(he) => {
-                assert!(matches!(
-                    he.kind,
-                    crate::model::HookEventKind::Notification { .. }
-                ));
-            }
-            _ => panic!("Expected HookEventReceived"),
-        }
-        // No more events
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-    }
-
-    #[test]
-    fn test_handle_events_incremental_no_duplicates() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("events.jsonl");
-
-        fs::write(
-            &path,
-            r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}"#,
-        )
-        .unwrap();
-
-        let tail_state = Arc::new(Mutex::new(TailState::new()));
-        let (tx, rx) = mpsc::channel();
-
-        // Read twice without file change
-        handle_events_incremental(&path, &tail_state, &tx);
-        handle_events_incremental(&path, &tail_state, &tx);
-
-        // Should only get one event
-        let _e1 = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-    }
 }

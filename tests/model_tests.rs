@@ -45,7 +45,7 @@ fn parse_active_task_graph_fixture() {
             _ => TaskStatus::Pending,
         };
 
-        let agent_id = task_val["agent"].as_str().map(|s| s.to_string());
+        let agent_id = task_val["agent"].as_str().map(|s| AgentId::new(s));
         let files_modified: Vec<String> = task_val["files_modified"]
             .as_array()
             .map(|arr| {
@@ -59,7 +59,7 @@ fn parse_active_task_graph_fixture() {
             .as_bool()
             .or_else(|| task_val["tests_passed"].as_null().map(|_| false));
 
-        let mut task = Task::new(id.to_string(), description.to_string(), status);
+        let mut task = Task::new(id, description.to_string(), status);
         task.agent_id = agent_id;
         task.files_modified = files_modified;
         task.tests_passed = tests_passed;
@@ -84,17 +84,17 @@ fn parse_active_task_graph_fixture() {
 
     // Verify first task
     let t1 = &graph.waves[0].tasks[0];
-    assert_eq!(t1.id, "T1");
+    assert_eq!(t1.id.as_str(), "T1");
     assert_eq!(t1.description, "Create project scaffold");
     assert!(matches!(t1.status, TaskStatus::Completed));
-    assert_eq!(t1.agent_id, Some("scaffold-agent".to_string()));
+    assert_eq!(t1.agent_id, Some(AgentId::new("scaffold-agent")));
     assert!(t1.files_modified.contains(&"Cargo.toml".to_string()));
 
     // Verify failed task
     let t5 = graph.waves[1]
         .tasks
         .iter()
-        .find(|t| t.id == "T5")
+        .find(|t| t.id.as_str() == "T5")
         .expect("T5 should exist");
 
     match &t5.status {
@@ -169,7 +169,7 @@ fn parse_agent_transcript_jsonl() {
 
     // Verify tool call with duration
     if let MessageKind::Tool(call) = &messages[1].kind {
-        assert_eq!(call.tool_name, "Read");
+        assert_eq!(call.tool_name.as_str(), "Read");
         assert_eq!(call.duration, Some(Duration::from_millis(150)));
         assert_eq!(call.success, Some(true));
     } else {
@@ -194,7 +194,7 @@ fn parse_hook_events_jsonl() {
     // Verify session start
     match &events[0].kind {
         HookEventKind::SessionStart => {
-            assert_eq!(events[0].session_id, Some("s20260211-095900".to_string()));
+            assert_eq!(events[0].session_id, Some(SessionId::new("s20260211-095900")));
         }
         _ => panic!("Expected SessionStart"),
     }
@@ -203,7 +203,7 @@ fn parse_hook_events_jsonl() {
     match &events[1].kind {
         HookEventKind::SubagentStart { task_description, .. } => {
             assert_eq!(task_description, &Some("Create project scaffold".to_string()));
-            assert_eq!(events[1].agent_id, Some("a01".to_string()));
+            assert_eq!(events[1].agent_id, Some(AgentId::new("a01")));
         }
         _ => panic!("Expected SubagentStart"),
     }
@@ -214,7 +214,7 @@ fn parse_hook_events_jsonl() {
             tool_name,
             input_summary,
         } => {
-            assert_eq!(tool_name, "Write");
+            assert_eq!(tool_name.as_str(), "Write");
             assert_eq!(input_summary, "Cargo.toml");
         }
         _ => panic!("Expected PreToolUse"),
@@ -227,7 +227,7 @@ fn parse_hook_events_jsonl() {
             result_summary,
             duration_ms,
         } => {
-            assert_eq!(tool_name, "Write");
+            assert_eq!(tool_name.as_str(), "Write");
             assert_eq!(result_summary, "Success");
             assert_eq!(*duration_ms, Some(150));
         }
@@ -260,7 +260,7 @@ fn parse_session_archive_fixture() {
         serde_json::from_str(&json).expect("Failed to parse session archive");
 
     // Verify metadata
-    assert_eq!(archive.meta.id, "s20260211-095900");
+    assert_eq!(archive.meta.id.as_str(), "s20260211-095900");
     assert_eq!(archive.meta.status, SessionStatus::Completed);
     assert_eq!(archive.meta.agent_count, 2);
     assert_eq!(archive.meta.task_count, 3);
@@ -283,8 +283,8 @@ fn parse_session_archive_fixture() {
 
     // Verify agents
     assert_eq!(archive.agents.len(), 2);
-    let agent_a01 = archive.agents.get("a01").expect("Agent a01 should exist");
-    assert_eq!(agent_a01.task_id, Some("T1".to_string()));
+    let agent_a01 = archive.agents.get(&AgentId::new("a01")).expect("Agent a01 should exist");
+    assert_eq!(agent_a01.task_id, Some(TaskId::new("T1")));
     assert!(agent_a01.finished_at.is_some());
 }
 
@@ -294,17 +294,17 @@ fn task_graph_round_trip_serialization() {
         Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         ),
         Wave::new(
             2,
             vec![Task::new(
-                "T3".into(),
-                "Task 3".into(),
+                "T3",
+                "Task 3".to_string(),
                 TaskStatus::Failed {
-                    reason: "Test error".into(),
+                    reason: "Test error".to_string(),
                     retry_count: 1,
                 },
             )],
@@ -323,15 +323,15 @@ fn agent_round_trip_serialization() {
     let now = Utc::now();
     let later = now + chrono::Duration::seconds(60);
 
-    let original = Agent::new("a01".into(), now)
-        .with_task("T1".into())
+    let original = Agent::new("a01", now)
+        .with_task("T1")
         .add_message(AgentMessage::reasoning(
             now,
             "Starting work".to_string(),
         ))
         .add_message(AgentMessage::tool(
             now,
-            ToolCall::new("Read".into(), "file.rs".into())
+            ToolCall::new("Read", "file.rs".to_string())
                 .with_duration(Duration::from_millis(150)),
         ))
         .finish(later);
@@ -348,15 +348,15 @@ fn hook_event_round_trip_serialization() {
         HookEvent::new(Utc::now(), HookEventKind::session_start()),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
+            HookEventKind::pre_tool_use("Bash", "cargo test".to_string()),
         ),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::post_tool_use("Bash".into(), "Success".into(), Some(5000)),
+            HookEventKind::post_tool_use("Bash", "Success".to_string(), Some(5000)),
         ),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::notification("Test message".into()),
+            HookEventKind::notification("Test message".to_string()),
         ),
     ];
 
@@ -369,13 +369,13 @@ fn hook_event_round_trip_serialization() {
 
 #[test]
 fn session_archive_round_trip_serialization() {
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
         .with_status(SessionStatus::Completed)
         .with_duration(Duration::from_secs(300));
 
     let graph = TaskGraph::new(vec![Wave::new(
         1,
-        vec![Task::new("T1".into(), "Test".into(), TaskStatus::Completed)],
+        vec![Task::new("T1", "Test".to_string(), TaskStatus::Completed)],
     )]);
 
     let events = vec![HookEvent::new(
@@ -384,7 +384,7 @@ fn session_archive_round_trip_serialization() {
     )];
 
     let mut agents = BTreeMap::new();
-    agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+    agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
 
     let original = SessionArchive::new(meta)
         .with_task_graph(graph)
@@ -425,7 +425,7 @@ fn missing_optional_fields_use_defaults() {
 
     let task: Task = serde_json::from_str(json).expect("Should parse with defaults");
 
-    assert_eq!(task.id, "T1");
+    assert_eq!(task.id.as_str(), "T1");
     assert_eq!(task.agent_id, None);
     assert_eq!(task.review_status, ReviewStatus::Pending);
     assert_eq!(task.files_modified.len(), 0);

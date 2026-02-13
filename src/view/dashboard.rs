@@ -22,7 +22,7 @@ pub fn render_dashboard(frame: &mut Frame, state: &AppState, area: Rect) {
         .split(area);
 
     // Render banner if hook status is Missing or InstallFailed
-    let content_area = match &state.hook_status {
+    let content_area = match &state.meta.hook_status {
         crate::app::HookStatus::Missing | crate::app::HookStatus::InstallFailed(_) => {
             // Insert banner above content
             let banner_layout = Layout::default()

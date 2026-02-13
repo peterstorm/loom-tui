@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::ids::{AgentId, TaskId};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskGraph {
     pub waves: Vec<Wave>,
@@ -46,10 +48,10 @@ impl Wave {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Task {
-    pub id: String,
+    pub id: TaskId,
     pub description: String,
     #[serde(default)]
-    pub agent_id: Option<String>,
+    pub agent_id: Option<AgentId>,
     pub status: TaskStatus,
     #[serde(default)]
     pub review_status: ReviewStatus,
@@ -60,9 +62,9 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(id: String, description: String, status: TaskStatus) -> Self {
+    pub fn new(id: impl Into<TaskId>, description: String, status: TaskStatus) -> Self {
         Self {
-            id,
+            id: id.into(),
             description,
             agent_id: None,
             status,
@@ -109,13 +111,13 @@ mod tests {
             Wave::new(
                 1,
                 vec![
-                    Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                    Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
                 ],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+                vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
             ),
         ];
 

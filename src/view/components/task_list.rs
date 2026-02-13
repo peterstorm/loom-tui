@@ -15,7 +15,7 @@ use crate::model::{TaskStatus, Theme};
 pub fn render_task_list(frame: &mut Frame, area: Rect, state: &AppState) {
     let items = build_task_list_items(state);
 
-    let is_focused = matches!(state.focus, PanelFocus::Left);
+    let is_focused = matches!(state.ui.focus, PanelFocus::Left);
 
     let list = List::new(items)
         .block(
@@ -36,11 +36,11 @@ pub fn render_task_list(frame: &mut Frame, area: Rect, state: &AppState) {
 /// Pure function: build task list items from state.
 /// Highlights the selected task and applies filter if active.
 fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
-    match &state.task_graph {
+    match &state.domain.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
             let mut items = Vec::new();
             let mut task_index: usize = 0;
-            let filter = state.filter.as_deref().unwrap_or("");
+            let filter = state.ui.filter.as_deref().unwrap_or("");
 
             for wave in &graph.waves {
                 // Collect visible tasks for this wave (after filter)
@@ -50,8 +50,8 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                     }
                     let lower = filter.to_lowercase();
                     task.description.to_lowercase().contains(&lower)
-                        || task.id.to_lowercase().contains(&lower)
-                        || task.agent_id.as_ref().map(|a| a.to_lowercase().contains(&lower)).unwrap_or(false)
+                        || task.id.as_str().to_lowercase().contains(&lower)
+                        || task.agent_id.as_ref().map(|a| a.as_str().to_lowercase().contains(&lower)).unwrap_or(false)
                 }).collect();
 
                 if wave_tasks.is_empty() && !filter.is_empty() {
@@ -81,7 +81,7 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                 // Tasks in wave
                 for (original_idx, task) in wave_tasks {
                     let flat_idx = task_index + original_idx;
-                    let is_selected = state.selected_task_index == Some(flat_idx);
+                    let is_selected = state.ui.selected_task_index == Some(flat_idx);
 
                     let (status_symbol, status_color) = task_status_display(&task.status);
                     let bg = if is_selected { Theme::SELECTION_BG } else { Theme::BACKGROUND };
@@ -90,7 +90,7 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                         Span::styled("  ", Style::default().bg(bg)),
                         Span::styled(status_symbol.to_string(), Style::default().fg(status_color).bg(bg)),
                         Span::styled(" ", Style::default().bg(bg)),
-                        Span::styled(task.id.clone(), Style::default().fg(Theme::INFO).bg(bg)),
+                        Span::styled(task.id.to_string(), Style::default().fg(Theme::INFO).bg(bg)),
                         Span::styled(" ", Style::default().bg(bg)),
                     ];
 
@@ -102,8 +102,10 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                     spans.push(Span::styled(description, Style::default().fg(Theme::TEXT).bg(bg)));
 
                     if let Some(ref agent_id) = task.agent_id {
+                        let id_str = agent_id.as_str();
+                        let short = &id_str[..id_str.len().min(7)];
                         spans.push(Span::styled(
-                            format!("  {}", &agent_id[..agent_id.len().min(7)]),
+                            format!("  {}", short),
                             Style::default().fg(Theme::AGENT_LABEL).bg(bg),
                         ));
                     }
@@ -171,16 +173,16 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Running)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
             ),
         ];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 
@@ -204,7 +206,7 @@ mod tests {
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 
@@ -217,11 +219,11 @@ mod tests {
         let long_desc = "a".repeat(100);
         let waves = vec![Wave::new(
             1,
-            vec![Task::new("T1".into(), long_desc, TaskStatus::Pending)],
+            vec![Task::new("T1", long_desc, TaskStatus::Pending)],
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 

@@ -107,13 +107,13 @@ fn run_event_loop(
 
                 // Handle hook installation side effect
                 if matches!(key.code, crossterm::event::KeyCode::Char('i'))
-                    && matches!(state.hook_status, HookStatus::Missing) {
+                    && matches!(state.meta.hook_status, HookStatus::Missing) {
                     match install_hook(project_root) {
                         Ok(()) => {
-                            state.hook_status = HookStatus::Installed;
+                            state.meta.hook_status = HookStatus::Installed;
                         }
                         Err(e) => {
-                            state.hook_status = HookStatus::InstallFailed(e);
+                            state.meta.hook_status = HookStatus::InstallFailed(e);
                         }
                     }
                 }
@@ -132,9 +132,9 @@ fn run_event_loop(
         }
 
         // Spawn background session load if requested and not already in flight
-        if let Some(idx) = state.loading_session {
+        if let Some(idx) = state.ui.loading_session {
             if !load_in_flight {
-                if let Some(session) = state.sessions.get(idx) {
+                if let Some(session) = state.domain.sessions.get(idx) {
                     let path = session.path.clone();
                     let tx = load_tx.clone();
                     load_in_flight = true;
@@ -166,7 +166,7 @@ fn run_event_loop(
         }
 
         // Check quit condition
-        if state.should_quit {
+        if state.meta.should_quit {
             break;
         }
     }
@@ -182,20 +182,20 @@ mod tests {
     fn test_main_event_loop_quits_on_should_quit() {
         // This test verifies the quit logic without actually running terminal I/O
         let mut state = AppState::new();
-        state.should_quit = true;
+        state.meta.should_quit = true;
 
         // Quit flag should be set
-        assert!(state.should_quit);
+        assert!(state.meta.should_quit);
     }
 
     #[test]
     fn test_hook_status_transition() {
         let state = AppState::with_hook_status(HookStatus::Missing);
-        assert!(matches!(state.hook_status, HookStatus::Missing));
+        assert!(matches!(state.meta.hook_status, HookStatus::Missing));
 
         let mut state = state;
-        state.hook_status = HookStatus::Installed;
-        assert!(matches!(state.hook_status, HookStatus::Installed));
+        state.meta.hook_status = HookStatus::Installed;
+        assert!(matches!(state.meta.hook_status, HookStatus::Installed));
     }
 
     #[test]

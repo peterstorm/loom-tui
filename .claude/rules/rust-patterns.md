@@ -1,0 +1,1 @@
+/home/peterstorm/.dotfiles/claude/project/rust/rules/rust-patterns.md

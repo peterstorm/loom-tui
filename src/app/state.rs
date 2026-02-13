@@ -1,21 +1,47 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use crate::model::{Agent, ArchivedSession, HookEvent, SessionMeta, TaskGraph};
+use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, SessionId, SessionMeta, TaskGraph};
 
-/// Main application state.
-/// Updated via pure `update(state, event) -> state` function.
-/// All fields are immutable from external perspective.
+/// UI state: view mode, focus, scrolling, selections, display flags
 #[derive(Debug, Clone)]
-pub struct AppState {
+pub struct UiState {
     /// Current view mode
     pub view: ViewState,
 
-    /// Current task graph (None if not yet loaded)
-    pub task_graph: Option<TaskGraph>,
+    /// Current panel focus
+    pub focus: PanelFocus,
 
+    /// Show help overlay
+    pub show_help: bool,
+
+    /// Active filter string (None if no filter)
+    pub filter: Option<String>,
+
+    /// Auto-scroll mode for event stream
+    pub auto_scroll: bool,
+
+    /// Scroll offsets for each panel
+    pub scroll_offsets: ScrollState,
+
+    /// Index of selected task in current view's task list
+    pub selected_task_index: Option<usize>,
+
+    /// Index of selected agent in agent detail view
+    pub selected_agent_index: Option<usize>,
+
+    /// Index of selected session in sessions view
+    pub selected_session_index: Option<usize>,
+
+    /// Index of session currently being loaded from disk (shows loading indicator)
+    pub loading_session: Option<usize>,
+}
+
+/// Domain state: agents, events, sessions, task graph
+#[derive(Debug, Clone)]
+pub struct DomainState {
     /// Active agents keyed by agent ID
-    pub agents: BTreeMap<String, Agent>,
+    pub agents: BTreeMap<AgentId, Agent>,
 
     /// Ring buffer of hook events (max 10,000 per NFR-005)
     pub events: VecDeque<HookEvent>,
@@ -24,23 +50,20 @@ pub struct AppState {
     pub sessions: Vec<ArchivedSession>,
 
     /// Currently active sessions keyed by session ID (supports concurrent sessions)
-    pub active_sessions: BTreeMap<String, SessionMeta>,
+    pub active_sessions: BTreeMap<SessionId, SessionMeta>,
 
-    /// Current panel focus
-    pub focus: PanelFocus,
+    /// Current task graph (None if not yet loaded)
+    pub task_graph: Option<TaskGraph>,
 
-    /// Scroll offsets for each panel
-    pub scroll_offsets: ScrollState,
+    /// Maps transcript session_id → agent_id for subagent transcript attribution.
+    /// Subagent transcripts have their own session_id (different from the parent
+    /// session_id stored on Agent). This map links them.
+    pub transcript_agent_map: BTreeMap<SessionId, AgentId>,
+}
 
-    /// Auto-scroll mode for event stream
-    pub auto_scroll: bool,
-
-    /// Active filter string (None if no filter)
-    pub filter: Option<String>,
-
-    /// Show help overlay
-    pub show_help: bool,
-
+/// Application metadata: lifecycle, errors, configuration
+#[derive(Debug, Clone)]
+pub struct AppMeta {
     /// Hook installation status
     pub hook_status: HookStatus,
 
@@ -55,29 +78,27 @@ pub struct AppState {
 
     /// Signal to quit the application
     pub should_quit: bool,
+}
 
-    /// Index of selected task in current view's task list
-    pub selected_task_index: Option<usize>,
-
-    /// Index of selected agent in agent detail view
-    pub selected_agent_index: Option<usize>,
-
-    /// Index of selected session in sessions view
-    pub selected_session_index: Option<usize>,
-
-    /// Index of session currently being loaded from disk (shows loading indicator)
-    pub loading_session: Option<usize>,
-
-    /// Cached sorted agent keys (recomputed when agent_keys_dirty)
-    pub cached_sorted_keys: Vec<String>,
+/// Cache state (private): sorted keys, dirty flags
+#[derive(Debug, Clone)]
+struct CacheState {
+    /// Cached sorted agent keys (recomputed when dirty)
+    sorted_keys: Vec<AgentId>,
 
     /// Whether agent keys need re-sorting
-    pub agent_keys_dirty: bool,
+    dirty: bool,
+}
 
-    /// Maps transcript session_id → agent_id for subagent transcript attribution.
-    /// Subagent transcripts have their own session_id (different from the parent
-    /// session_id stored on Agent). This map links them.
-    pub transcript_agent_map: BTreeMap<String, String>,
+/// Main application state.
+/// Updated via pure `update(state, event) -> state` function.
+/// Decomposed into sub-states for better organization.
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub ui: UiState,
+    pub domain: DomainState,
+    pub meta: AppMeta,
+    cache: CacheState,
 }
 
 /// View state variants
@@ -144,6 +165,57 @@ pub struct ScrollState {
     pub session_detail_right: usize,
 }
 
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            view: ViewState::Dashboard,
+            focus: PanelFocus::Left,
+            show_help: false,
+            filter: None,
+            auto_scroll: true,
+            scroll_offsets: ScrollState::default(),
+            selected_task_index: None,
+            selected_agent_index: None,
+            selected_session_index: None,
+            loading_session: None,
+        }
+    }
+}
+
+impl Default for DomainState {
+    fn default() -> Self {
+        Self {
+            agents: BTreeMap::new(),
+            events: VecDeque::with_capacity(10_000),
+            sessions: Vec::new(),
+            active_sessions: BTreeMap::new(),
+            task_graph: None,
+            transcript_agent_map: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for AppMeta {
+    fn default() -> Self {
+        Self {
+            hook_status: HookStatus::Unknown,
+            errors: VecDeque::with_capacity(100),
+            started_at: Instant::now(),
+            project_path: String::new(),
+            should_quit: false,
+        }
+    }
+}
+
+impl Default for CacheState {
+    fn default() -> Self {
+        Self {
+            sorted_keys: Vec::new(),
+            dirty: true,
+        }
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -154,36 +226,20 @@ impl AppState {
     /// Create new default application state
     pub fn new() -> Self {
         Self {
-            view: ViewState::Dashboard,
-            task_graph: None,
-            agents: BTreeMap::new(),
-            events: VecDeque::with_capacity(10_000),
-            sessions: Vec::new(),
-            active_sessions: BTreeMap::new(),
-            focus: PanelFocus::Left,
-            scroll_offsets: ScrollState::default(),
-            auto_scroll: true,
-            filter: None,
-            show_help: false,
-            hook_status: HookStatus::Unknown,
-            errors: VecDeque::with_capacity(100),
-            started_at: Instant::now(),
-            project_path: String::new(),
-            should_quit: false,
-            selected_task_index: None,
-            selected_agent_index: None,
-            selected_session_index: None,
-            loading_session: None,
-            cached_sorted_keys: Vec::new(),
-            agent_keys_dirty: true,
-            transcript_agent_map: BTreeMap::new(),
+            ui: UiState::default(),
+            domain: DomainState::default(),
+            meta: AppMeta::default(),
+            cache: CacheState::default(),
         }
     }
 
     /// Create new state with custom view
     pub fn with_view(view: ViewState) -> Self {
         Self {
-            view,
+            ui: UiState {
+                view,
+                ..UiState::default()
+            },
             ..Self::new()
         }
     }
@@ -191,37 +247,50 @@ impl AppState {
     /// Create new state with custom hook status
     pub fn with_hook_status(status: HookStatus) -> Self {
         Self {
-            hook_status: status,
+            meta: AppMeta {
+                hook_status: status,
+                ..AppMeta::default()
+            },
             ..Self::new()
         }
     }
 
     /// Set project path for session metadata
     pub fn with_project_path(mut self, path: String) -> Self {
-        self.project_path = path;
+        self.meta.project_path = path;
         self
     }
 
     /// Agent keys sorted: active first (by started_at desc), then finished (by started_at desc).
     /// Returns cached result — call `recompute_sorted_keys()` after modifying agents.
-    pub fn sorted_agent_keys(&self) -> &[String] {
-        &self.cached_sorted_keys
+    pub fn sorted_agent_keys(&self) -> &[AgentId] {
+        &self.cache.sorted_keys
     }
 
     /// Recompute cached sorted agent keys. Call after any agent mutation.
     pub fn recompute_sorted_keys(&mut self) {
-        let mut keys: Vec<_> = self.agents.keys().cloned().collect();
+        let mut keys: Vec<_> = self.domain.agents.keys().cloned().collect();
         keys.sort_by(|a, b| {
-            let aa = &self.agents[a];
-            let bb = &self.agents[b];
+            let aa = &self.domain.agents[a];
+            let bb = &self.domain.agents[b];
             let a_active = aa.finished_at.is_none();
             let b_active = bb.finished_at.is_none();
             b_active
                 .cmp(&a_active)
                 .then(bb.started_at.cmp(&aa.started_at))
         });
-        self.cached_sorted_keys = keys;
-        self.agent_keys_dirty = false;
+        self.cache.sorted_keys = keys;
+        self.cache.dirty = false;
+    }
+
+    /// Check if cache is dirty
+    pub fn is_cache_dirty(&self) -> bool {
+        self.cache.dirty
+    }
+
+    /// Mark cache as dirty
+    pub fn mark_cache_dirty(&mut self) {
+        self.cache.dirty = true;
     }
 }
 
@@ -250,46 +319,46 @@ mod tests {
     #[test]
     fn test_app_state_default() {
         let state = AppState::default();
-        assert!(matches!(state.view, ViewState::Dashboard));
-        assert!(state.task_graph.is_none());
-        assert!(state.agents.is_empty());
-        assert!(state.events.is_empty());
-        assert!(state.sessions.is_empty());
-        assert!(state.active_sessions.is_empty());
-        assert!(matches!(state.focus, PanelFocus::Left));
-        assert!(state.auto_scroll);
-        assert!(state.filter.is_none());
-        assert!(!state.show_help);
-        assert!(matches!(state.hook_status, HookStatus::Unknown));
-        assert!(state.errors.is_empty());
-        assert!(!state.should_quit);
-        assert!(state.selected_task_index.is_none());
+        assert!(matches!(state.ui.view, ViewState::Dashboard));
+        assert!(state.domain.task_graph.is_none());
+        assert!(state.domain.agents.is_empty());
+        assert!(state.domain.events.is_empty());
+        assert!(state.domain.sessions.is_empty());
+        assert!(state.domain.active_sessions.is_empty());
+        assert!(matches!(state.ui.focus, PanelFocus::Left));
+        assert!(state.ui.auto_scroll);
+        assert!(state.ui.filter.is_none());
+        assert!(!state.ui.show_help);
+        assert!(matches!(state.meta.hook_status, HookStatus::Unknown));
+        assert!(state.meta.errors.is_empty());
+        assert!(!state.meta.should_quit);
+        assert!(state.ui.selected_task_index.is_none());
     }
 
     #[test]
     fn test_app_state_new() {
         let state = AppState::new();
-        assert!(matches!(state.view, ViewState::Dashboard));
-        assert!(state.task_graph.is_none());
+        assert!(matches!(state.ui.view, ViewState::Dashboard));
+        assert!(state.domain.task_graph.is_none());
     }
 
     #[test]
     fn test_app_state_with_view() {
         let state = AppState::with_view(ViewState::Sessions);
-        assert!(matches!(state.view, ViewState::Sessions));
-        assert!(matches!(state.hook_status, HookStatus::Unknown));
+        assert!(matches!(state.ui.view, ViewState::Sessions));
+        assert!(matches!(state.meta.hook_status, HookStatus::Unknown));
     }
 
     #[test]
     fn test_app_state_with_view_agent_detail() {
         let state = AppState::with_view(ViewState::AgentDetail);
-        assert!(matches!(state.view, ViewState::AgentDetail));
+        assert!(matches!(state.ui.view, ViewState::AgentDetail));
     }
 
     #[test]
     fn test_app_state_with_hook_status() {
         let state = AppState::with_hook_status(HookStatus::Installed);
-        assert!(matches!(state.hook_status, HookStatus::Installed));
+        assert!(matches!(state.meta.hook_status, HookStatus::Installed));
     }
 
     #[test]
@@ -297,7 +366,7 @@ mod tests {
         let error_msg = "Permission denied".to_string();
         let state =
             AppState::with_hook_status(HookStatus::InstallFailed(error_msg.clone()));
-        assert!(matches!(&state.hook_status, HookStatus::InstallFailed(msg) if msg == &error_msg));
+        assert!(matches!(&state.meta.hook_status, HookStatus::InstallFailed(msg) if msg == &error_msg));
     }
 
     #[test]
@@ -359,19 +428,19 @@ mod tests {
     fn test_app_state_clone() {
         let state = AppState::new();
         let cloned = state.clone();
-        assert!(matches!(cloned.view, ViewState::Dashboard));
-        assert!(matches!(cloned.hook_status, HookStatus::Unknown));
+        assert!(matches!(cloned.ui.view, ViewState::Dashboard));
+        assert!(matches!(cloned.meta.hook_status, HookStatus::Unknown));
     }
 
     #[test]
     fn test_events_capacity() {
         let state = AppState::new();
-        assert_eq!(state.events.capacity(), 10_000);
+        assert_eq!(state.domain.events.capacity(), 10_000);
     }
 
     #[test]
     fn test_errors_capacity() {
         let state = AppState::new();
-        assert_eq!(state.errors.capacity(), 100);
+        assert_eq!(state.meta.errors.capacity(), 100);
     }
 }

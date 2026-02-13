@@ -52,9 +52,9 @@ fn parse_loom_format(content: &str) -> Result<TaskGraph, ParseError> {
     let mut wave_map: BTreeMap<u32, Vec<Task>> = BTreeMap::new();
     for lt in loom.tasks {
         let task = Task {
-            id: lt.id,
+            id: lt.id.into(),
             description: lt.description,
-            agent_id: lt.agent,
+            agent_id: lt.agent.map(Into::into),
             status: lt.status,
             review_status: lt.review_status,
             files_modified: lt.files_modified,
@@ -382,7 +382,7 @@ pub fn parse_claude_transcript_incremental(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MessageKind, TaskStatus};
+    use crate::model::{AgentId, MessageKind, SessionId, TaskStatus};
 
     #[test]
     fn test_parse_task_graph_valid() {
@@ -462,7 +462,7 @@ mod tests {
 
         match &messages[1].kind {
             MessageKind::Tool(call) => {
-                assert_eq!(call.tool_name, "Read");
+                assert_eq!(call.tool_name.as_str(), "Read");
                 assert_eq!(call.input_summary, "file.rs");
             }
             _ => panic!("Expected Tool message"),
@@ -571,7 +571,7 @@ invalid
 
         match &messages[0].kind {
             MessageKind::Tool(call) => {
-                assert_eq!(call.tool_name, "Bash");
+                assert_eq!(call.tool_name.as_str(), "Bash");
                 assert_eq!(call.duration, Some(std::time::Duration::from_millis(1500)));
                 assert_eq!(call.success, Some(true));
             }
@@ -628,7 +628,7 @@ invalid
         // Wave 2 has 1 task
         assert_eq!(graph.waves[1].number, 2);
         assert_eq!(graph.waves[1].tasks.len(), 1);
-        assert_eq!(graph.waves[1].tasks[0].id, "T3");
+        assert_eq!(graph.waves[1].tasks[0].id.as_str(), "T3");
     }
 
     #[test]
@@ -643,7 +643,7 @@ invalid
             }
             _ => panic!("Expected AssistantText"),
         }
-        assert_eq!(events[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(events[0].session_id.as_ref(), Some(&SessionId::new("s1")));
     }
 
     #[test]
@@ -746,11 +746,11 @@ invalid
 
         let events = parse_agent_progress_tool_calls(jsonl, "s1");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].agent_id.as_deref(), Some("a01"));
-        assert_eq!(events[0].session_id.as_deref(), Some("s1"));
+        assert_eq!(events[0].agent_id.as_ref(), Some(&AgentId::new("a01")));
+        assert_eq!(events[0].session_id.as_ref(), Some(&SessionId::new("s1")));
         match &events[0].kind {
             HookEventKind::PreToolUse { tool_name, input_summary } => {
-                assert_eq!(tool_name, "Read");
+                assert_eq!(tool_name.as_str(), "Read");
                 assert_eq!(input_summary, "/tmp/foo.rs");
             }
             _ => panic!("Expected PreToolUse"),
@@ -777,7 +777,7 @@ invalid
 
         let events = parse_agent_progress_tool_calls(jsonl, "s1");
         assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|e| e.agent_id.as_deref() == Some("a02")));
+        assert!(events.iter().all(|e| e.agent_id.as_ref() == Some(&AgentId::new("a02"))));
     }
 
     #[test]

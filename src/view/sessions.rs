@@ -8,19 +8,19 @@ use ratatui::{
 };
 
 use crate::app::state::AppState;
-use crate::model::{theme::Theme, SessionMeta, SessionStatus};
+use crate::model::{theme::Theme, SessionId, SessionMeta, SessionStatus};
 
 /// Render the sessions archive view into the given content area.
 /// Global header is rendered by the view dispatcher.
 pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Combine active sessions + archived sessions for display
-    let all_sessions: Vec<&SessionMeta> = state.active_sessions.values()
-        .chain(state.sessions.iter().map(|a| &a.meta))
+    let all_sessions: Vec<&SessionMeta> = state.domain.active_sessions.values()
+        .chain(state.domain.sessions.iter().map(|a| &a.meta))
         .collect();
 
     // Track which archived sessions are loading
-    let active_count = state.active_sessions.len();
+    let active_count = state.domain.active_sessions.len();
 
     // Empty state: no sessions at all
     if all_sessions.is_empty() {
@@ -29,7 +29,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     // Build table rows from session list
-    let _scroll_offset = state.scroll_offsets.sessions; // TODO: implement scrolling
+    let _scroll_offset = state.ui.scroll_offsets.sessions; // TODO: implement scrolling
     let header_row = Row::new(vec![
         "Session ID",
         "Date",
@@ -49,7 +49,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, session)| {
-            let is_selected = state.selected_session_index == Some(idx);
+            let is_selected = state.ui.selected_session_index == Some(idx);
             let style = if is_selected {
                 Style::default()
                     .bg(Theme::ACTIVE_BORDER)
@@ -74,7 +74,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Show loading indicator for session being loaded
             let is_loading = idx >= active_count
-                && state.loading_session == Some(idx - active_count);
+                && state.ui.loading_session == Some(idx - active_count);
 
             let status_str = if is_loading {
                 "Loading…".to_string()
@@ -83,7 +83,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
             };
 
             Row::new(vec![
-                session.id.clone(),
+                session.id.to_string(),
                 session.timestamp.format("%Y-%m-%d %H:%M").to_string(),
                 format_duration(duration),
                 status_str,
@@ -195,7 +195,7 @@ fn format_status(status: &SessionStatus) -> String {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::{ArchivedSession, SessionMeta};
+    use crate::model::{ArchivedSession, SessionId, SessionMeta};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -233,15 +233,15 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.sessions = vec![
+        state.domain.sessions = vec![
             ArchivedSession::new(
-                SessionMeta::new("s1".into(), Utc::now(), "/proj/foo".into())
+                SessionMeta::new("s1", Utc::now(), "/proj/foo".to_string())
                     .with_status(SessionStatus::Completed)
                     .with_duration(Duration::from_secs(300)),
                 PathBuf::new(),
             ),
             ArchivedSession::new(
-                SessionMeta::new("s2".into(), Utc::now(), "/proj/bar".into())
+                SessionMeta::new("s2", Utc::now(), "/proj/bar".to_string())
                     .with_status(SessionStatus::Failed),
                 PathBuf::new(),
             ),

@@ -31,18 +31,18 @@ fn dashboard_renders_without_panic_with_tasks() {
         Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         ),
         Wave::new(
             2,
-            vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+            vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
         ),
     ];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -62,15 +62,15 @@ fn dashboard_renders_without_panic_with_events() {
         HookEvent::new(Utc::now(), HookEventKind::session_start()),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         ),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::post_tool_use("Read".into(), "success".into(), Some(150)),
+            HookEventKind::post_tool_use("Read", "success".to_string(), Some(150)),
         ),
     ];
 
-    state.events = VecDeque::from(events);
+    state.domain.events = VecDeque::from(events);
 
     terminal
         .draw(|frame| {
@@ -165,13 +165,13 @@ fn header_renders_with_tasks() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-            Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+            Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+            Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
         ],
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     let result = terminal
         .draw(|frame| {
@@ -248,18 +248,18 @@ fn wave_river_renders_multiple_waves() {
         Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         ),
         Wave::new(
             2,
-            vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+            vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
         ),
     ];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     let result = terminal
         .draw(|frame| {
@@ -295,12 +295,12 @@ fn task_list_renders_with_focus() {
 
     let waves = vec![Wave::new(
         1,
-        vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Running)],
+        vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Running)],
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
-    state.focus = PanelFocus::Left;
+    state.domain.task_graph = Some(TaskGraph::new(waves));
+    state.ui.focus = PanelFocus::Left;
 
     terminal
         .draw(|frame| {
@@ -334,11 +334,11 @@ fn event_stream_renders_with_events() {
         HookEvent::new(Utc::now(), HookEventKind::session_start()),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         ),
     ];
 
-    state.events = VecDeque::from(events);
+    state.domain.events = VecDeque::from(events);
 
     terminal
         .draw(|frame| {
@@ -353,7 +353,7 @@ fn event_stream_renders_with_auto_scroll() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.auto_scroll = true;
+    state.ui.auto_scroll = true;
 
     terminal
         .draw(|frame| {
@@ -368,7 +368,7 @@ fn event_stream_renders_with_focus() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.focus = PanelFocus::Right;
+    state.ui.focus = PanelFocus::Right;
 
     terminal
         .draw(|frame| {
@@ -415,10 +415,10 @@ fn dashboard_layout_with_all_status_types() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Pending".into(), TaskStatus::Pending),
-            Task::new("T2".into(), "Running".into(), TaskStatus::Running),
-            Task::new("T3".into(), "Implemented".into(), TaskStatus::Implemented),
-            Task::new("T4".into(), "Completed".into(), TaskStatus::Completed),
+            Task::new("T1", "Pending".to_string(), TaskStatus::Pending),
+            Task::new("T2", "Running".to_string(), TaskStatus::Running),
+            Task::new("T3", "Implemented".to_string(), TaskStatus::Implemented),
+            Task::new("T4", "Completed".to_string(), TaskStatus::Completed),
             Task {
                 id: "T5".into(),
                 description: "Failed".into(),
@@ -435,7 +435,7 @@ fn dashboard_layout_with_all_status_types() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -453,11 +453,11 @@ fn dashboard_layout_with_long_task_descriptions() {
 
     let waves = vec![Wave::new(
         1,
-        vec![Task::new("T1".into(), long_desc, TaskStatus::Running)],
+        vec![Task::new("T1", long_desc, TaskStatus::Running)],
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -474,7 +474,7 @@ fn dashboard_layout_with_many_events() {
     let mut state = AppState::new();
 
     for i in 0..100 {
-        state.events.push_back(HookEvent::new(
+        state.domain.events.push_back(HookEvent::new(
             Utc::now(),
             HookEventKind::notification(format!("Event {}", i)),
         ));
@@ -495,15 +495,15 @@ fn dashboard_layout_with_scroll_offsets() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-            Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+            Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+            Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
         ],
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
-    state.scroll_offsets.task_list = 5;
-    state.scroll_offsets.event_stream = 10;
+    state.domain.task_graph = Some(TaskGraph::new(waves));
+    state.ui.scroll_offsets.task_list = 5;
+    state.ui.scroll_offsets.event_stream = 10;
 
     terminal
         .draw(|frame| {
@@ -556,7 +556,7 @@ fn view_render_with_filter_overlay() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.filter = Some("test".to_string());
+    state.ui.filter = Some("test".to_string());
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
@@ -582,7 +582,7 @@ fn view_render_with_help_overlay() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.show_help = true;
+    state.ui.show_help = true;
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
@@ -611,8 +611,8 @@ fn view_render_with_both_overlays() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.filter = Some("query".to_string());
-    state.show_help = true;
+    state.ui.filter = Some("query".to_string());
+    state.ui.show_help = true;
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))

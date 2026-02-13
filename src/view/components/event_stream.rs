@@ -15,9 +15,9 @@ use crate::model::{HookEventKind, Theme};
 pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
     let lines = build_filtered_event_lines(state, None);
 
-    let is_focused = matches!(state.focus, PanelFocus::Right);
+    let is_focused = matches!(state.ui.focus, PanelFocus::Right);
 
-    let title = if state.auto_scroll {
+    let title = if state.ui.auto_scroll {
         "Events [auto-scroll]"
     } else {
         "Events"
@@ -36,7 +36,7 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
         )
         .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
-        .scroll((state.scroll_offsets.event_stream as u16, 0));
+        .scroll((state.ui.scroll_offsets.event_stream as u16, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -52,7 +52,7 @@ pub fn render_agent_event_stream(
 ) {
     let lines = build_filtered_event_lines(state, Some(agent_id));
 
-    let title = if state.auto_scroll {
+    let title = if state.ui.auto_scroll {
         "Activity [auto-scroll]"
     } else {
         "Activity"
@@ -79,11 +79,11 @@ pub fn render_agent_event_stream(
 /// Pure function: build lines from events, optionally filtered by agent_id.
 fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
     let filtered: Vec<_> = state
-        .events
+        .domain.events
         .iter()
         .rev()
         .filter(|e| match agent_filter {
-            Some(aid) => e.agent_id.as_deref() == Some(aid),
+            Some(aid) => e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid),
             None => true,
         })
         .take(500)
@@ -115,10 +115,10 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         // Resolve agent display name
         let agent_label = event.agent_id.as_ref().map(|aid| {
             state
-                .agents
+                .domain.agents
                 .get(aid)
                 .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| short_id(aid))
+                .unwrap_or_else(|| short_id(aid.as_str()))
         });
 
         // Line 1: timestamp + icon + header
@@ -365,7 +365,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             } else {
                 Some(input_summary.clone())
             };
-            ("⚡", tool_name.clone(), detail, Theme::tool_color(tool_name), Some(tool_name.clone()))
+            ("⚡", tool_name.to_string(), detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
         HookEventKind::PostToolUse {
             tool_name,
@@ -381,7 +381,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             } else {
                 Some(result_summary.clone())
             };
-            ("✓", header, detail, Theme::tool_color(tool_name), Some(tool_name.clone()))
+            ("✓", header, detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
         HookEventKind::Stop { reason } => {
             ("⏹", "Stopped".into(), reason.clone(), Theme::WARNING, None)
@@ -437,7 +437,7 @@ mod tests {
         let event1 = HookEvent::new(Utc::now(), HookEventKind::session_start());
         let event2 = HookEvent::new(Utc::now(), HookEventKind::session_end());
 
-        state.events = VecDeque::from(vec![event1, event2]);
+        state.domain.events = VecDeque::from(vec![event1, event2]);
 
         let lines = build_filtered_event_lines(&state, None);
 
@@ -455,8 +455,8 @@ mod tests {
     #[test]
     fn format_event_pre_tool_use() {
         let (_, header, detail, _, _) = format_event_lines(&HookEventKind::pre_tool_use(
-            "Read".into(),
-            "file.rs".into(),
+            "Read",
+            "file.rs".to_string(),
         ));
         assert!(header.contains("Read"));
         assert_eq!(detail, Some("file.rs".into()));
@@ -465,8 +465,8 @@ mod tests {
     #[test]
     fn format_event_post_tool_use_with_duration() {
         let (icon, header, detail, _, _) = format_event_lines(&HookEventKind::post_tool_use(
-            "Bash".into(),
-            "success".into(),
+            "Bash",
+            "success".to_string(),
             Some(250),
         ));
         assert!(header.contains("Bash"));
@@ -558,16 +558,16 @@ mod tests {
         use crate::model::Agent;
 
         let mut state = AppState::new();
-        let mut agent = Agent::new("a01".into(), Utc::now());
+        let mut agent = Agent::new("a01", Utc::now());
         agent.agent_type = Some("Explore".into());
-        state.agents.insert("a01".into(), agent);
+        state.domain.agents.insert("a01".into(), agent);
 
         let event = HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         )
-        .with_agent("a01".into());
-        state.events = VecDeque::from(vec![event]);
+        .with_agent("a01");
+        state.domain.events = VecDeque::from(vec![event]);
 
         let lines = build_filtered_event_lines(&state, None);
         // Header line should contain "Explore"

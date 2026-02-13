@@ -28,8 +28,6 @@ pub enum WatcherError {
     Io(String),
     #[error("parse: {0}")]
     Parse(#[from] ParseError),
-    #[error("lock poisoned")]
-    LockPoisoned,
 }
 
 impl From<notify::Error> for WatcherError {

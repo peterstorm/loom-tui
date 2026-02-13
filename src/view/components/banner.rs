@@ -11,7 +11,7 @@ use crate::model::Theme;
 
 /// Render banner for hook status warnings
 pub fn render_banner(frame: &mut Frame, area: Rect, state: &AppState) {
-    let message = match &state.hook_status {
+    let message = match &state.meta.hook_status {
         crate::app::state::HookStatus::Missing => "Hooks not installed. Press 'i' to install.",
         crate::app::state::HookStatus::InstallFailed(err) => {
             return render_failed_banner(frame, area, err);

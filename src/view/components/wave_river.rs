@@ -39,7 +39,7 @@ pub fn render_wave_river(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Pure function: build wave river text from state.
 fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
-    match &state.task_graph {
+    match &state.domain.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
             let current_wave = calculate_current_wave_num(graph);
             let mut lines = Vec::new();
@@ -163,14 +163,14 @@ mod tests {
         let waves = vec![Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
-                Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
+                Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
             ],
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let lines = build_wave_river_text(&state);
         assert!(!lines.is_empty());
@@ -185,16 +185,16 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Running)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
             ),
         ];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let lines = build_wave_river_text(&state);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();

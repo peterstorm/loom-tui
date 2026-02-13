@@ -1,4 +1,4 @@
-use loom_tui::model::{HookEventKind, MessageKind, TaskStatus};
+use loom_tui::model::{AgentId, HookEventKind, MessageKind, SessionId, TaskId, TaskStatus, ToolName};
 use loom_tui::watcher::{
     extract_active_agent_ids, parse_hook_events, parse_task_graph, parse_transcript, TailState,
 };
@@ -60,12 +60,12 @@ fn test_parse_task_graph_comprehensive() {
     // Verify wave 1
     assert_eq!(graph.waves[0].number, 1);
     assert_eq!(graph.waves[0].tasks.len(), 2);
-    assert_eq!(graph.waves[0].tasks[0].id, "T1");
+    assert_eq!(graph.waves[0].tasks[0].id.as_str(), "T1");
     assert_eq!(
         graph.waves[0].tasks[0].status,
         TaskStatus::Completed
     );
-    assert_eq!(graph.waves[0].tasks[0].agent_id, Some("a01".to_string()));
+    assert_eq!(graph.waves[0].tasks[0].agent_id, Some(AgentId::new("a01")));
     assert_eq!(graph.waves[0].tasks[0].files_modified.len(), 2);
     assert_eq!(graph.waves[0].tasks[0].tests_passed, Some(true));
 
@@ -159,7 +159,7 @@ fn test_parse_transcript_reasoning_and_tools() {
     // Verify tool message without result
     match &messages[1].kind {
         MessageKind::Tool(call) => {
-            assert_eq!(call.tool_name, "Read");
+            assert_eq!(call.tool_name.as_str(), "Read");
             assert_eq!(call.input_summary, "src/main.rs");
             assert!(call.result_summary.is_none());
             assert!(call.duration.is_none());
@@ -170,7 +170,7 @@ fn test_parse_transcript_reasoning_and_tools() {
     // Verify tool message with result and duration
     match &messages[2].kind {
         MessageKind::Tool(call) => {
-            assert_eq!(call.tool_name, "Bash");
+            assert_eq!(call.tool_name.as_str(), "Bash");
             assert_eq!(call.duration, Some(std::time::Duration::from_millis(1500)));
             assert_eq!(call.success, Some(true));
             assert_eq!(call.result_summary, Some("All tests passed".to_string()));
@@ -234,7 +234,7 @@ fn test_parse_hook_events_all_kinds() {
 
     match &events[2].kind {
         HookEventKind::PreToolUse { tool_name, input_summary } => {
-            assert_eq!(tool_name, "Read");
+            assert_eq!(tool_name.as_str(), "Read");
             assert_eq!(input_summary, "file.rs");
         }
         _ => panic!("Expected PreToolUse"),
@@ -242,7 +242,7 @@ fn test_parse_hook_events_all_kinds() {
 
     match &events[3].kind {
         HookEventKind::PostToolUse { tool_name, result_summary, duration_ms } => {
-            assert_eq!(tool_name, "Read");
+            assert_eq!(tool_name.as_str(), "Read");
             assert_eq!(result_summary, "File read");
             assert_eq!(duration_ms, &Some(50));
         }
@@ -278,8 +278,8 @@ fn test_parse_hook_events_with_metadata() {
 
     let events = result.unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].session_id, Some("s123".to_string()));
-    assert_eq!(events[0].agent_id, Some("a01".to_string()));
+    assert_eq!(events[0].session_id, Some(SessionId::new("s123")));
+    assert_eq!(events[0].agent_id, Some(AgentId::new("a01")));
 }
 
 #[test]
@@ -425,7 +425,7 @@ fn test_parse_transcript_partial_tool_data() {
     let messages = result.unwrap();
     match &messages[0].kind {
         MessageKind::Tool(call) => {
-            assert_eq!(call.tool_name, "Read");
+            assert_eq!(call.tool_name.as_str(), "Read");
             assert!(call.result_summary.is_none());
             assert!(call.duration.is_none());
             assert!(call.success.is_none());

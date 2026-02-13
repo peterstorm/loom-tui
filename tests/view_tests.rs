@@ -62,11 +62,11 @@ fn dashboard_renders_without_panic_with_events() {
         HookEvent::new(Utc::now(), HookEventKind::session_start()),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         ),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::post_tool_use("Read".into(), "success".into(), Some(150)),
+            HookEventKind::post_tool_use("Read", "success".to_string(), Some(150)),
         ),
     ];
 
@@ -334,7 +334,7 @@ fn event_stream_renders_with_events() {
         HookEvent::new(Utc::now(), HookEventKind::session_start()),
         HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         ),
     ];
 
@@ -453,7 +453,7 @@ fn dashboard_layout_with_long_task_descriptions() {
 
     let waves = vec![Wave::new(
         1,
-        vec![Task::new("T1".into(), long_desc, TaskStatus::Running)],
+        vec![Task::new("T1", long_desc, TaskStatus::Running)],
     )];
 
     let mut state = AppState::new();

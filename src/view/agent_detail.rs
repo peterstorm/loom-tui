@@ -166,7 +166,7 @@ fn render_footer(frame: &mut Frame, area: Rect, _state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Agent;
+    use crate::model::{Agent, AgentId};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -220,7 +220,7 @@ mod tests {
 
         let mut state = AppState::new();
         let now = Utc::now();
-        let agent = Agent::new("a01".into(), now).finish(now + chrono::Duration::seconds(10));
+        let agent = Agent::new("a01", now).finish(now + chrono::Duration::seconds(10));
         state.domain.agents.insert("a01".into(), agent);
         state.ui.selected_agent_index = Some(0);
 

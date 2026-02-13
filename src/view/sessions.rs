@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::app::state::AppState;
-use crate::model::{theme::Theme, SessionMeta, SessionStatus};
+use crate::model::{theme::Theme, SessionId, SessionMeta, SessionStatus};
 
 /// Render the sessions archive view into the given content area.
 /// Global header is rendered by the view dispatcher.
@@ -195,7 +195,7 @@ fn format_status(status: &SessionStatus) -> String {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::{ArchivedSession, SessionMeta};
+    use crate::model::{ArchivedSession, SessionId, SessionMeta};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;

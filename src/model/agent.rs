@@ -180,12 +180,12 @@ mod tests {
         let now = Utc::now();
         let later = now + chrono::Duration::seconds(10);
 
-        let agent = Agent::new("a01".into(), now)
-            .with_task("T1".into())
+        let agent = Agent::new("a01", now)
+            .with_task("T1")
             .finish(later);
 
-        assert_eq!(agent.id, "a01");
-        assert_eq!(agent.task_id, Some("T1".into()));
+        assert_eq!(agent.id.as_str(), "a01");
+        assert_eq!(agent.task_id, Some(TaskId::new("T1")));
         assert_eq!(agent.finished_at, Some(later));
     }
 

@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn hook_event_kind_with_data() {
-        let kind = HookEventKind::pre_tool_use("Read".into(), "file.rs".into());
+        let kind = HookEventKind::pre_tool_use("Read", "file.rs".to_string());
         let json = serde_json::to_value(&kind).unwrap();
         assert_eq!(json["event"], "pre_tool_use");
         assert_eq!(json["tool_name"], "Read");

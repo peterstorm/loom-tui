@@ -447,7 +447,7 @@ fn toggle_auto_scroll(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Agent, ArchivedSession, SessionMeta, Task, TaskGraph, TaskStatus, Wave};
+    use crate::model::{Agent, AgentId, ArchivedSession, SessionId, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
     use std::path::PathBuf;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -669,9 +669,9 @@ mod tests {
     fn enter_on_dashboard_drills_into_agent_detail() {
         let mut state = AppState::new();
         let task = Task {
-            id: "T1".to_string(),
+            id: TaskId::new("T1"),
             description: "Test".to_string(),
-            agent_id: Some("a04".to_string()),
+            agent_id: Some(AgentId::new("a04")),
             status: TaskStatus::Running,
             review_status: Default::default(),
             files_modified: vec![],
@@ -907,25 +907,25 @@ mod tests {
         let mut state = AppState::new();
         state.domain.agents.insert(
             "a01".into(),
-            Agent::new("a01".into(), now - chrono::Duration::seconds(10)),
+            Agent::new("a01", now - chrono::Duration::seconds(10)),
         );
         state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", now));
         state.recompute_sorted_keys();
 
         let tasks = vec![
             Task {
-                id: "T1".to_string(),
+                id: TaskId::new("T1"),
                 description: "Task 1".to_string(),
-                agent_id: Some("a01".to_string()),
+                agent_id: Some(AgentId::new("a01")),
                 status: TaskStatus::Running,
                 review_status: Default::default(),
                 files_modified: vec![],
                 tests_passed: None,
             },
             Task {
-                id: "T2".to_string(),
+                id: TaskId::new("T2"),
                 description: "Task 2".to_string(),
-                agent_id: Some("a02".to_string()),
+                agent_id: Some(AgentId::new("a02")),
                 status: TaskStatus::Running,
                 review_status: Default::default(),
                 files_modified: vec![],

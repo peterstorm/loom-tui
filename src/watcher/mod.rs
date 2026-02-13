@@ -512,7 +512,7 @@ mod tests {
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         match event {
             AppEvent::TranscriptUpdated { agent_id, messages } => {
-                assert_eq!(agent_id, "a04");
+                assert_eq!(agent_id.as_str(), "a04");
                 assert_eq!(messages.len(), 1);
             }
             _ => panic!("Expected TranscriptUpdated event"),

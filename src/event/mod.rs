@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::KeyEvent;
 
 use crate::error::LoomError;
-use crate::model::{AgentId, AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
+use crate::model::{AgentId, AgentMessage, HookEvent, SessionArchive, SessionId, SessionMeta, TaskGraph};
 
 /// All events that can occur in the application.
 /// Sourced from file watchers, keyboard input, timers, and internal operations.

@@ -2,6 +2,7 @@ use chrono::Utc;
 use loom_tui::{
     app::{update, AppState, HookStatus, ViewState},
     event::AppEvent,
+    model::AgentId,
 };
 use std::time::Duration;
 
@@ -67,8 +68,8 @@ fn event_loop_handles_watcher_events() {
     update(&mut state, AppEvent::TaskGraphUpdated(graph));
     assert!(state.domain.task_graph.is_some());
 
-    update(&mut state, AppEvent::AgentStarted("a01".to_string()));
-    assert!(state.domain.agents.contains_key("a01"));
+    update(&mut state, AppEvent::AgentStarted(AgentId::new("a01")));
+    assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
 
     let hook_event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
     update(&mut state, AppEvent::HookEventReceived(hook_event));
@@ -88,14 +89,14 @@ fn tick_rate_configuration() {
 fn event_loop_drains_multiple_watcher_events() {
     let mut state = AppState::new();
 
-    update(&mut state, AppEvent::AgentStarted("a01".to_string()));
-    update(&mut state, AppEvent::AgentStarted("a02".to_string()));
-    update(&mut state, AppEvent::AgentStarted("a03".to_string()));
+    update(&mut state, AppEvent::AgentStarted(AgentId::new("a01")));
+    update(&mut state, AppEvent::AgentStarted(AgentId::new("a02")));
+    update(&mut state, AppEvent::AgentStarted(AgentId::new("a03")));
 
     assert_eq!(state.domain.agents.len(), 3);
-    assert!(state.domain.agents.contains_key("a01"));
-    assert!(state.domain.agents.contains_key("a02"));
-    assert!(state.domain.agents.contains_key("a03"));
+    assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
+    assert!(state.domain.agents.contains_key(&AgentId::new("a02")));
+    assert!(state.domain.agents.contains_key(&AgentId::new("a03")));
 }
 
 #[test]

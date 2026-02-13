@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn session_meta_builder_pattern() {
         let now = Utc::now();
-        let meta = SessionMeta::new("s1".into(), now, "/proj".into())
+        let meta = SessionMeta::new("s1", now, "/proj".to_string())
             .with_status(SessionStatus::Completed)
             .with_duration(Duration::from_secs(300))
             .with_git_branch("main".into());

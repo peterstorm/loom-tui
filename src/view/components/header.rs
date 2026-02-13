@@ -126,7 +126,7 @@ fn calculate_current_wave(graph: &crate::model::TaskGraph) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Task, TaskGraph, TaskStatus, Wave};
+    use crate::model::{AgentId, Task, TaskGraph, TaskStatus, Wave};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

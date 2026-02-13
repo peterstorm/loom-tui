@@ -118,9 +118,9 @@ fn list_sessions_sorted_by_timestamp_newest_first() {
     let earlier = now - chrono::Duration::hours(1);
     let later = now + chrono::Duration::hours(1);
 
-    let meta1 = SessionMeta::new("s1".into(), earlier, "/proj".into());
-    let meta2 = SessionMeta::new("s2".into(), now, "/proj".into());
-    let meta3 = SessionMeta::new("s3".into(), later, "/proj".into());
+    let meta1 = SessionMeta::new("s1", earlier, "/proj".to_string());
+    let meta2 = SessionMeta::new("s2", now, "/proj".to_string());
+    let meta3 = SessionMeta::new("s3", later, "/proj".to_string());
 
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta1)).unwrap();
     save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(meta2)).unwrap();
@@ -129,9 +129,9 @@ fn list_sessions_sorted_by_timestamp_newest_first() {
     // List should be sorted newest first
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 3);
-    assert_eq!(sessions[0].meta.id, "s3");
-    assert_eq!(sessions[1].meta.id, "s2");
-    assert_eq!(sessions[2].meta.id, "s1");
+    assert_eq!(sessions[0].meta.id.as_str(), "s3");
+    assert_eq!(sessions[1].meta.id.as_str(), "s2");
+    assert_eq!(sessions[2].meta.id.as_str(), "s1");
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn list_sessions_skips_corrupt_files() {
     // List should return only valid session
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].meta.id, "s1");
+    assert_eq!(sessions[0].meta.id.as_str(), "s1");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn list_sessions_skips_non_json_files() {
     // List should return only JSON files
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].meta.id, "s1");
+    assert_eq!(sessions[0].meta.id.as_str(), "s1");
 }
 
 #[test]
@@ -263,11 +263,11 @@ fn full_workflow_save_list_load_delete() {
     // List sessions
     let sessions = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].meta.id, "s1");
+    assert_eq!(sessions[0].meta.id.as_str(), "s1");
 
     // Load session
     let loaded = load_session(&path).unwrap();
-    assert_eq!(loaded.meta.id, "s1");
+    assert_eq!(loaded.meta.id.as_str(), "s1");
 
     // Delete session
     delete_session(&path).unwrap();
@@ -296,7 +296,7 @@ fn list_session_metas_returns_correct_meta_and_path() {
     for (path, meta) in &metas {
         assert!(path.exists());
         assert!(path.extension().unwrap() == "json");
-        assert!(!meta.id.is_empty());
+        assert!(!meta.id.as_str().is_empty());
     }
 }
 
@@ -308,9 +308,9 @@ fn list_session_metas_sorted_newest_first() {
     let earlier = now - chrono::Duration::hours(1);
     let later = now + chrono::Duration::hours(1);
 
-    let m1 = SessionMeta::new("s1".into(), earlier, "/proj".into());
-    let m2 = SessionMeta::new("s2".into(), now, "/proj".into());
-    let m3 = SessionMeta::new("s3".into(), later, "/proj".into());
+    let m1 = SessionMeta::new("s1", earlier, "/proj".to_string());
+    let m2 = SessionMeta::new("s2", now, "/proj".to_string());
+    let m3 = SessionMeta::new("s3", later, "/proj".to_string());
 
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(m1)).unwrap();
     save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(m2)).unwrap();
@@ -318,9 +318,9 @@ fn list_session_metas_sorted_newest_first() {
 
     let metas = list_session_metas(tmpdir.path()).unwrap();
     assert_eq!(metas.len(), 3);
-    assert_eq!(metas[0].1.id, "s3"); // newest
-    assert_eq!(metas[1].1.id, "s2");
-    assert_eq!(metas[2].1.id, "s1"); // oldest
+    assert_eq!(metas[0].1.id.as_str(), "s3"); // newest
+    assert_eq!(metas[1].1.id.as_str(), "s2");
+    assert_eq!(metas[2].1.id.as_str(), "s1"); // oldest
 }
 
 #[test]
@@ -347,5 +347,5 @@ fn list_session_metas_skips_corrupt_files() {
 
     let metas = list_session_metas(tmpdir.path()).unwrap();
     assert_eq!(metas.len(), 1);
-    assert_eq!(metas[0].1.id, "s1");
+    assert_eq!(metas[0].1.id.as_str(), "s1");
 }

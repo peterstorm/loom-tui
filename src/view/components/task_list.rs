@@ -219,7 +219,7 @@ mod tests {
         let long_desc = "a".repeat(100);
         let waves = vec![Wave::new(
             1,
-            vec![Task::new("T1".into(), long_desc, TaskStatus::Pending)],
+            vec![Task::new("T1", long_desc, TaskStatus::Pending)],
         )];
 
         let mut state = AppState::new();

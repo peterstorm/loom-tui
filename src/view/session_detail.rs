@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, PanelFocus};
-use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionMeta, SessionStatus, TaskGraph, Theme};
+use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionId, SessionMeta, SessionStatus, TaskGraph, Theme};
 
 // ============================================================================
 // Data access: unifies active session vs archived session
@@ -684,7 +684,7 @@ fn format_duration(duration: Option<Duration>) -> String {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::{Agent, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionMeta, SessionStatus};
+    use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta, SessionStatus};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -713,7 +713,7 @@ mod tests {
         state.ui.selected_session_index = Some(0);
         state.ui.view = crate::app::state::ViewState::SessionDetail;
         let mut a = Agent::new("a01", Utc::now());
-        a.session_id = Some("s1".into());
+        a.session_id = Some(SessionId::new("s1"));
         state.domain.agents.insert("a01".into(), a);
 
         terminal
@@ -736,9 +736,9 @@ mod tests {
 
         let events = vec![
             HookEvent::new(Utc::now(), HookEventKind::SessionStart),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read".into(), "ok".into(), Some(100))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read".into(), "ok".into(), Some(200))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash".into(), "ok".into(), Some(500))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(100))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(200))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash", "ok".to_string(), Some(500))),
         ];
 
         let archive = SessionArchive::new(meta.clone())
@@ -780,9 +780,9 @@ mod tests {
     #[test]
     fn compute_tool_stats_groups_by_tool() {
         let events = vec![
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read".into(), "ok".into(), Some(100))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read".into(), "ok".into(), Some(200))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash".into(), "ok".into(), Some(500))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(100))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(200))),
+            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash", "ok".to_string(), Some(500))),
             HookEvent::new(Utc::now(), HookEventKind::SessionStart), // non-tool event
         ];
         let events_ref = EventsRef::Vec(&events);
@@ -810,7 +810,7 @@ mod tests {
     fn compute_agent_summary_counts_tools() {
         let now = Utc::now();
         let mut agents = BTreeMap::new();
-        let agent = Agent::new("a01".into(), now)
+        let agent = Agent::new("a01", now)
             .with_agent_type("Explore".into())
             .add_message(crate::model::AgentMessage::tool(
                 now,
@@ -842,7 +842,7 @@ mod tests {
         state.domain.active_sessions.insert(SessionId::new("s1"), SessionMeta::new("s1", Utc::now(), "/proj".to_string()));
         state.ui.selected_session_index = Some(0);
         let mut a = Agent::new("a01", Utc::now());
-        a.session_id = Some("s1".into());
+        a.session_id = Some(SessionId::new("s1"));
         state.domain.agents.insert("a01".into(), a);
 
         let data = get_selected_session_data(&state).unwrap();
@@ -866,7 +866,7 @@ mod tests {
         let data = get_selected_session_data(&state).unwrap();
         assert_eq!(data.meta.id.as_str(), "archived");
         assert_eq!(data.agents.len(), 1);
-        assert!(data.agents.contains_key("a99"));
+        assert!(data.agents.contains_key(&AgentId::new("a99")));
     }
 
     #[test]

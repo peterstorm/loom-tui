@@ -455,8 +455,8 @@ mod tests {
     #[test]
     fn format_event_pre_tool_use() {
         let (_, header, detail, _, _) = format_event_lines(&HookEventKind::pre_tool_use(
-            "Read".into(),
-            "file.rs".into(),
+            "Read",
+            "file.rs".to_string(),
         ));
         assert!(header.contains("Read"));
         assert_eq!(detail, Some("file.rs".into()));
@@ -465,8 +465,8 @@ mod tests {
     #[test]
     fn format_event_post_tool_use_with_duration() {
         let (icon, header, detail, _, _) = format_event_lines(&HookEventKind::post_tool_use(
-            "Bash".into(),
-            "success".into(),
+            "Bash",
+            "success".to_string(),
             Some(250),
         ));
         assert!(header.contains("Bash"));
@@ -564,9 +564,9 @@ mod tests {
 
         let event = HookEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
         )
-        .with_agent("a01".into());
+        .with_agent("a01");
         state.domain.events = VecDeque::from(vec![event]);
 
         let lines = build_filtered_event_lines(&state, None);

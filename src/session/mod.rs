@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::app::state::DomainState;
 use crate::error::SessionError;
-use crate::model::{SessionArchive, SessionMeta};
+use crate::model::{SessionArchive, SessionId, SessionMeta};
 
 // ============================================================================
 // FUNCTIONAL CORE: Pure functions for serialization and data transformation
@@ -308,7 +308,7 @@ pub fn auto_save_tick(
 mod tests {
     use super::*;
     use crate::app::AppState;
-    use crate::model::{Agent, SessionStatus, TaskGraph};
+    use crate::model::{Agent, AgentId, SessionStatus, TaskGraph};
     use chrono::Utc;
     use std::collections::BTreeMap;
     use std::time::Duration;

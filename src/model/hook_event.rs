@@ -2,15 +2,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::ids::{AgentId, SessionId, ToolName};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HookEvent {
     pub timestamp: DateTime<Utc>,
     #[serde(flatten)]
     pub kind: HookEventKind,
     #[serde(default)]
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionId>,
     #[serde(default)]
-    pub agent_id: Option<String>,
+    pub agent_id: Option<AgentId>,
     #[serde(default)]
     pub raw: Value,
 }
@@ -26,13 +28,13 @@ impl HookEvent {
         }
     }
 
-    pub fn with_session(mut self, session_id: String) -> Self {
-        self.session_id = Some(session_id);
+    pub fn with_session(mut self, session_id: impl Into<SessionId>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 
-    pub fn with_agent(mut self, agent_id: String) -> Self {
-        self.agent_id = Some(agent_id);
+    pub fn with_agent(mut self, agent_id: impl Into<AgentId>) -> Self {
+        self.agent_id = Some(agent_id.into());
         self
     }
 
@@ -55,11 +57,11 @@ pub enum HookEventKind {
     },
     SubagentStop,
     PreToolUse {
-        tool_name: String,
+        tool_name: ToolName,
         input_summary: String,
     },
     PostToolUse {
-        tool_name: String,
+        tool_name: ToolName,
         result_summary: String,
         #[serde(default)]
         duration_ms: Option<u64>,
@@ -107,20 +109,20 @@ impl HookEventKind {
         Self::SubagentStop
     }
 
-    pub fn pre_tool_use(tool_name: String, input_summary: String) -> Self {
+    pub fn pre_tool_use(tool_name: impl Into<ToolName>, input_summary: String) -> Self {
         Self::PreToolUse {
-            tool_name,
+            tool_name: tool_name.into(),
             input_summary,
         }
     }
 
     pub fn post_tool_use(
-        tool_name: String,
+        tool_name: impl Into<ToolName>,
         result_summary: String,
         duration_ms: Option<u64>,
     ) -> Self {
         Self::PostToolUse {
-            tool_name,
+            tool_name: tool_name.into(),
             result_summary,
             duration_ms,
         }

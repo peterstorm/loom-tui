@@ -31,13 +31,13 @@ fn dashboard_renders_without_panic_with_tasks() {
         Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         ),
         Wave::new(
             2,
-            vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+            vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
         ),
     ];
 
@@ -165,8 +165,8 @@ fn header_renders_with_tasks() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-            Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+            Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+            Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
         ],
     )];
 
@@ -248,13 +248,13 @@ fn wave_river_renders_multiple_waves() {
         Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         ),
         Wave::new(
             2,
-            vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+            vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
         ),
     ];
 
@@ -295,7 +295,7 @@ fn task_list_renders_with_focus() {
 
     let waves = vec![Wave::new(
         1,
-        vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Running)],
+        vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Running)],
     )];
 
     let mut state = AppState::new();
@@ -415,10 +415,10 @@ fn dashboard_layout_with_all_status_types() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Pending".into(), TaskStatus::Pending),
-            Task::new("T2".into(), "Running".into(), TaskStatus::Running),
-            Task::new("T3".into(), "Implemented".into(), TaskStatus::Implemented),
-            Task::new("T4".into(), "Completed".into(), TaskStatus::Completed),
+            Task::new("T1", "Pending".to_string(), TaskStatus::Pending),
+            Task::new("T2", "Running".to_string(), TaskStatus::Running),
+            Task::new("T3", "Implemented".to_string(), TaskStatus::Implemented),
+            Task::new("T4", "Completed".to_string(), TaskStatus::Completed),
             Task {
                 id: "T5".into(),
                 description: "Failed".into(),
@@ -495,8 +495,8 @@ fn dashboard_layout_with_scroll_offsets() {
     let waves = vec![Wave::new(
         1,
         vec![
-            Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-            Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+            Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+            Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
         ],
     )];
 

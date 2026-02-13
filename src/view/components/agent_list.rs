@@ -71,7 +71,7 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
 
             // Count tool events for this agent
             let tool_count = state.domain.events.iter()
-                .filter(|e| e.agent_id.as_deref() == Some(key))
+                .filter(|e| e.agent_id.as_ref() == Some(key))
                 .filter(|e| matches!(&e.kind, crate::model::HookEventKind::PostToolUse { .. }))
                 .count();
 
@@ -135,10 +135,10 @@ mod tests {
     #[test]
     fn build_agent_items_with_agents() {
         let mut state = AppState::new();
-        let mut a1 = Agent::new("a01".into(), Utc::now());
+        let mut a1 = Agent::new("a01", Utc::now());
         a1.agent_type = Some("Explore".into());
         state.domain.agents.insert("a01".into(), a1);
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert("a02".into(), Agent::new("a02", Utc::now()));
         state.recompute_sorted_keys();
         state.ui.selected_agent_index = Some(0);
 

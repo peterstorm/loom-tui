@@ -1,3 +1,4 @@
+use super::ids::{AgentId, SessionId, TaskId};
 use super::{Agent, HookEvent, TaskGraph};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,7 +7,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
-    pub id: String,
+    pub id: SessionId,
     pub timestamp: DateTime<Utc>,
     #[serde(
         default,
@@ -26,7 +27,7 @@ pub struct SessionMeta {
     #[serde(default)]
     pub wave_count: Option<u32>,
     #[serde(default)]
-    pub failed_tasks: Vec<String>,
+    pub failed_tasks: Vec<TaskId>,
     #[serde(default)]
     pub transcript_path: Option<String>,
     /// Last time an event was received for this session (for stale session cleanup)
@@ -54,9 +55,9 @@ impl PartialEq for SessionMeta {
 }
 
 impl SessionMeta {
-    pub fn new(id: String, timestamp: DateTime<Utc>, project_path: String) -> Self {
+    pub fn new(id: impl Into<SessionId>, timestamp: DateTime<Utc>, project_path: String) -> Self {
         Self {
-            id,
+            id: id.into(),
             timestamp,
             duration: None,
             status: SessionStatus::Active,
@@ -111,7 +112,7 @@ pub struct SessionArchive {
     #[serde(default)]
     pub events: Vec<HookEvent>,
     #[serde(default)]
-    pub agents: BTreeMap<String, Agent>,
+    pub agents: BTreeMap<AgentId, Agent>,
 }
 
 /// Lightweight session index entry. Meta is always available; full archive loaded on demand.
@@ -158,7 +159,7 @@ impl SessionArchive {
         self
     }
 
-    pub fn with_agents(mut self, agents: BTreeMap<String, Agent>) -> Self {
+    pub fn with_agents(mut self, agents: BTreeMap<AgentId, Agent>) -> Self {
         self.agents = agents;
         self
     }
@@ -214,7 +215,7 @@ mod tests {
 
     #[test]
     fn session_archive_round_trip() {
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let archive = SessionArchive::new(meta);
 
         let json = serde_json::to_string(&archive).unwrap();

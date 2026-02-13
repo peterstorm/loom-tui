@@ -49,7 +49,7 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
             frame,
             main_chunks[1],
             state,
-            &agent.id,
+            agent.id.as_str(),
             state.ui.scroll_offsets.agent_events,
             is_right_focused,
         );
@@ -83,15 +83,13 @@ fn render_agent_header(
                 format!("{}s", elapsed.as_secs())
             };
 
-            let task_info = agent
-                .task_description
-                .as_ref()
-                .or(agent.task_id.as_ref())
+            let task_info = agent.task_description.as_deref()
+                .or_else(|| agent.task_id.as_ref().map(|id| id.as_str()))
                 .map(|desc| {
                     let truncated = if desc.len() > 60 {
                         format!("{}…", &desc[..60])
                     } else {
-                        desc.clone()
+                        desc.to_string()
                     };
                     format!(" | {}", truncated)
                 })
@@ -190,7 +188,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
         state.ui.selected_agent_index = Some(0);
 
         terminal
@@ -204,10 +202,10 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        let mut a1 = Agent::new("a01".into(), Utc::now());
+        let mut a1 = Agent::new("a01", Utc::now());
         a1.agent_type = Some("Explore".into());
         state.domain.agents.insert("a01".into(), a1);
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(1);
 
         terminal
@@ -238,7 +236,7 @@ mod tests {
 
         let mut state = AppState::new();
         state.ui.focus = PanelFocus::Right;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
         state.ui.selected_agent_index = Some(0);
 
         terminal

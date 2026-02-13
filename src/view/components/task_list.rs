@@ -50,8 +50,8 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                     }
                     let lower = filter.to_lowercase();
                     task.description.to_lowercase().contains(&lower)
-                        || task.id.to_lowercase().contains(&lower)
-                        || task.agent_id.as_ref().map(|a| a.to_lowercase().contains(&lower)).unwrap_or(false)
+                        || task.id.as_str().to_lowercase().contains(&lower)
+                        || task.agent_id.as_ref().map(|a| a.as_str().to_lowercase().contains(&lower)).unwrap_or(false)
                 }).collect();
 
                 if wave_tasks.is_empty() && !filter.is_empty() {
@@ -90,7 +90,7 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                         Span::styled("  ", Style::default().bg(bg)),
                         Span::styled(status_symbol.to_string(), Style::default().fg(status_color).bg(bg)),
                         Span::styled(" ", Style::default().bg(bg)),
-                        Span::styled(task.id.clone(), Style::default().fg(Theme::INFO).bg(bg)),
+                        Span::styled(task.id.to_string(), Style::default().fg(Theme::INFO).bg(bg)),
                         Span::styled(" ", Style::default().bg(bg)),
                     ];
 
@@ -102,8 +102,10 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                     spans.push(Span::styled(description, Style::default().fg(Theme::TEXT).bg(bg)));
 
                     if let Some(ref agent_id) = task.agent_id {
+                        let id_str = agent_id.as_str();
+                        let short = &id_str[..id_str.len().min(7)];
                         spans.push(Span::styled(
-                            format!("  {}", &agent_id[..agent_id.len().min(7)]),
+                            format!("  {}", short),
                             Style::default().fg(Theme::AGENT_LABEL).bg(bg),
                         ));
                     }
@@ -171,11 +173,11 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Running)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
             ),
         ];
 

@@ -163,9 +163,9 @@ mod tests {
         let waves = vec![Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
-                Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
+                Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
             ],
         )];
 
@@ -185,11 +185,11 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Running)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
             ),
         ];
 

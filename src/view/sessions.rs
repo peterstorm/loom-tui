@@ -83,7 +83,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
             };
 
             Row::new(vec![
-                session.id.clone(),
+                session.id.to_string(),
                 session.timestamp.format("%Y-%m-%d %H:%M").to_string(),
                 format_duration(duration),
                 status_str,
@@ -235,13 +235,13 @@ mod tests {
         let mut state = AppState::new();
         state.domain.sessions = vec![
             ArchivedSession::new(
-                SessionMeta::new("s1".into(), Utc::now(), "/proj/foo".into())
+                SessionMeta::new("s1", Utc::now(), "/proj/foo".to_string())
                     .with_status(SessionStatus::Completed)
                     .with_duration(Duration::from_secs(300)),
                 PathBuf::new(),
             ),
             ArchivedSession::new(
-                SessionMeta::new("s2".into(), Utc::now(), "/proj/bar".into())
+                SessionMeta::new("s2", Utc::now(), "/proj/bar".to_string())
                     .with_status(SessionStatus::Failed),
                 PathBuf::new(),
             ),

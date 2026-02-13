@@ -18,7 +18,7 @@ fn save_and_load_session() {
     let archive_path = tmpdir.path().join("s1.json");
 
     // Create archive
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     let archive = SessionArchive::new(meta);
 
     // Save to disk
@@ -36,7 +36,7 @@ fn save_creates_parent_directory() {
     let tmpdir = TempDir::new().unwrap();
     let nested_path = tmpdir.path().join("sessions").join("s1.json");
 
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     let archive = SessionArchive::new(meta);
 
     // Parent dir does not exist yet
@@ -95,8 +95,8 @@ fn list_sessions_returns_multiple_archives() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create multiple session archives
-    let meta1 = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-    let meta2 = SessionMeta::new("s2".into(), Utc::now(), "/proj".into());
+    let meta1 = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+    let meta2 = SessionMeta::new("s2", Utc::now(), "/proj".to_string());
 
     let archive1 = SessionArchive::new(meta1);
     let archive2 = SessionArchive::new(meta2);
@@ -139,7 +139,7 @@ fn list_sessions_skips_corrupt_files() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create valid session
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta)).unwrap();
 
     // Create corrupt file
@@ -156,7 +156,7 @@ fn list_sessions_skips_non_json_files() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create valid session
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta)).unwrap();
 
     // Create non-JSON file
@@ -174,7 +174,7 @@ fn delete_session_removes_file() {
     let path = tmpdir.path().join("s1.json");
 
     // Create session
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     save_session(&path, &SessionArchive::new(meta)).unwrap();
     assert!(path.exists());
 
@@ -198,7 +198,7 @@ fn auto_save_tick_saves_when_interval_elapsed() {
     let tmpdir = TempDir::new().unwrap();
     let path = tmpdir.path().join("s1.json");
 
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     let archive = SessionArchive::new(meta);
 
     // Simulate last save 31 seconds ago
@@ -215,7 +215,7 @@ fn auto_save_tick_does_not_save_before_interval() {
     let tmpdir = TempDir::new().unwrap();
     let path = tmpdir.path().join("s1.json");
 
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     let archive = SessionArchive::new(meta);
 
     // Simulate last save 5 seconds ago
@@ -236,7 +236,7 @@ fn build_archive_from_app_state() {
         completed_tasks: 0,
     });
 
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
         .with_status(SessionStatus::Active);
 
     let archive = build_archive(&state.domain, &meta);
@@ -251,7 +251,7 @@ fn full_workflow_save_list_load_delete() {
 
     // Build archive from state
     let state = AppState::new();
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
         .with_status(SessionStatus::Completed);
     let archive = build_archive(&state.domain, &meta);
 
@@ -283,8 +283,8 @@ fn full_workflow_save_list_load_delete() {
 fn list_session_metas_returns_correct_meta_and_path() {
     let tmpdir = TempDir::new().unwrap();
 
-    let meta1 = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-    let meta2 = SessionMeta::new("s2".into(), Utc::now(), "/proj".into());
+    let meta1 = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+    let meta2 = SessionMeta::new("s2", Utc::now(), "/proj".to_string());
 
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta1)).unwrap();
     save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(meta2)).unwrap();
@@ -341,7 +341,7 @@ fn list_session_metas_missing_dir() {
 fn list_session_metas_skips_corrupt_files() {
     let tmpdir = TempDir::new().unwrap();
 
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta)).unwrap();
     std::fs::write(tmpdir.path().join("corrupt.json"), "not json").unwrap();
 

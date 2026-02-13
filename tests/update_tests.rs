@@ -2,8 +2,8 @@ use chrono::Utc;
 use loom_tui::app::{update, AppState, ViewState};
 use loom_tui::event::AppEvent;
 use loom_tui::model::{
-    Agent, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionMeta,
-    SessionStatus, Task, TaskGraph, TaskStatus, ToolCall, Wave,
+    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta,
+    SessionStatus, Task, TaskGraph, TaskId, TaskStatus, ToolCall, Wave,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ fn task_graph_updated_sets_graph() {
     let stored_graph = state.domain.task_graph.unwrap();
     assert_eq!(stored_graph.waves.len(), 2);
     assert_eq!(stored_graph.total_tasks, 1);
-    assert_eq!(stored_graph.waves[0].tasks[0].id, "T1");
+    assert_eq!(stored_graph.waves[0].tasks[0].id.as_str(), "T1");
 }
 
 #[test]
@@ -69,14 +69,14 @@ fn task_graph_updated_replaces_existing() {
 #[test]
 fn transcript_updated_adds_messages_to_existing_agent() {
     let mut state = AppState::new();
-    let agent = Agent::new("a01".into(), Utc::now());
+    let agent = Agent::new("a01", Utc::now());
     state.domain.agents.insert("a01".into(), agent);
 
     let messages = vec![
         AgentMessage::reasoning(Utc::now(), "analyzing problem".into()),
         AgentMessage::tool(
             Utc::now(),
-            ToolCall::new("Read".into(), "file.rs".into()),
+            ToolCall::new("Read", "file.rs".to_string()),
         ),
     ];
 
@@ -88,7 +88,7 @@ fn transcript_updated_adds_messages_to_existing_agent() {
         },
     );
 
-    let agent = state.domain.agents.get("a01").unwrap();
+    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
     assert_eq!(agent.messages.len(), 2);
     assert!(matches!(
         agent.messages[0].kind,
@@ -99,7 +99,7 @@ fn transcript_updated_adds_messages_to_existing_agent() {
 #[test]
 fn transcript_updated_replaces_existing_messages() {
     let mut state = AppState::new();
-    let mut agent = Agent::new("a01".into(), Utc::now());
+    let mut agent = Agent::new("a01", Utc::now());
     agent.messages = vec![AgentMessage::reasoning(Utc::now(), "old".into())];
     state.domain.agents.insert("a01".into(), agent);
 
@@ -113,7 +113,7 @@ fn transcript_updated_replaces_existing_messages() {
         },
     );
 
-    let agent = state.domain.agents.get("a01").unwrap();
+    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
     assert_eq!(agent.messages.len(), 1);
 }
 
@@ -186,8 +186,8 @@ fn agent_started_creates_new_agent() {
     update(&mut state, AppEvent::AgentStarted("a01".into()));
 
     assert_eq!(state.domain.agents.len(), 1);
-    let agent = state.domain.agents.get("a01").unwrap();
-    assert_eq!(agent.id, "a01");
+    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
+    assert_eq!(agent.id.as_str(), "a01");
     assert!(agent.finished_at.is_none());
     assert!(agent.messages.is_empty());
 }
@@ -199,7 +199,7 @@ fn agent_started_uses_current_timestamp() {
     update(&mut state, AppEvent::AgentStarted("a01".into()));
     let after = Utc::now();
 
-    let agent = state.domain.agents.get("a01").unwrap();
+    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
     assert!(agent.started_at >= before);
     assert!(agent.started_at <= after);
 }
@@ -209,13 +209,13 @@ fn agent_stopped_sets_finished_timestamp() {
     let mut state = AppState::new();
     state
         .domain.agents
-        .insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        .insert("a01".into(), Agent::new("a01", Utc::now()));
 
     let before = Utc::now();
     update(&mut state, AppEvent::AgentStopped("a01".into()));
     let after = Utc::now();
 
-    let agent = state.domain.agents.get("a01").unwrap();
+    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
     assert!(agent.finished_at.is_some());
     let finished = agent.finished_at.unwrap();
     assert!(finished >= before);
@@ -301,7 +301,7 @@ fn parse_error_evicts_oldest_at_capacity() {
 #[test]
 fn session_loaded_populates_data_and_navigates() {
     let mut state = AppState::new();
-    let meta = SessionMeta::new("session-123".into(), Utc::now(), "/home/user/proj".into())
+    let meta = SessionMeta::new("session-123", Utc::now(), "/home/user/proj".to_string())
         .with_status(SessionStatus::Completed);
 
     // Pre-populate with meta-only archived session
@@ -313,7 +313,7 @@ fn session_loaded_populates_data_and_navigates() {
 
     // Data should be populated
     assert!(state.domain.sessions[0].data.is_some());
-    assert_eq!(state.domain.sessions[0].meta.id, "session-123");
+    assert_eq!(state.domain.sessions[0].meta.id.as_str(), "session-123");
     // Loading cleared and navigated to detail
     assert!(state.ui.loading_session.is_none());
     assert!(matches!(state.ui.view, ViewState::SessionDetail));
@@ -322,7 +322,7 @@ fn session_loaded_populates_data_and_navigates() {
 #[test]
 fn session_loaded_sets_task_graph_in_archive() {
     let mut state = AppState::new();
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     let graph = TaskGraph {
         waves: vec![],
         total_tasks: 10,
@@ -342,11 +342,11 @@ fn session_loaded_sets_task_graph_in_archive() {
 #[test]
 fn session_loaded_sets_agents_in_archive() {
     let mut state = AppState::new();
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
 
     let mut agents = BTreeMap::new();
-    agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-    agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+    agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+    agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
 
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
 
@@ -355,14 +355,14 @@ fn session_loaded_sets_agents_in_archive() {
 
     let data = state.domain.sessions[0].data.as_ref().unwrap();
     assert_eq!(data.agents.len(), 2);
-    assert!(data.agents.contains_key("a01"));
-    assert!(data.agents.contains_key("a02"));
+    assert!(data.agents.contains_key(&AgentId::new("a01")));
+    assert!(data.agents.contains_key(&AgentId::new("a02")));
 }
 
 #[test]
 fn session_loaded_stores_events_in_archive() {
     let mut state = AppState::new();
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
 
     let events = vec![
         HookEvent::new(Utc::now(), HookEventKind::SessionStart),
@@ -381,7 +381,7 @@ fn session_loaded_stores_events_in_archive() {
 #[test]
 fn session_loaded_clears_loading_flag() {
     let mut state = AppState::new();
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
     state.ui.loading_session = Some(0);
 
@@ -395,16 +395,16 @@ fn session_loaded_clears_loading_flag() {
 fn session_list_refreshed_updates_sessions() {
     let mut state = AppState::new();
     let sessions = vec![
-        SessionArchive::new(SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
-        SessionArchive::new(SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
-        SessionArchive::new(SessionMeta::new("s3".into(), Utc::now(), "/proj3".into())),
+        SessionArchive::new(SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
+        SessionArchive::new(SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
+        SessionArchive::new(SessionMeta::new("s3", Utc::now(), "/proj3".to_string())),
     ];
 
     update(&mut state, AppEvent::SessionListRefreshed(sessions));
 
     assert_eq!(state.domain.sessions.len(), 3);
-    assert_eq!(state.domain.sessions[0].meta.id, "s1");
-    assert_eq!(state.domain.sessions[2].meta.id, "s3");
+    assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s1");
+    assert_eq!(state.domain.sessions[2].meta.id.as_str(), "s3");
 }
 
 #[test]
@@ -412,38 +412,38 @@ fn session_list_refreshed_replaces_existing_list() {
     let mut state = AppState::new();
     state
         .domain.sessions
-        .push(ArchivedSession::new(SessionMeta::new("old".into(), Utc::now(), "/old".into()), PathBuf::new()));
+        .push(ArchivedSession::new(SessionMeta::new("old", Utc::now(), "/old".to_string()), PathBuf::new()));
 
-    let new_sessions = vec![SessionArchive::new(SessionMeta::new("new".into(), Utc::now(), "/new".into()))];
+    let new_sessions = vec![SessionArchive::new(SessionMeta::new("new", Utc::now(), "/new".to_string()))];
 
     update(&mut state, AppEvent::SessionListRefreshed(new_sessions));
 
     assert_eq!(state.domain.sessions.len(), 1);
-    assert_eq!(state.domain.sessions[0].meta.id, "new");
+    assert_eq!(state.domain.sessions[0].meta.id.as_str(), "new");
 }
 
 #[test]
 fn session_metas_loaded_creates_archived_sessions() {
     let mut state = AppState::new();
     let metas = vec![
-        (PathBuf::from("/sessions/s1.json"), SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
-        (PathBuf::from("/sessions/s2.json"), SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
+        (PathBuf::from("/sessions/s1.json"), SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
+        (PathBuf::from("/sessions/s2.json"), SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
     ];
 
     update(&mut state, AppEvent::SessionMetasLoaded(metas));
 
     assert_eq!(state.domain.sessions.len(), 2);
-    assert_eq!(state.domain.sessions[0].meta.id, "s1");
+    assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s1");
     assert_eq!(state.domain.sessions[0].path, PathBuf::from("/sessions/s1.json"));
     assert!(state.domain.sessions[0].data.is_none()); // Not loaded yet
-    assert_eq!(state.domain.sessions[1].meta.id, "s2");
+    assert_eq!(state.domain.sessions[1].meta.id.as_str(), "s2");
 }
 
 #[test]
 fn load_session_requested_sets_loading_flag() {
     let mut state = AppState::new();
     state.domain.sessions.push(ArchivedSession::new(
-        SessionMeta::new("s1".into(), Utc::now(), "/proj".into()),
+        SessionMeta::new("s1", Utc::now(), "/proj".to_string()),
         PathBuf::from("/sessions/s1.json"),
     ));
 
@@ -468,7 +468,7 @@ fn multiple_updates_compose_correctly() {
             messages,
         },
     );
-    assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 1);
+    assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
 
     // Add event (use Notification, not SessionStart which resets state)
     let event = HookEvent::new(Utc::now(), HookEventKind::Notification { message: "test".into() });
@@ -477,12 +477,12 @@ fn multiple_updates_compose_correctly() {
 
     // Stop agent
     update(&mut state, AppEvent::AgentStopped("a01".into()));
-    assert!(state.domain.agents.get("a01").unwrap().finished_at.is_some());
+    assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_some());
 
     // All state should be preserved
     assert_eq!(state.domain.agents.len(), 1);
     assert_eq!(state.domain.events.len(), 1);
-    assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 1);
+    assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
 }
 
 #[test]

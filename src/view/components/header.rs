@@ -173,8 +173,8 @@ mod tests {
         let waves = vec![Wave::new(
             1,
             vec![
-                Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed),
-                Task::new("T2".into(), "Task 2".into(), TaskStatus::Running),
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
             ],
         )];
 
@@ -182,7 +182,7 @@ mod tests {
         state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let now = Utc::now();
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), now));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", now));
 
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -198,15 +198,15 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Running)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
             ),
             Wave::new(
                 3,
-                vec![Task::new("T3".into(), "Task 3".into(), TaskStatus::Pending)],
+                vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
             ),
         ];
 
@@ -219,11 +219,11 @@ mod tests {
         let waves = vec![
             Wave::new(
                 1,
-                vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Completed)],
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
             ),
             Wave::new(
                 2,
-                vec![Task::new("T2".into(), "Task 2".into(), TaskStatus::Completed)],
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Completed)],
             ),
         ];
 
@@ -244,7 +244,7 @@ mod tests {
 
         let waves = vec![Wave::new(
             1,
-            vec![Task::new("T1".into(), "Task 1".into(), TaskStatus::Running)],
+            vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Running)],
         )];
 
         let mut state = AppState::new();
@@ -253,8 +253,8 @@ mod tests {
         let now = Utc::now();
         let later = now + chrono::Duration::seconds(10);
 
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), now));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), now).finish(later));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", now));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", now).finish(later));
 
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -270,7 +270,7 @@ mod tests {
         let mut state = AppState::new();
         let now = Utc::now();
 
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), now));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", now));
 
         let line = build_header_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();

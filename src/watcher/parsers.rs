@@ -52,9 +52,9 @@ fn parse_loom_format(content: &str) -> Result<TaskGraph, ParseError> {
     let mut wave_map: BTreeMap<u32, Vec<Task>> = BTreeMap::new();
     for lt in loom.tasks {
         let task = Task {
-            id: lt.id,
+            id: lt.id.into(),
             description: lt.description,
-            agent_id: lt.agent,
+            agent_id: lt.agent.map(Into::into),
             status: lt.status,
             review_status: lt.review_status,
             files_modified: lt.files_modified,

@@ -83,7 +83,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         .iter()
         .rev()
         .filter(|e| match agent_filter {
-            Some(aid) => e.agent_id.as_deref() == Some(aid),
+            Some(aid) => e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid),
             None => true,
         })
         .take(500)
@@ -118,7 +118,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
                 .domain.agents
                 .get(aid)
                 .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| short_id(aid))
+                .unwrap_or_else(|| short_id(aid.as_str()))
         });
 
         // Line 1: timestamp + icon + header
@@ -365,7 +365,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             } else {
                 Some(input_summary.clone())
             };
-            ("⚡", tool_name.clone(), detail, Theme::tool_color(tool_name), Some(tool_name.clone()))
+            ("⚡", tool_name.to_string(), detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
         HookEventKind::PostToolUse {
             tool_name,
@@ -381,7 +381,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             } else {
                 Some(result_summary.clone())
             };
-            ("✓", header, detail, Theme::tool_color(tool_name), Some(tool_name.clone()))
+            ("✓", header, detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
         HookEventKind::Stop { reason } => {
             ("⏹", "Stopped".into(), reason.clone(), Theme::WARNING, None)
@@ -558,7 +558,7 @@ mod tests {
         use crate::model::Agent;
 
         let mut state = AppState::new();
-        let mut agent = Agent::new("a01".into(), Utc::now());
+        let mut agent = Agent::new("a01", Utc::now());
         agent.agent_type = Some("Explore".into());
         state.domain.agents.insert("a01".into(), agent);
 

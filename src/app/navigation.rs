@@ -381,7 +381,7 @@ fn drill_down(state: &mut AppState) {
                             let agent_idx = state
                                 .sorted_agent_keys()
                                 .iter()
-                                .position(|k| k == agent_id);
+                                .position(|k| *k == *agent_id);
                             state.ui.selected_agent_index = agent_idx;
                             state.ui.view = ViewState::AgentDetail;
                         }
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn key_2_auto_selects_first_agent() {
         let mut state = AppState::new();
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
 
         handle_key(&mut state, key(KeyCode::Char('2')));
         assert!(matches!(state.ui.view, ViewState::AgentDetail));
@@ -589,8 +589,8 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::AgentDetail;
         state.ui.focus = PanelFocus::Left;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(0);
         handle_key(&mut state, key(KeyCode::Char('j')));
         assert_eq!(state.ui.selected_agent_index, Some(1));
@@ -601,8 +601,8 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::AgentDetail;
         state.ui.focus = PanelFocus::Left;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(1);
         handle_key(&mut state, key(KeyCode::Char('j')));
         assert_eq!(state.ui.selected_agent_index, Some(1));
@@ -613,8 +613,8 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::AgentDetail;
         state.ui.focus = PanelFocus::Left;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(1);
         handle_key(&mut state, key(KeyCode::Char('k')));
         assert_eq!(state.ui.selected_agent_index, Some(0));
@@ -625,8 +625,8 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::AgentDetail;
         state.ui.focus = PanelFocus::Left;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(0);
         state.ui.scroll_offsets.agent_events = 15;
         handle_key(&mut state, key(KeyCode::Char('j')));
@@ -657,8 +657,8 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::Sessions;
         state.domain.sessions = vec![
-            ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
-            ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s1", Utc::now(), "/proj".to_string()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s2", Utc::now(), "/proj".to_string()), PathBuf::new()),
         ];
         state.ui.selected_session_index = Some(0);
         handle_key(&mut state, key(KeyCode::Char('j')));
@@ -680,7 +680,7 @@ mod tests {
         let wave = Wave::new(1, vec![task]);
         state.domain.task_graph = Some(TaskGraph::new(vec![wave]));
         state.ui.selected_task_index = Some(0);
-        state.domain.agents.insert("a04".into(), Agent::new("a04".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a04"), Agent::new("a04", Utc::now()));
         state.recompute_sorted_keys();
 
         handle_key(&mut state, key(KeyCode::Enter));
@@ -880,9 +880,9 @@ mod tests {
         let mut state = AppState::new();
         state.ui.view = ViewState::Sessions;
         state.domain.sessions = vec![
-            ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/p".into()), PathBuf::new()),
-            ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/p".into()), PathBuf::new()),
-            ArchivedSession::new(SessionMeta::new("s3".into(), Utc::now(), "/p".into()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s1", Utc::now(), "/p".to_string()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s2", Utc::now(), "/p".to_string()), PathBuf::new()),
+            ArchivedSession::new(SessionMeta::new("s3", Utc::now(), "/p".to_string()), PathBuf::new()),
         ];
         handle_key(&mut state, key(KeyCode::Char('G')));
         assert_eq!(state.ui.selected_session_index, Some(2));
@@ -892,8 +892,8 @@ mod tests {
     fn g_jumps_to_top_agent_detail() {
         let mut state = AppState::new();
         state.ui.view = ViewState::AgentDetail;
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
         state.ui.selected_agent_index = Some(1);
         state.ui.scroll_offsets.agent_events = 20;
         handle_key(&mut state, key(KeyCode::Char('g')));
@@ -909,7 +909,7 @@ mod tests {
             "a01".into(),
             Agent::new("a01".into(), now - chrono::Duration::seconds(10)),
         );
-        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), now));
+        state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", now));
         state.recompute_sorted_keys();
 
         let tasks = vec![

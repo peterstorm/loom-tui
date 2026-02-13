@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::app::{handle_key, AppState, ViewState};
 use crate::event::AppEvent;
-use crate::model::{Agent, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionMeta, SessionStatus, ToolCall};
+use crate::model::{Agent, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall};
 use crate::session;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
         AppEvent::HookEventReceived(event) => {
             let is_assistant_text = matches!(event.kind, HookEventKind::AssistantText { .. });
-            let event_session = event.session_id.as_deref();
+            let event_session = &event.session_id;
 
             // Attribution logic:
             // - Hook events (tool use etc.): match by session_id (agents store parent session_id)
@@ -38,7 +38,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             //   which would incorrectly attribute the main session's reasoning to subagents.
             let agent_id = event.agent_id.clone()
                 .or_else(|| {
-                    event_session.and_then(|sid| state.domain.transcript_agent_map.get(sid).cloned())
+                    event_session.as_ref().and_then(|sid| state.domain.transcript_agent_map.get(sid).cloned())
                 })
                 .or_else(|| {
                     if is_assistant_text {
@@ -50,7 +50,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         .iter()
                         .filter(|(_, a)| {
                             a.finished_at.is_none()
-                                && a.session_id.as_deref() == event_session
+                                && a.session_id == *event_session
                         })
                         .collect();
 
@@ -160,7 +160,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 }
                 HookEventKind::SessionStart => {
                     let session_id = event.session_id.clone()
-                        .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")));
+                        .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")).into());
 
                     let project_path = event.raw.get("cwd")
                         .and_then(|v| v.as_str())
@@ -182,7 +182,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 }
                 HookEventKind::SessionEnd => {
                     let session_id = event.session_id.clone()
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| SessionId::new(""));
                     if let Some(mut meta) = state.domain.active_sessions.remove(&session_id) {
                         meta.status = SessionStatus::Completed;
                         // agent_count, event_count, task_count already tracked incrementally
@@ -248,7 +248,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         AppEvent::Tick(now) => {
             // Expire stale sessions (no event received in 5 minutes)
             let cutoff = now - chrono::Duration::minutes(5);
-            let stale_ids: Vec<String> = state
+            let stale_ids: Vec<SessionId> = state
                 .domain
                 .active_sessions
                 .iter()
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn update_transcript_existing_agent() {
         let mut state = AppState::new();
-        let agent = Agent::new("a01".into(), Utc::now());
+        let agent = Agent::new("a01", Utc::now());
         state.domain.agents.insert("a01".into(), agent);
 
         let messages = vec![AgentMessage::reasoning(
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn agent_stopped_marks_finished() {
         let mut state = AppState::new();
-        let agent = Agent::new("a01".into(), Utc::now());
+        let agent = Agent::new("a01", Utc::now());
         state.domain.agents.insert("a01".into(), agent);
 
         update(&mut state, AppEvent::AgentStopped("a01".into()));
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn session_loaded_populates_data() {
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let graph = TaskGraph {
             waves: vec![],
             total_tasks: 5,
@@ -522,7 +522,7 @@ mod tests {
         };
 
         let mut agents = BTreeMap::new();
-        agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
 
         let events = vec![HookEvent::new(Utc::now(), HookEventKind::SessionStart)];
 
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn session_loaded_clears_loading_and_navigates() {
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         state.domain.sessions.push(crate::model::ArchivedSession::new(
             meta.clone(),
             std::path::PathBuf::new(),
@@ -568,8 +568,8 @@ mod tests {
     fn session_list_refreshed() {
         let mut state = AppState::new();
         let sessions = vec![
-            SessionArchive::new(SessionMeta::new("s1".into(), Utc::now(), "/proj1".into())),
-            SessionArchive::new(SessionMeta::new("s2".into(), Utc::now(), "/proj2".into())),
+            SessionArchive::new(SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
+            SessionArchive::new(SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
         ];
 
         update(&mut state, AppEvent::SessionListRefreshed(sessions));
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn session_start_does_not_clear_live_state() {
         let mut state = AppState::new();
-        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
         state.domain.events.push_back(HookEvent::new(
             Utc::now(),
             HookEventKind::Notification { message: "existing".into() },

@@ -2,11 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use super::ids::{AgentId, SessionId, TaskId, ToolName};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Agent {
-    pub id: String,
+    pub id: AgentId,
     #[serde(default)]
-    pub task_id: Option<String>,
+    pub task_id: Option<TaskId>,
     #[serde(default)]
     pub agent_type: Option<String>,
     /// The prompt/task description the agent was spawned with
@@ -18,13 +20,13 @@ pub struct Agent {
     #[serde(default)]
     pub messages: Vec<AgentMessage>,
     #[serde(default)]
-    pub session_id: Option<String>,
+    pub session_id: Option<SessionId>,
 }
 
 impl Default for Agent {
     fn default() -> Self {
         Self {
-            id: String::new(),
+            id: AgentId::new(""),
             task_id: None,
             agent_type: None,
             task_description: None,
@@ -37,9 +39,9 @@ impl Default for Agent {
 }
 
 impl Agent {
-    pub fn new(id: String, started_at: DateTime<Utc>) -> Self {
+    pub fn new(id: impl Into<AgentId>, started_at: DateTime<Utc>) -> Self {
         Self {
-            id,
+            id: id.into(),
             task_id: None,
             agent_type: None,
             task_description: None,
@@ -50,8 +52,8 @@ impl Agent {
         }
     }
 
-    pub fn with_task(mut self, task_id: String) -> Self {
-        self.task_id = Some(task_id);
+    pub fn with_task(mut self, task_id: impl Into<TaskId>) -> Self {
+        self.task_id = Some(task_id.into());
         self
     }
 
@@ -72,7 +74,7 @@ impl Agent {
 
     /// Display name: agent_type if available, otherwise short ID
     pub fn display_name(&self) -> &str {
-        self.agent_type.as_deref().unwrap_or(&self.id)
+        self.agent_type.as_deref().unwrap_or(self.id.as_str())
     }
 }
 
@@ -108,7 +110,7 @@ pub enum MessageKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
-    pub tool_name: String,
+    pub tool_name: ToolName,
     pub input_summary: String,
     #[serde(default)]
     pub result_summary: Option<String>,
@@ -123,9 +125,9 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub fn new(tool_name: String, input_summary: String) -> Self {
+    pub fn new(tool_name: impl Into<ToolName>, input_summary: String) -> Self {
         Self {
-            tool_name,
+            tool_name: tool_name.into(),
             input_summary,
             result_summary: None,
             duration: None,
@@ -189,7 +191,7 @@ mod tests {
 
     #[test]
     fn tool_call_serializes_duration_as_millis() {
-        let call = ToolCall::new("Read".into(), "file.rs".into())
+        let call = ToolCall::new("Read", "file.rs".to_string())
             .with_duration(Duration::from_millis(250));
 
         let json = serde_json::to_string(&call).unwrap();

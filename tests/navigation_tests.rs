@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use loom_tui::app::{handle_key, AppState, PanelFocus, ViewState};
-use loom_tui::model::{Agent, ArchivedSession, SessionArchive, SessionMeta, Task, TaskGraph, TaskStatus, Wave};
+use loom_tui::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionId, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
 use std::path::PathBuf;
 use chrono::Utc;
 
@@ -57,7 +57,7 @@ fn number_key_2_switches_to_agent_detail() {
 #[test]
 fn number_key_2_auto_selects_first_agent() {
     let mut state = AppState::new();
-    state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+    state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
     handle_key(&mut state, key(KeyCode::Char('2')));
     assert!(matches!(state.ui.view, ViewState::AgentDetail));
     assert_eq!(state.ui.selected_agent_index, Some(0));
@@ -205,8 +205,8 @@ fn j_key_moves_agent_selection_down() {
     let mut state = AppState::new();
     state.ui.view = ViewState::AgentDetail;
     state.ui.focus = PanelFocus::Left;
-    state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-    state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+    state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+    state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
     state.ui.selected_agent_index = Some(0);
     handle_key(&mut state, key(KeyCode::Char('j')));
     assert_eq!(state.ui.selected_agent_index, Some(1));
@@ -217,8 +217,8 @@ fn k_key_moves_agent_selection_up() {
     let mut state = AppState::new();
     state.ui.view = ViewState::AgentDetail;
     state.ui.focus = PanelFocus::Left;
-    state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-    state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+    state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+    state.domain.agents.insert(AgentId::new("a02"), Agent::new("a02", Utc::now()));
     state.ui.selected_agent_index = Some(1);
     handle_key(&mut state, key(KeyCode::Char('k')));
     assert_eq!(state.ui.selected_agent_index, Some(0));
@@ -249,8 +249,8 @@ fn j_key_scrolls_sessions_table() {
     let mut state = AppState::new();
     state.ui.view = ViewState::Sessions;
     state.domain.sessions = vec![
-        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
-        ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s1", Utc::now(), "/proj".to_string()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s2", Utc::now(), "/proj".to_string()), PathBuf::new()),
     ];
     state.ui.selected_session_index = Some(0);
     handle_key(&mut state, key(KeyCode::Char('j')));
@@ -262,8 +262,8 @@ fn k_key_scrolls_sessions_table() {
     let mut state = AppState::new();
     state.ui.view = ViewState::Sessions;
     state.domain.sessions = vec![
-        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
-        ArchivedSession::new(SessionMeta::new("s2".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s1", Utc::now(), "/proj".to_string()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s2", Utc::now(), "/proj".to_string()), PathBuf::new()),
     ];
     state.ui.selected_session_index = Some(1);
     handle_key(&mut state, key(KeyCode::Char('k')));
@@ -276,9 +276,9 @@ fn enter_on_dashboard_drills_into_agent_detail() {
     state.ui.view = ViewState::Dashboard;
 
     let task = Task {
-        id: "T1".to_string(),
+        id: TaskId::new("T1"),
         description: "Implement feature".to_string(),
-        agent_id: Some("a04".to_string()),
+        agent_id: Some(AgentId::new("a04")),
         status: TaskStatus::Running,
         review_status: Default::default(),
         files_modified: vec![],
@@ -287,7 +287,7 @@ fn enter_on_dashboard_drills_into_agent_detail() {
     let wave = Wave::new(1, vec![task]);
     state.domain.task_graph = Some(TaskGraph::new(vec![wave]));
     state.ui.selected_task_index = Some(0);
-    state.domain.agents.insert("a04".into(), Agent::new("a04".into(), Utc::now()));
+    state.domain.agents.insert(AgentId::new("a04"), Agent::new("a04", Utc::now()));
     state.recompute_sorted_keys();
 
     handle_key(&mut state, key(KeyCode::Enter));
@@ -339,7 +339,7 @@ fn enter_on_sessions_no_selection_is_noop() {
 fn enter_on_sessions_with_loaded_data_opens_detail() {
     let mut state = AppState::new();
     state.ui.view = ViewState::Sessions;
-    let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     state.domain.sessions = vec![
         ArchivedSession::new(meta.clone(), PathBuf::new())
             .with_data(SessionArchive::new(meta)),
@@ -354,7 +354,7 @@ fn enter_on_sessions_unloaded_sets_loading() {
     let mut state = AppState::new();
     state.ui.view = ViewState::Sessions;
     state.domain.sessions = vec![
-        ArchivedSession::new(SessionMeta::new("s1".into(), Utc::now(), "/proj".into()), PathBuf::new()),
+        ArchivedSession::new(SessionMeta::new("s1", Utc::now(), "/proj".to_string()), PathBuf::new()),
     ];
     state.ui.selected_session_index = Some(0);
     handle_key(&mut state, key(KeyCode::Enter));
@@ -507,37 +507,37 @@ fn multiple_waves_drill_down_correct_task() {
     // sorted_agent_keys order (active, started_at desc): [a03, a02, a01]
     state.domain.agents.insert(
         "a01".into(),
-        Agent::new("a01".into(), now - chrono::Duration::seconds(20)),
+        Agent::new("a01", now - chrono::Duration::seconds(20)),
     );
     state.domain.agents.insert(
         "a02".into(),
-        Agent::new("a02".into(), now - chrono::Duration::seconds(10)),
+        Agent::new("a02", now - chrono::Duration::seconds(10)),
     );
-    state.domain.agents.insert("a03".into(), Agent::new("a03".into(), now));
+    state.domain.agents.insert(AgentId::new("a03"), Agent::new("a03", now));
     state.recompute_sorted_keys();
 
     let task1 = Task {
-        id: "T1".to_string(),
+        id: TaskId::new("T1"),
         description: "Task 1".to_string(),
-        agent_id: Some("a01".to_string()),
+        agent_id: Some(AgentId::new("a01")),
         status: TaskStatus::Running,
         review_status: Default::default(),
         files_modified: vec![],
         tests_passed: None,
     };
     let task2 = Task {
-        id: "T2".to_string(),
+        id: TaskId::new("T2"),
         description: "Task 2".to_string(),
-        agent_id: Some("a02".to_string()),
+        agent_id: Some(AgentId::new("a02")),
         status: TaskStatus::Running,
         review_status: Default::default(),
         files_modified: vec![],
         tests_passed: None,
     };
     let task3 = Task {
-        id: "T3".to_string(),
+        id: TaskId::new("T3"),
         description: "Task 3".to_string(),
-        agent_id: Some("a03".to_string()),
+        agent_id: Some(AgentId::new("a03")),
         status: TaskStatus::Pending,
         review_status: Default::default(),
         files_modified: vec![],

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::KeyEvent;
 
 use crate::error::LoomError;
-use crate::model::{AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
+use crate::model::{AgentId, AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
 
 /// All events that can occur in the application.
 /// Sourced from file watchers, keyboard input, timers, and internal operations.
@@ -15,7 +15,7 @@ pub enum AppEvent {
 
     /// Agent transcript updated with new messages
     TranscriptUpdated {
-        agent_id: String,
+        agent_id: AgentId,
         messages: Vec<AgentMessage>,
     },
 
@@ -23,10 +23,10 @@ pub enum AppEvent {
     HookEventReceived(HookEvent),
 
     /// Agent started (detected from .active file)
-    AgentStarted(String),
+    AgentStarted(AgentId),
 
     /// Agent stopped (detected from .active file removal)
-    AgentStopped(String),
+    AgentStopped(AgentId),
 
     /// Keyboard input event
     Key(KeyEvent),

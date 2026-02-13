@@ -86,7 +86,7 @@ pub fn build_archive(domain: &DomainState, meta: &SessionMeta) -> SessionArchive
     // Filter events by session_id before cloning
     let session_events: Vec<_> = domain.events
         .iter()
-        .filter(|e| e.session_id.as_deref() == Some(&meta.id))
+        .filter(|e| e.session_id.as_ref() == Some(&meta.id))
         .cloned()
         .collect();
     archive = archive.with_events(session_events);
@@ -94,7 +94,7 @@ pub fn build_archive(domain: &DomainState, meta: &SessionMeta) -> SessionArchive
     // Filter agents by session_id before cloning
     let session_agents: BTreeMap<_, _> = domain.agents
         .iter()
-        .filter(|(_, agent)| agent.session_id.as_deref() == Some(&meta.id))
+        .filter(|(_, agent)| agent.session_id.as_ref() == Some(&meta.id))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     archive = archive.with_agents(session_agents);
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_round_trip() {
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let archive = SessionArchive::new(meta);
 
         let json = serialize_session(&archive).unwrap();
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_round_trip_with_data() {
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
             .with_status(SessionStatus::Completed)
             .with_duration(Duration::from_secs(300));
 
@@ -355,14 +355,14 @@ mod tests {
 
     #[test]
     fn generate_filename_uses_session_id() {
-        let meta = SessionMeta::new("s20260211-095900".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s20260211-095900", Utc::now(), "/proj".to_string());
         let filename = generate_filename(&meta);
         assert_eq!(filename, "s20260211-095900.json");
     }
 
     #[test]
     fn extract_metadata_returns_clone() {
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let archive = SessionArchive::new(meta.clone());
 
         let extracted = extract_metadata(&archive);
@@ -378,7 +378,7 @@ mod tests {
             completed_tasks: 0,
         });
 
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let archive = build_archive(&state.domain, &meta);
 
         assert!(archive.task_graph.is_some());
@@ -387,10 +387,10 @@ mod tests {
     #[test]
     fn build_archive_includes_events_and_agents() {
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
 
         // Agent with matching session_id
-        let mut agent = Agent::new("a01".into(), Utc::now());
+        let mut agent = Agent::new("a01", Utc::now());
         agent.session_id = Some(meta.id.clone());
         state.domain.agents.insert("a01".into(), agent);
 

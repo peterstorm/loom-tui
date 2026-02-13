@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, PanelFocus};
-use crate::model::{Agent, HookEvent, HookEventKind, SessionMeta, SessionStatus, TaskGraph, Theme};
+use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionMeta, SessionStatus, TaskGraph, Theme};
 
 // ============================================================================
 // Data access: unifies active session vs archived session
@@ -27,8 +27,8 @@ pub struct SessionViewData<'a> {
 
 /// Either a borrowed reference or an owned filtered subset of agents.
 pub enum AgentsRef<'a> {
-    Borrowed(&'a BTreeMap<String, Agent>),
-    Filtered(BTreeMap<String, &'a Agent>),
+    Borrowed(&'a BTreeMap<AgentId, Agent>),
+    Filtered(BTreeMap<AgentId, &'a Agent>),
 }
 
 impl<'a> AgentsRef<'a> {
@@ -50,14 +50,14 @@ impl<'a> AgentsRef<'a> {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&Agent> {
+    pub fn get(&self, key: &AgentId) -> Option<&Agent> {
         match self {
             AgentsRef::Borrowed(m) => m.get(key),
             AgentsRef::Filtered(m) => m.get(key).copied(),
         }
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
+    pub fn contains_key(&self, key: &AgentId) -> bool {
         match self {
             AgentsRef::Borrowed(m) => m.contains_key(key),
             AgentsRef::Filtered(m) => m.contains_key(key),
@@ -111,12 +111,12 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
         // Active session — filter agents and events by session_id
         let meta = state.domain.active_sessions.values().nth(idx)?;
         let sid = &meta.id;
-        let filtered_agents: BTreeMap<String, &Agent> = state.domain.agents.iter()
-            .filter(|(_, a)| a.session_id.as_deref() == Some(sid))
+        let filtered_agents: BTreeMap<AgentId, &Agent> = state.domain.agents.iter()
+            .filter(|(_, a)| a.session_id.as_ref() == Some(sid))
             .map(|(k, v)| (k.clone(), v))
             .collect();
         let filtered_events: Vec<HookEvent> = state.domain.events.iter()
-            .filter(|e| e.session_id.as_deref() == Some(sid))
+            .filter(|e| e.session_id.as_ref() == Some(sid))
             .cloned()
             .collect();
         Some(SessionViewData {
@@ -172,7 +172,7 @@ pub fn compute_tool_stats(events: &EventsRef<'_>) -> Vec<ToolStat> {
             ..
         } = event.kind
         {
-            let entry = counts.entry(tool_name.clone()).or_insert((0, Vec::new()));
+            let entry = counts.entry(tool_name.to_string()).or_insert((0, Vec::new()));
             entry.0 += 1;
             if let Some(ms) = duration_ms {
                 entry.1.push(ms);
@@ -218,7 +218,7 @@ pub fn compute_agent_summary(agents: &AgentsRef<'_>) -> Vec<AgentSummary> {
             });
 
             AgentSummary {
-                id: agent.id.clone(),
+                id: agent.id.to_string(),
                 agent_type: agent.display_name().to_string(),
                 finished: agent.finished_at.is_some(),
                 duration_secs,
@@ -306,7 +306,7 @@ fn render_session_header(frame: &mut Frame, area: Rect, data: &SessionViewData<'
 
     let line = Line::from(vec![
         Span::raw("Session: "),
-        Span::styled(&meta.id, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(meta.id.as_str(), Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" | "),
         Span::styled(status_str, Style::default().fg(status_color)),
         Span::raw(" | "),
@@ -573,7 +573,7 @@ fn render_events_list(
             data.agents
                 .get(aid)
                 .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| short_id(aid))
+                .unwrap_or_else(|| short_id(aid.as_str()))
         });
 
         let mut spans = vec![
@@ -708,11 +708,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        state.domain.active_sessions.insert("s1".into(), meta);
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
         state.ui.selected_session_index = Some(0);
         state.ui.view = crate::app::state::ViewState::SessionDetail;
-        let mut a = Agent::new("a01".into(), Utc::now());
+        let mut a = Agent::new("a01", Utc::now());
         a.session_id = Some("s1".into());
         state.domain.agents.insert("a01".into(), a);
 
@@ -727,12 +727,12 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
             .with_status(SessionStatus::Completed)
             .with_duration(Duration::from_secs(300));
 
         let mut agents = BTreeMap::new();
-        agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
 
         let events = vec![
             HookEvent::new(Utc::now(), HookEventKind::SessionStart),
@@ -760,7 +760,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()).with_data(SessionArchive::new(meta)));
         state.ui.selected_session_index = Some(0);
         state.ui.focus = PanelFocus::Right;
@@ -814,7 +814,7 @@ mod tests {
             .with_agent_type("Explore".into())
             .add_message(crate::model::AgentMessage::tool(
                 now,
-                crate::model::ToolCall::new("Read".into(), "file.rs".into()),
+                crate::model::ToolCall::new("Read", "file.rs".to_string()),
             ))
             .add_message(crate::model::AgentMessage::reasoning(now, "thinking".into()))
             .finish(now + chrono::Duration::seconds(10));
@@ -839,32 +839,32 @@ mod tests {
     #[test]
     fn get_selected_session_data_active_session() {
         let mut state = AppState::new();
-        state.domain.active_sessions.insert("s1".into(), SessionMeta::new("s1".into(), Utc::now(), "/proj".into()));
+        state.domain.active_sessions.insert(SessionId::new("s1"), SessionMeta::new("s1", Utc::now(), "/proj".to_string()));
         state.ui.selected_session_index = Some(0);
-        let mut a = Agent::new("a01".into(), Utc::now());
+        let mut a = Agent::new("a01", Utc::now());
         a.session_id = Some("s1".into());
         state.domain.agents.insert("a01".into(), a);
 
         let data = get_selected_session_data(&state).unwrap();
-        assert_eq!(data.meta.id, "s1");
+        assert_eq!(data.meta.id.as_str(), "s1");
         assert_eq!(data.agents.len(), 1);
     }
 
     #[test]
     fn get_selected_session_data_archived_session() {
         let mut state = AppState::new();
-        state.domain.active_sessions.insert("active".into(), SessionMeta::new("active".into(), Utc::now(), "/proj".into()));
+        state.domain.active_sessions.insert(SessionId::new("active"), SessionMeta::new("active", Utc::now(), "/proj".to_string()));
 
         let mut archived_agents = BTreeMap::new();
-        archived_agents.insert("a99".into(), Agent::new("a99".into(), Utc::now()));
-        let meta = SessionMeta::new("archived".into(), Utc::now(), "/proj".into());
+        archived_agents.insert(AgentId::new("a99"), Agent::new("a99", Utc::now()));
+        let meta = SessionMeta::new("archived", Utc::now(), "/proj".to_string());
         let archive = SessionArchive::new(meta.clone()).with_agents(archived_agents);
         state.domain.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
 
         state.ui.selected_session_index = Some(1); // idx 0=active, idx 1=archived
 
         let data = get_selected_session_data(&state).unwrap();
-        assert_eq!(data.meta.id, "archived");
+        assert_eq!(data.meta.id.as_str(), "archived");
         assert_eq!(data.agents.len(), 1);
         assert!(data.agents.contains_key("a99"));
     }
@@ -872,12 +872,12 @@ mod tests {
     #[test]
     fn get_selected_session_data_no_active_archived_at_zero() {
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
         let archive = SessionArchive::new(meta.clone());
         state.domain.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
         state.ui.selected_session_index = Some(0);
 
         let data = get_selected_session_data(&state).unwrap();
-        assert_eq!(data.meta.id, "s1");
+        assert_eq!(data.meta.id.as_str(), "s1");
     }
 }

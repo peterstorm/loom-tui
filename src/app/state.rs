@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use crate::model::{Agent, ArchivedSession, HookEvent, SessionMeta, TaskGraph};
+use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, SessionId, SessionMeta, TaskGraph};
 
 /// UI state: view mode, focus, scrolling, selections, display flags
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ pub struct UiState {
 #[derive(Debug, Clone)]
 pub struct DomainState {
     /// Active agents keyed by agent ID
-    pub agents: BTreeMap<String, Agent>,
+    pub agents: BTreeMap<AgentId, Agent>,
 
     /// Ring buffer of hook events (max 10,000 per NFR-005)
     pub events: VecDeque<HookEvent>,
@@ -50,7 +50,7 @@ pub struct DomainState {
     pub sessions: Vec<ArchivedSession>,
 
     /// Currently active sessions keyed by session ID (supports concurrent sessions)
-    pub active_sessions: BTreeMap<String, SessionMeta>,
+    pub active_sessions: BTreeMap<SessionId, SessionMeta>,
 
     /// Current task graph (None if not yet loaded)
     pub task_graph: Option<TaskGraph>,
@@ -58,7 +58,7 @@ pub struct DomainState {
     /// Maps transcript session_id → agent_id for subagent transcript attribution.
     /// Subagent transcripts have their own session_id (different from the parent
     /// session_id stored on Agent). This map links them.
-    pub transcript_agent_map: BTreeMap<String, String>,
+    pub transcript_agent_map: BTreeMap<SessionId, AgentId>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
@@ -84,7 +84,7 @@ pub struct AppMeta {
 #[derive(Debug, Clone)]
 struct CacheState {
     /// Cached sorted agent keys (recomputed when dirty)
-    sorted_keys: Vec<String>,
+    sorted_keys: Vec<AgentId>,
 
     /// Whether agent keys need re-sorting
     dirty: bool,
@@ -263,7 +263,7 @@ impl AppState {
 
     /// Agent keys sorted: active first (by started_at desc), then finished (by started_at desc).
     /// Returns cached result — call `recompute_sorted_keys()` after modifying agents.
-    pub fn sorted_agent_keys(&self) -> &[String] {
+    pub fn sorted_agent_keys(&self) -> &[AgentId] {
         &self.cache.sorted_keys
     }
 

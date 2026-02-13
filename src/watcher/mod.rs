@@ -329,7 +329,7 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     match std::fs::read_to_string(path) {
         Ok(content) => match parsers::parse_transcript(&content) {
             Ok(messages) => {
-                let _ = tx.send(AppEvent::TranscriptUpdated { agent_id, messages });
+                let _ = tx.send(AppEvent::TranscriptUpdated { agent_id: agent_id.into(), messages });
             }
             Err(e) => {
                 let _ = tx.send(AppEvent::Error {
@@ -359,7 +359,7 @@ fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::mode
     let cwd = event.raw.get("cwd")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let session_id = event.session_id.as_deref().unwrap_or("");
+    let session_id = event.session_id.as_ref().map(|s| s.as_str()).unwrap_or("");
 
     // Derive transcript path (I/O happens here, in the shell)
     if let Some(transcript_path) = derive_transcript_path(cwd, session_id) {

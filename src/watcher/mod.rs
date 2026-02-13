@@ -169,7 +169,7 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
             }
 
             // Tail known files for new content
-            for (path, _) in &known_files {
+            for path in known_files.keys() {
                 if !path.exists() {
                     continue;
                 }
@@ -186,7 +186,9 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                 let events =
                     parsers::parse_claude_transcript_incremental(&new_content, session_id);
                 for event in events {
-                    let _ = tx.send(AppEvent::HookEventReceived(event));
+                    if tx.send(AppEvent::HookEventReceived(event)).is_err() {
+                        return;
+                    }
                 }
 
                 // Also parse agent_progress entries (parent transcripts contain
@@ -194,7 +196,9 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                 let progress_events =
                     parsers::parse_agent_progress_tool_calls(&new_content, session_id);
                 for event in progress_events {
-                    let _ = tx.send(AppEvent::HookEventReceived(event));
+                    if tx.send(AppEvent::HookEventReceived(event)).is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -407,7 +411,9 @@ fn handle_events_incremental(
                 } else {
                     event
                 };
-                let _ = tx.send(AppEvent::HookEventReceived(enriched_event));
+                if tx.send(AppEvent::HookEventReceived(enriched_event)).is_err() {
+                    return;
+                }
             }
         }
         Err(e) => {

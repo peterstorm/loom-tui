@@ -55,10 +55,9 @@ pub struct DomainState {
     /// Current task graph (None if not yet loaded)
     pub task_graph: Option<TaskGraph>,
 
-    /// Maps transcript session_id → agent_id for subagent transcript attribution.
-    /// Subagent transcripts have their own session_id (different from the parent
-    /// session_id stored on Agent). This map links them.
-    pub transcript_agent_map: BTreeMap<SessionId, AgentId>,
+    /// Maps session_id → agent_ids for subagent event attribution.
+    /// Multiple agents can share the same parent session_id when spawned in bulk.
+    pub transcript_agent_map: BTreeMap<SessionId, Vec<AgentId>>,
 }
 
 /// Application metadata: lifecycle, errors, configuration

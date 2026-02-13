@@ -36,15 +36,38 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             // - AssistantText: ONLY use transcript_agent_map. Don't use session_id matching
             //   because the main transcript shares the parent session_id with subagents,
             //   which would incorrectly attribute the main session's reasoning to subagents.
+            // Attribution: resolve agent_id + track confidence.
+            // Confident = explicit agent_id or single-candidate match.
+            // Not confident = multiple active agents in session (ambiguous).
+            let mut attribution_confident = false;
             let agent_id = event.agent_id.clone()
+                .map(|id| { attribution_confident = true; id })
                 .or_else(|| {
-                    event_session.as_ref().and_then(|sid| state.domain.transcript_agent_map.get(sid).cloned())
+                    event_session.as_ref().and_then(|sid| {
+                        let candidates = state.domain.transcript_agent_map.get(sid)?;
+                        if candidates.len() == 1 {
+                            attribution_confident = true;
+                            return Some(candidates[0].clone());
+                        }
+                        // Multiple agents — best guess for agent messages, not confident
+                        candidates.iter()
+                            .filter_map(|aid| state.domain.agents.get(aid).map(|a| (aid, a)))
+                            .filter(|(_, a)| a.finished_at.is_none())
+                            .max_by_key(|(_, a)| a.started_at)
+                            .map(|(aid, _)| aid.clone())
+                            .or_else(|| {
+                                candidates.iter()
+                                    .filter_map(|aid| state.domain.agents.get(aid).map(|a| (aid, a)))
+                                    .max_by_key(|(_, a)| a.started_at)
+                                    .map(|(aid, _)| aid.clone())
+                            })
+                    })
                 })
                 .or_else(|| {
                     if is_assistant_text {
-                        return None; // skip session_id matching for transcript text
+                        return None;
                     }
-                    let matches: Vec<_> = state
+                    let mut matches: Vec<_> = state
                         .domain
                         .agents
                         .iter()
@@ -54,8 +77,11 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         })
                         .collect();
 
-                    // Only attribute if exactly ONE agent matches (avoids wrong-agent attribution)
                     if matches.len() == 1 {
+                        attribution_confident = true;
+                        Some(matches[0].0.clone())
+                    } else if matches.len() > 1 {
+                        matches.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
                         Some(matches[0].0.clone())
                     } else {
                         None
@@ -81,7 +107,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 // Clear finished state on restart
                                 a.finished_at = None;
                                 a.started_at = event.timestamp;
-                                if a.agent_type.is_none() {
+                                if resolved_type.is_some() {
                                     a.agent_type = resolved_type.clone();
                                 }
                                 // Update task_description on restart (may have changed)
@@ -98,10 +124,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                             });
                         agents_changed = true;
 
-                        // Populate transcript_agent_map for subagent transcript attribution
-                        // The agent's session_id (from hook event) is its TRANSCRIPT session_id
+                        // Populate transcript_agent_map for subagent event attribution.
+                        // Multiple agents may share the same session_id (bulk spawns).
                         if let Some(ref sid) = event.session_id {
-                            state.domain.transcript_agent_map.insert(sid.clone(), id.clone());
+                            let agents = state.domain.transcript_agent_map
+                                .entry(sid.clone())
+                                .or_default();
+                            if !agents.contains(id) {
+                                agents.push(id.clone());
+                            }
                         }
 
                         // Increment per-session agent count
@@ -183,6 +214,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 HookEventKind::SessionEnd => {
                     let session_id = event.session_id.clone()
                         .unwrap_or_else(|| SessionId::new(""));
+
+                    // Mark all active agents in this session as finished
+                    for agent in state.domain.agents.values_mut() {
+                        if agent.finished_at.is_none() && agent.session_id.as_ref() == Some(&session_id) {
+                            agent.finished_at = Some(event.timestamp);
+                            agents_changed = true;
+                        }
+                    }
+
                     if let Some(mut meta) = state.domain.active_sessions.remove(&session_id) {
                         meta.status = SessionStatus::Completed;
                         // agent_count, event_count, task_count already tracked incrementally
@@ -196,12 +236,34 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         state.domain.sessions.insert(0, archived);
                     }
                 }
+                HookEventKind::Stop { .. } => {
+                    // Stop events fire when a session/agent stops. Mark attributed agent
+                    // as finished, and also mark all active agents in the session.
+                    if let Some(ref id) = agent_id {
+                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
+                            if agent.finished_at.is_none() {
+                                agent.finished_at = Some(event.timestamp);
+                                agents_changed = true;
+                            }
+                        });
+                    }
+                    if let Some(ref sid) = event.session_id {
+                        for agent in state.domain.agents.values_mut() {
+                            if agent.finished_at.is_none() && agent.session_id.as_ref() == Some(sid) {
+                                agent.finished_at = Some(event.timestamp);
+                                agents_changed = true;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
 
-            // Enrich event with attributed agent_id before storing
+            // Only stamp agent_id on stored event when attribution is unambiguous.
+            // With concurrent agents sharing a session, tool events lack agent_id;
+            // stamping a guess causes them to show under the wrong agent.
             let mut enriched = event;
-            if enriched.agent_id.is_none() {
+            if enriched.agent_id.is_none() && attribution_confident {
                 enriched.agent_id = agent_id;
             }
 
@@ -732,10 +794,10 @@ mod tests {
     }
 
     #[test]
-    fn hook_tool_use_unattributed_with_multiple_agents() {
+    fn hook_tool_use_attributed_to_most_recent_with_multiple_agents() {
         // When multiple agents share a session and tool event has no agent_id,
-        // we don't attribute (avoids wrong-agent attribution). Transcript-sourced
-        // events with explicit agent_id will fill the gap.
+        // attribute to the most recently started agent (best-effort).
+        // Transcript-sourced events with explicit agent_id correct attribution.
         let mut state = AppState::new();
         let t1 = Utc::now();
         let t2 = t1 + chrono::Duration::seconds(1);
@@ -752,9 +814,9 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(s2));
         update(&mut state, AppEvent::HookEventReceived(tool));
 
-        // Neither agent gets the tool event (ambiguous attribution)
+        // Most recently started agent (a02) gets the tool event
         assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 0);
-        assert_eq!(state.domain.agents.get(&AgentId::new("a02")).unwrap().messages.len(), 0);
+        assert_eq!(state.domain.agents.get(&AgentId::new("a02")).unwrap().messages.len(), 1);
     }
 
     #[test]
@@ -1060,5 +1122,165 @@ mod tests {
         assert_eq!(state.domain.sessions.len(), 2);
         assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s_stale");
         assert_eq!(state.domain.sessions[1].meta.id.as_str(), "s_old");
+    }
+
+    // ============================================================================
+    // Session End Marks Agents Finished
+    // ============================================================================
+
+    #[test]
+    fn session_end_marks_active_agents_finished() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a02").with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(s));
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+
+        // Both agents active
+        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_none());
+        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_none());
+
+        let end = HookEvent::new(ts, HookEventKind::SessionEnd).with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(end));
+
+        // Both agents marked finished
+        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
+        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_some());
+    }
+
+    #[test]
+    fn session_end_does_not_affect_other_session_agents() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let s1 = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
+        let s2 = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s2");
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a02").with_session("s2");
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+
+        // End only s1
+        let end = HookEvent::new(ts, HookEventKind::SessionEnd).with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(end));
+
+        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
+        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_none());
+    }
+
+    #[test]
+    fn session_end_skips_already_finished_agents() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let later = ts + chrono::Duration::seconds(5);
+        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
+        let a = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let stop = HookEvent::new(ts, HookEventKind::subagent_stop()).with_agent("a01");
+        update(&mut state, AppEvent::HookEventReceived(s));
+        update(&mut state, AppEvent::HookEventReceived(a));
+        update(&mut state, AppEvent::HookEventReceived(stop));
+
+        let original_finish = state.domain.agents[&AgentId::new("a01")].finished_at;
+
+        // SessionEnd should not overwrite earlier finish time
+        let end = HookEvent::new(later, HookEventKind::SessionEnd).with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(end));
+
+        assert_eq!(state.domain.agents[&AgentId::new("a01")].finished_at, original_finish);
+    }
+
+    // ============================================================================
+    // Stop Event Marks Agents Finished
+    // ============================================================================
+
+    #[test]
+    fn stop_event_marks_session_agents_finished() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a02").with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(s));
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+
+        let stop = HookEvent::new(ts, HookEventKind::stop(Some("done".to_string())))
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(stop));
+
+        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
+        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_some());
+    }
+
+    // ============================================================================
+    // Multi-Agent Attribution
+    // ============================================================================
+
+    #[test]
+    fn transcript_agent_map_stores_all_agents() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a02").with_session("s1");
+
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+
+        let agents = state.domain.transcript_agent_map.get(&SessionId::new("s1")).unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.contains(&AgentId::new("a01")));
+        assert!(agents.contains(&AgentId::new("a02")));
+    }
+
+    #[test]
+    fn tool_events_not_enriched_when_multiple_agents_active() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        // Two agents on same session
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a02").with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(a1));
+        update(&mut state, AppEvent::HookEventReceived(a2));
+
+        // Tool event without agent_id (like real Claude Code tool events)
+        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".to_string()))
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(tool));
+
+        // Event should remain unattributed (agent_id = None)
+        let last = state.domain.events.back().unwrap();
+        assert!(last.agent_id.is_none(), "ambiguous tool events should not be force-attributed");
+    }
+
+    #[test]
+    fn tool_events_enriched_when_single_agent_active() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        // Single agent on session
+        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01").with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(a1));
+
+        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".to_string()))
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(tool));
+
+        let last = state.domain.events.back().unwrap();
+        assert_eq!(last.agent_id, Some(AgentId::new("a01")));
     }
 }

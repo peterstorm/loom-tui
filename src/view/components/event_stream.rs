@@ -78,12 +78,26 @@ pub fn render_agent_event_stream(
 
 /// Pure function: build lines from events, optionally filtered by agent_id.
 fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
+    // When filtering by agent, also include unattributed events from the same session.
+    // Claude Code doesn't include agent_id in tool events for subagents, so concurrent
+    // agents produce unattributed events that belong to any active agent in the session.
+    let agent_session = agent_filter.and_then(|aid| {
+        state.domain.agents.get(&crate::model::AgentId::new(aid))
+            .and_then(|a| a.session_id.clone())
+    });
+
     let filtered: Vec<_> = state
         .domain.events
         .iter()
         .rev()
         .filter(|e| match agent_filter {
-            Some(aid) => e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid),
+            Some(aid) => {
+                let direct = e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid);
+                let shared = e.agent_id.is_none()
+                    && agent_session.is_some()
+                    && e.session_id == agent_session;
+                direct || shared
+            }
             None => true,
         })
         .take(500)
@@ -110,7 +124,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         first = false;
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, detail, event_color, _tool_name) = format_event_lines(&event.kind);
+        let (icon, header, detail, event_color, tool_name) = format_event_lines(&event.kind);
 
         // Resolve agent display name
         let agent_label = event.agent_id.as_ref().map(|aid| {
@@ -145,7 +159,21 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         if let Some(detail_text) = detail {
             let clean = clean_detail(&detail_text);
             if !clean.is_empty() {
-                lines.extend(markdown_to_lines(&clean));
+                let ext_hint = tool_name
+                    .as_ref()
+                    .filter(|t| {
+                        matches!(
+                            t.as_str(),
+                            "Read" | "Edit" | "Write" | "Grep" | "Glob"
+                        )
+                    })
+                    .and_then(|_| {
+                        clean
+                            .lines()
+                            .next()
+                            .and_then(super::syntax::detect_extension)
+                    });
+                lines.extend(markdown_to_lines(&clean, ext_hint.as_deref()));
             }
         }
     }
@@ -172,82 +200,124 @@ pub fn clean_detail(s: &str) -> String {
         .to_string()
 }
 
-/// Convert markdown-ish text to styled ratatui Lines.
-/// Handles: code blocks, inline code, bold, headers, diff lines, plain text.
-fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    let mut in_code_block = false;
+/// Public entry point for rendering detail text with markdown + syntax highlighting.
+/// Used by both the dashboard event stream and session detail view.
+pub fn render_detail_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
+    markdown_to_lines(text, ext_hint)
+}
 
-    for line in text.split('\n') {
+/// Convert markdown-ish text to styled ratatui Lines.
+/// Handles: code blocks (syntax highlighted), inline code, bold, headers, diff lines, plain text.
+/// When `ext_hint` is provided, diff lines and untagged code blocks get syntax highlighting.
+fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
+    let raw_lines: Vec<&str> = text.split('\n').collect();
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < raw_lines.len() {
+        let line = raw_lines[i];
+
         // Code block fences
         if line.trim_start().starts_with("```") {
-            in_code_block = !in_code_block;
+            let fence_rest = line.trim_start().trim_start_matches('`');
+            let lang = if fence_rest.is_empty() {
+                None
+            } else {
+                Some(fence_rest.to_string())
+            };
+
+            let mut code_lines = Vec::new();
+            i += 1;
+            while i < raw_lines.len() && !raw_lines[i].trim_start().starts_with("```") {
+                code_lines.push(raw_lines[i]);
+                i += 1;
+            }
+            if i < raw_lines.len() {
+                i += 1; // skip closing fence
+            }
+
+            let ext = lang
+                .as_deref()
+                .map(super::syntax::lang_to_extension)
+                .or_else(|| ext_hint.map(|e| e.to_string()))
+                .unwrap_or_else(|| "txt".to_string());
+            result.extend(super::syntax::highlight_code_block(&code_lines, &ext));
             continue;
         }
 
-        if in_code_block {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", line),
-                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::DIM),
-            )));
-            continue;
-        }
+        // Consecutive diff lines
+        if line.starts_with("+ ") || line.starts_with("- ") {
+            let mut diff_lines = Vec::new();
+            while i < raw_lines.len()
+                && (raw_lines[i].starts_with("+ ") || raw_lines[i].starts_with("- "))
+            {
+                diff_lines.push(raw_lines[i]);
+                i += 1;
+            }
 
-        // Diff lines
-        if line.starts_with("- ") {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(Theme::ERROR),
-            )));
-            continue;
-        }
-        if line.starts_with("+ ") {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(Theme::SUCCESS),
-            )));
+            if let Some(ext) = ext_hint {
+                result.extend(super::syntax::highlight_diff_block(&diff_lines, ext));
+            } else {
+                // Fallback: flat coloring (no extension context)
+                for dl in diff_lines {
+                    let color = if dl.starts_with("+ ") {
+                        Theme::SUCCESS
+                    } else {
+                        Theme::ERROR
+                    };
+                    result.push(Line::from(Span::styled(
+                        dl.to_string(),
+                        Style::default().fg(color),
+                    )));
+                }
+            }
             continue;
         }
 
         // Headers
         if let Some(stripped) = line.strip_prefix("### ") {
-            lines.push(Line::from(Span::styled(
+            result.push(Line::from(Span::styled(
                 stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
+            i += 1;
             continue;
         }
         if let Some(stripped) = line.strip_prefix("## ") {
-            lines.push(Line::from(Span::styled(
+            result.push(Line::from(Span::styled(
                 stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
+            i += 1;
             continue;
         }
         if let Some(stripped) = line.strip_prefix("# ") {
-            lines.push(Line::from(Span::styled(
+            result.push(Line::from(Span::styled(
                 stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
+            i += 1;
             continue;
         }
 
         // List items — render bullet, parse inline markdown for rest
-        if line.starts_with("- ") || line.starts_with("* ") {
+        if line.starts_with("* ") {
             let mut spans = vec![Span::styled(
                 "• ".to_string(),
                 Style::default().fg(Theme::MUTED_TEXT),
             )];
             spans.extend(parse_inline_markdown(&line[2..]));
-            lines.push(Line::from(spans));
+            result.push(Line::from(spans));
+            i += 1;
             continue;
         }
 
         // Regular line — parse inline markdown
-        lines.push(Line::from(parse_inline_markdown(line)));
+        result.push(Line::from(parse_inline_markdown(line)));
+        i += 1;
     }
 
-    lines
+    result
 }
 
 /// Parse inline markdown: **bold**, `code`, plain text.
@@ -391,8 +461,8 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
         }
         HookEventKind::UserPromptSubmit => ("→", "User prompt".into(), None, Theme::INFO, None),
         HookEventKind::AssistantText { content } => {
-            let truncated = if content.len() > 500 {
-                format!("{}...", &content[..500])
+            let truncated = if content.len() > 4000 {
+                format!("{}...", &content[..4000])
             } else {
                 content.clone()
             };
@@ -497,7 +567,7 @@ mod tests {
     #[test]
     fn markdown_renders_code_blocks() {
         let md = "before\n```rust\nfn main() {}\n```\nafter";
-        let lines = markdown_to_lines(md);
+        let lines = markdown_to_lines(md, None);
         // before, indented code line, after = 3 lines (fences stripped)
         assert_eq!(lines.len(), 3);
         let code_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
@@ -506,7 +576,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_inline_code() {
-        let lines = markdown_to_lines("use `foo` here");
+        let lines = markdown_to_lines("use `foo` here", None);
         let spans = &lines[0].spans;
         assert!(spans.len() >= 3); // "use " + "foo" + " here"
         assert_eq!(spans[1].content.as_ref(), "foo");
@@ -515,7 +585,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_bold() {
-        let lines = markdown_to_lines("this is **bold** text");
+        let lines = markdown_to_lines("this is **bold** text", None);
         let spans = &lines[0].spans;
         let bold_span = spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
         assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
@@ -523,7 +593,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_headers() {
-        let lines = markdown_to_lines("# Title\n## Sub\ntext");
+        let lines = markdown_to_lines("# Title\n## Sub\ntext", None);
         assert_eq!(lines.len(), 3);
         let title_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(title_text, "Title");
@@ -532,14 +602,14 @@ mod tests {
 
     #[test]
     fn markdown_renders_diff_lines() {
-        let lines = markdown_to_lines("- removed\n+ added");
+        let lines = markdown_to_lines("- removed\n+ added", None);
         assert_eq!(lines[0].spans[0].style.fg, Some(Theme::ERROR));
         assert_eq!(lines[1].spans[0].style.fg, Some(Theme::SUCCESS));
     }
 
     #[test]
     fn markdown_renders_list_items() {
-        let lines = markdown_to_lines("* item one\n* item two");
+        let lines = markdown_to_lines("* item one\n* item two", None);
         assert_eq!(lines.len(), 2);
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(first.starts_with("• "));
@@ -547,7 +617,7 @@ mod tests {
 
     #[test]
     fn markdown_plain_text_unchanged() {
-        let lines = markdown_to_lines("just plain text");
+        let lines = markdown_to_lines("just plain text", None);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "just plain text");

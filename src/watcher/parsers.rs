@@ -288,7 +288,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .get("description")
             .or_else(|| input.get("prompt"))
             .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 80 { format!("{}...", &s[..80]) } else { s.to_string() })
+            .map(|s| if s.len() > 200 { format!("{}...", &s[..200]) } else { s.to_string() })
             .unwrap_or_default(),
         _ => input
             .get("file_path")
@@ -299,8 +299,8 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .unwrap_or("")
             .to_string(),
     };
-    if summary.len() > 500 {
-        format!("{}...", &summary[..500])
+    if summary.len() > 8000 {
+        format!("{}...", &summary[..8000])
     } else {
         summary
     }
@@ -311,7 +311,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
 /// # Functional Core
 /// Pure function — takes raw content + byte offset, returns HookEvents.
 /// Only extracts `type: "text"` blocks from `type: "assistant"` entries.
-/// Skips `type: "thinking"` blocks (too verbose). Truncates to 500 chars per block.
+/// Skips `type: "thinking"` blocks (too verbose). Truncates to 4000 chars per block.
 ///
 /// # Arguments
 /// * `content` - Raw JSONL content (full file or tail segment)
@@ -364,8 +364,8 @@ pub fn parse_claude_transcript_incremental(
                 _ => continue,
             };
 
-            let truncated = if text.len() > 500 {
-                format!("{}...", &text[..500])
+            let truncated = if text.len() > 4000 {
+                format!("{}...", &text[..4000])
             } else {
                 text.to_string()
             };
@@ -671,7 +671,7 @@ invalid
 
     #[test]
     fn test_parse_claude_transcript_truncates_long_text() {
-        let long_text = "x".repeat(600);
+        let long_text = "x".repeat(5000);
         let jsonl = format!(
             r#"{{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
             long_text
@@ -681,7 +681,7 @@ invalid
         assert_eq!(events.len(), 1);
         match &events[0].kind {
             HookEventKind::AssistantText { content } => {
-                assert!(content.len() <= 503); // 500 + "..."
+                assert!(content.len() <= 4003); // 4000 + "..."
                 assert!(content.ends_with("..."));
             }
             _ => panic!("Expected AssistantText"),

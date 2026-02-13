@@ -5,6 +5,7 @@ pub mod filter_bar;
 pub mod footer;
 pub mod header;
 pub mod help_overlay;
+pub mod syntax;
 pub mod task_list;
 pub mod wave_river;
 

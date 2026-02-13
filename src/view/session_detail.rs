@@ -566,7 +566,7 @@ fn render_events_list(
         first = false;
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, detail, event_color, _tool_name) =
+        let (icon, header, detail, event_color, tool_name) =
             crate::view::components::event_stream::format_event_lines(&event.kind);
 
         let agent_label = event.agent_id.as_ref().map(|aid| {
@@ -591,31 +591,21 @@ fn render_events_list(
 
         lines.push(Line::from(spans));
 
-        // Detail line with content (input/output summaries)
+        // Detail with markdown + syntax highlighting (shared with dashboard event stream)
         if let Some(detail_text) = detail {
             let clean = crate::view::components::event_stream::clean_detail(&detail_text);
             if !clean.is_empty() {
-                let has_diff_lines = clean.contains("\n- ") || clean.contains("\n+ ");
-                if has_diff_lines {
-                    for line in clean.split('\n') {
-                        let color = if line.starts_with("- ") {
-                            Theme::ERROR
-                        } else if line.starts_with("+ ") {
-                            Theme::SUCCESS
-                        } else {
-                            Theme::MUTED_TEXT
-                        };
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(color),
-                        )));
-                    }
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        clean,
-                        Style::default().fg(Theme::MUTED_TEXT),
-                    )));
-                }
+                let ext_hint = tool_name
+                    .as_ref()
+                    .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
+                    .and_then(|_| {
+                        clean.lines().next()
+                            .and_then(crate::view::components::syntax::detect_extension)
+                    });
+                lines.extend(crate::view::components::event_stream::render_detail_lines(
+                    &clean,
+                    ext_hint.as_deref(),
+                ));
             }
         }
     }

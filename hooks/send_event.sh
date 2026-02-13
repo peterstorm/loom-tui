@@ -38,13 +38,13 @@ case "$HOOK_NAME" in
       .tool_input // {} |
       if $tn == "Edit" then
         (.file_path // "") + "\n" +
-        ((.old_string // "" | split("\n") | .[0:30] | map("- " + .) | join("\n")) // "") +
+        ((.old_string // "" | split("\n") | .[0:200] | map("- " + .) | join("\n")) // "") +
         (if ((.old_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end) + "\n" +
-        ((.new_string // "" | split("\n") | .[0:30] | map("+ " + .) | join("\n")) // "") +
+        ((.new_string // "" | split("\n") | .[0:200] | map("+ " + .) | join("\n")) // "") +
         (if ((.new_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
       elif $tn == "Write" then
         (.file_path // "") + " (new file)\n" +
-        ((.content // "" | split("\n") | .[0:30] | map("+ " + .) | join("\n")) // "") +
+        ((.content // "" | split("\n") | .[0:200] | map("+ " + .) | join("\n")) // "") +
         (if ((.content // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
       elif .file_path then .file_path
       elif .command then (.description // .command)
@@ -55,7 +55,7 @@ case "$HOOK_NAME" in
       elif .skill then .skill
       elif .subject then .subject
       else tostring
-      end' 2>/dev/null | head -c 4000)
+      end' 2>/dev/null | head -c 32000)
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
@@ -74,12 +74,12 @@ case "$HOOK_NAME" in
       elif type == "object" then
         if .filePath then "ok: " + (.filePath | split("/") | last)
         elif .stdout then (.stdout | split("\n") | map(select(. != "")) | last // "ok")
-        elif .content then (.content | if length > 100 then .[0:100] + "..." else . end)
+        elif .content then (.content | if length > 500 then .[0:500] + "..." else . end)
         elif .error then "error: " + .error
         else "ok"
         end
       else tostring
-      end' 2>/dev/null | head -c 2000)
+      end' 2>/dev/null | head -c 32000)
     DURATION=$(echo "$HOOK_JSON" | jq -r '.duration_ms // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \

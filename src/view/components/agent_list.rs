@@ -45,6 +45,15 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
     let selected = state.ui.selected_agent_index;
     let sorted_keys = state.sorted_agent_keys();
 
+    // Count display names to detect duplicates — append short ID when ambiguous
+    let name_counts: std::collections::HashMap<String, usize> = sorted_keys
+        .iter()
+        .map(|k| state.domain.agents[k].display_name().to_string())
+        .fold(std::collections::HashMap::new(), |mut acc, name| {
+            *acc.entry(name).or_insert(0) += 1;
+            acc
+        });
+
     sorted_keys
         .iter()
         .enumerate()
@@ -57,7 +66,14 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
                 ("●", Theme::MUTED_TEXT)
             };
 
-            let name = agent.display_name().to_string();
+            let base_name = agent.display_name().to_string();
+            let name = if name_counts.get(&base_name).copied().unwrap_or(0) > 1 {
+                // Disambiguate with short agent ID suffix
+                let short_id = &key.as_str()[..key.as_str().len().min(7)];
+                format!("{} ({})", base_name, short_id)
+            } else {
+                base_name
+            };
 
             let elapsed = if is_active {
                 let secs = (now - agent.started_at).num_seconds();

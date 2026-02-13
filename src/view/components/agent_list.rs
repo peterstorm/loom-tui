@@ -14,7 +14,7 @@ use crate::model::Theme;
 /// Shows all agents with selection highlight.
 pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
     let items = build_agent_items(state);
-    let is_focused = matches!(state.focus, PanelFocus::Left);
+    let is_focused = matches!(state.ui.focus, PanelFocus::Left);
 
     let list = List::new(items)
         .block(
@@ -34,7 +34,7 @@ pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Pure function: build list items from agents map.
 fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
-    if state.agents.is_empty() {
+    if state.domain.agents.is_empty() {
         return vec![ListItem::new(Line::from(Span::styled(
             "No agents",
             Style::default().fg(Theme::MUTED_TEXT),
@@ -42,14 +42,14 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
     }
 
     let now = Utc::now();
-    let selected = state.selected_agent_index;
+    let selected = state.ui.selected_agent_index;
     let sorted_keys = state.sorted_agent_keys();
 
     sorted_keys
         .iter()
         .enumerate()
         .map(|(idx, key)| {
-            let agent = &state.agents[key];
+            let agent = &state.domain.agents[key];
             let is_active = agent.finished_at.is_none();
             let (icon, icon_color) = if is_active {
                 ("◐", Theme::ACCENT_WARM)
@@ -70,7 +70,7 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
             };
 
             // Count tool events for this agent
-            let tool_count = state.events.iter()
+            let tool_count = state.domain.events.iter()
                 .filter(|e| e.agent_id.as_deref() == Some(key))
                 .filter(|e| matches!(&e.kind, crate::model::HookEventKind::PostToolUse { .. }))
                 .count();
@@ -137,10 +137,10 @@ mod tests {
         let mut state = AppState::new();
         let mut a1 = Agent::new("a01".into(), Utc::now());
         a1.agent_type = Some("Explore".into());
-        state.agents.insert("a01".into(), a1);
-        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.domain.agents.insert("a01".into(), a1);
+        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
         state.recompute_sorted_keys();
-        state.selected_agent_index = Some(0);
+        state.ui.selected_agent_index = Some(0);
 
         let items = build_agent_items(&state);
         assert_eq!(items.len(), 2);

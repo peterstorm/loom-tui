@@ -44,7 +44,7 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
     // Navigation group
     spans.extend(kb("q", ":quit"));
 
-    match &state.view {
+    match &state.ui.view {
         ViewState::Dashboard => {
             spans.push(sep());
             spans.extend(kb("1-3", ":views"));

@@ -15,12 +15,12 @@ use crate::model::{theme::Theme, SessionMeta, SessionStatus};
 pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Combine active sessions + archived sessions for display
-    let all_sessions: Vec<&SessionMeta> = state.active_sessions.values()
-        .chain(state.sessions.iter().map(|a| &a.meta))
+    let all_sessions: Vec<&SessionMeta> = state.domain.active_sessions.values()
+        .chain(state.domain.sessions.iter().map(|a| &a.meta))
         .collect();
 
     // Track which archived sessions are loading
-    let active_count = state.active_sessions.len();
+    let active_count = state.domain.active_sessions.len();
 
     // Empty state: no sessions at all
     if all_sessions.is_empty() {
@@ -29,7 +29,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     // Build table rows from session list
-    let _scroll_offset = state.scroll_offsets.sessions; // TODO: implement scrolling
+    let _scroll_offset = state.ui.scroll_offsets.sessions; // TODO: implement scrolling
     let header_row = Row::new(vec![
         "Session ID",
         "Date",
@@ -49,7 +49,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
         .iter()
         .enumerate()
         .map(|(idx, session)| {
-            let is_selected = state.selected_session_index == Some(idx);
+            let is_selected = state.ui.selected_session_index == Some(idx);
             let style = if is_selected {
                 Style::default()
                     .bg(Theme::ACTIVE_BORDER)
@@ -74,7 +74,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
             // Show loading indicator for session being loaded
             let is_loading = idx >= active_count
-                && state.loading_session == Some(idx - active_count);
+                && state.ui.loading_session == Some(idx - active_count);
 
             let status_str = if is_loading {
                 "Loading…".to_string()
@@ -233,7 +233,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.sessions = vec![
+        state.domain.sessions = vec![
             ArchivedSession::new(
                 SessionMeta::new("s1".into(), Utc::now(), "/proj/foo".into())
                     .with_status(SessionStatus::Completed)

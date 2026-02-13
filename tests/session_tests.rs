@@ -230,7 +230,7 @@ fn auto_save_tick_does_not_save_before_interval() {
 #[test]
 fn build_archive_from_app_state() {
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph {
+    state.domain.task_graph = Some(TaskGraph {
         waves: vec![],
         total_tasks: 0,
         completed_tasks: 0,
@@ -239,7 +239,7 @@ fn build_archive_from_app_state() {
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
         .with_status(SessionStatus::Active);
 
-    let archive = build_archive(&state, meta.clone());
+    let archive = build_archive(&state.domain, &meta);
 
     assert_eq!(archive.meta, meta);
     assert!(archive.task_graph.is_some());
@@ -253,7 +253,7 @@ fn full_workflow_save_list_load_delete() {
     let state = AppState::new();
     let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into())
         .with_status(SessionStatus::Completed);
-    let archive = build_archive(&state, meta.clone());
+    let archive = build_archive(&state.domain, &meta);
 
     // Generate filename and save
     let filename = generate_filename(&meta);

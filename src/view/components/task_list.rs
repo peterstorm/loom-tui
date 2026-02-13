@@ -15,7 +15,7 @@ use crate::model::{TaskStatus, Theme};
 pub fn render_task_list(frame: &mut Frame, area: Rect, state: &AppState) {
     let items = build_task_list_items(state);
 
-    let is_focused = matches!(state.focus, PanelFocus::Left);
+    let is_focused = matches!(state.ui.focus, PanelFocus::Left);
 
     let list = List::new(items)
         .block(
@@ -36,11 +36,11 @@ pub fn render_task_list(frame: &mut Frame, area: Rect, state: &AppState) {
 /// Pure function: build task list items from state.
 /// Highlights the selected task and applies filter if active.
 fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
-    match &state.task_graph {
+    match &state.domain.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
             let mut items = Vec::new();
             let mut task_index: usize = 0;
-            let filter = state.filter.as_deref().unwrap_or("");
+            let filter = state.ui.filter.as_deref().unwrap_or("");
 
             for wave in &graph.waves {
                 // Collect visible tasks for this wave (after filter)
@@ -81,7 +81,7 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                 // Tasks in wave
                 for (original_idx, task) in wave_tasks {
                     let flat_idx = task_index + original_idx;
-                    let is_selected = state.selected_task_index == Some(flat_idx);
+                    let is_selected = state.ui.selected_task_index == Some(flat_idx);
 
                     let (status_symbol, status_color) = task_status_display(&task.status);
                     let bg = if is_selected { Theme::SELECTION_BG } else { Theme::BACKGROUND };
@@ -180,7 +180,7 @@ mod tests {
         ];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 
@@ -204,7 +204,7 @@ mod tests {
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 
@@ -221,7 +221,7 @@ mod tests {
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let items = build_task_list_items(&state);
 

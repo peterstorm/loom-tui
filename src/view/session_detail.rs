@@ -104,18 +104,18 @@ impl<'a> EventsRef<'a> {
 /// Resolve the session data for the currently selected session index.
 /// Returns None if no valid session is selected.
 pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>> {
-    let idx = state.selected_session_index?;
-    let active_count = state.active_sessions.len();
+    let idx = state.ui.selected_session_index?;
+    let active_count = state.domain.active_sessions.len();
 
     if idx < active_count {
         // Active session — filter agents and events by session_id
-        let meta = state.active_sessions.values().nth(idx)?;
+        let meta = state.domain.active_sessions.values().nth(idx)?;
         let sid = &meta.id;
-        let filtered_agents: BTreeMap<String, &Agent> = state.agents.iter()
+        let filtered_agents: BTreeMap<String, &Agent> = state.domain.agents.iter()
             .filter(|(_, a)| a.session_id.as_deref() == Some(sid))
             .map(|(k, v)| (k.clone(), v))
             .collect();
-        let filtered_events: Vec<HookEvent> = state.events.iter()
+        let filtered_events: Vec<HookEvent> = state.domain.events.iter()
             .filter(|e| e.session_id.as_deref() == Some(sid))
             .cloned()
             .collect();
@@ -123,12 +123,12 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
             meta,
             agents: AgentsRef::Filtered(filtered_agents),
             events: EventsRef::Owned(filtered_events),
-            task_graph: state.task_graph.as_ref(),
+            task_graph: state.domain.task_graph.as_ref(),
         })
     } else {
         // Archived session — requires loaded data
         let archive_idx = idx - active_count;
-        let session = state.sessions.get(archive_idx)?;
+        let session = state.domain.sessions.get(archive_idx)?;
         let archive = session.data.as_ref()?;
         Some(SessionViewData {
             meta: &session.meta,
@@ -238,7 +238,7 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
         Some(d) => d,
         None => {
             // Distinguish between "no selection" and "loading"
-            if state.loading_session.is_some() {
+            if state.ui.loading_session.is_some() {
                 render_loading_session(frame, area);
             } else {
                 render_no_session(frame, area);
@@ -265,9 +265,9 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(chunks[1]);
 
-    let is_left_focused = matches!(state.focus, PanelFocus::Left);
-    render_left_panel(frame, main_chunks[0], &data, state.scroll_offsets.session_detail_left, is_left_focused);
-    render_right_panel(frame, main_chunks[1], &data, state.scroll_offsets.session_detail_right, !is_left_focused);
+    let is_left_focused = matches!(state.ui.focus, PanelFocus::Left);
+    render_left_panel(frame, main_chunks[0], &data, state.ui.scroll_offsets.session_detail_left, is_left_focused);
+    render_right_panel(frame, main_chunks[1], &data, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
 
     render_session_detail_footer(frame, chunks[2]);
 }
@@ -709,12 +709,12 @@ mod tests {
 
         let mut state = AppState::new();
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        state.active_sessions.insert("s1".into(), meta);
-        state.selected_session_index = Some(0);
-        state.view = crate::app::state::ViewState::SessionDetail;
+        state.domain.active_sessions.insert("s1".into(), meta);
+        state.ui.selected_session_index = Some(0);
+        state.ui.view = crate::app::state::ViewState::SessionDetail;
         let mut a = Agent::new("a01".into(), Utc::now());
         a.session_id = Some("s1".into());
-        state.agents.insert("a01".into(), a);
+        state.domain.agents.insert("a01".into(), a);
 
         terminal
             .draw(|frame| render_session_detail(frame, &state, frame.area()))
@@ -745,9 +745,9 @@ mod tests {
             .with_agents(agents)
             .with_events(events);
 
-        state.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
-        state.selected_session_index = Some(0);
-        state.view = crate::app::state::ViewState::SessionDetail;
+        state.domain.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
+        state.ui.selected_session_index = Some(0);
+        state.ui.view = crate::app::state::ViewState::SessionDetail;
 
         terminal
             .draw(|frame| render_session_detail(frame, &state, frame.area()))
@@ -761,9 +761,9 @@ mod tests {
 
         let mut state = AppState::new();
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        state.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()).with_data(SessionArchive::new(meta)));
-        state.selected_session_index = Some(0);
-        state.focus = PanelFocus::Right;
+        state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()).with_data(SessionArchive::new(meta)));
+        state.ui.selected_session_index = Some(0);
+        state.ui.focus = PanelFocus::Right;
 
         terminal
             .draw(|frame| render_session_detail(frame, &state, frame.area()))
@@ -839,11 +839,11 @@ mod tests {
     #[test]
     fn get_selected_session_data_active_session() {
         let mut state = AppState::new();
-        state.active_sessions.insert("s1".into(), SessionMeta::new("s1".into(), Utc::now(), "/proj".into()));
-        state.selected_session_index = Some(0);
+        state.domain.active_sessions.insert("s1".into(), SessionMeta::new("s1".into(), Utc::now(), "/proj".into()));
+        state.ui.selected_session_index = Some(0);
         let mut a = Agent::new("a01".into(), Utc::now());
         a.session_id = Some("s1".into());
-        state.agents.insert("a01".into(), a);
+        state.domain.agents.insert("a01".into(), a);
 
         let data = get_selected_session_data(&state).unwrap();
         assert_eq!(data.meta.id, "s1");
@@ -853,15 +853,15 @@ mod tests {
     #[test]
     fn get_selected_session_data_archived_session() {
         let mut state = AppState::new();
-        state.active_sessions.insert("active".into(), SessionMeta::new("active".into(), Utc::now(), "/proj".into()));
+        state.domain.active_sessions.insert("active".into(), SessionMeta::new("active".into(), Utc::now(), "/proj".into()));
 
         let mut archived_agents = BTreeMap::new();
         archived_agents.insert("a99".into(), Agent::new("a99".into(), Utc::now()));
         let meta = SessionMeta::new("archived".into(), Utc::now(), "/proj".into());
         let archive = SessionArchive::new(meta.clone()).with_agents(archived_agents);
-        state.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
+        state.domain.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
 
-        state.selected_session_index = Some(1); // idx 0=active, idx 1=archived
+        state.ui.selected_session_index = Some(1); // idx 0=active, idx 1=archived
 
         let data = get_selected_session_data(&state).unwrap();
         assert_eq!(data.meta.id, "archived");
@@ -874,8 +874,8 @@ mod tests {
         let mut state = AppState::new();
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
         let archive = SessionArchive::new(meta.clone());
-        state.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
-        state.selected_session_index = Some(0);
+        state.domain.sessions.push(ArchivedSession::new(meta, PathBuf::new()).with_data(archive));
+        state.ui.selected_session_index = Some(0);
 
         let data = get_selected_session_data(&state).unwrap();
         assert_eq!(data.meta.id, "s1");

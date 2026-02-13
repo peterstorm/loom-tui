@@ -25,8 +25,8 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Resolve selected agent via sorted order
     let sorted_keys = state.sorted_agent_keys();
-    let selected_agent = state.selected_agent_index.and_then(|idx| {
-        sorted_keys.get(idx).and_then(|k| state.agents.get(k))
+    let selected_agent = state.ui.selected_agent_index.and_then(|idx| {
+        sorted_keys.get(idx).and_then(|k| state.domain.agents.get(k))
     });
 
     render_agent_header(frame, chunks[0], selected_agent, state);
@@ -43,14 +43,14 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
     render_agent_list(frame, main_chunks[0], state);
 
     // Right panel: filtered events for selected agent
-    let is_right_focused = matches!(state.focus, PanelFocus::Right);
+    let is_right_focused = matches!(state.ui.focus, PanelFocus::Right);
     if let Some(agent) = selected_agent {
         render_agent_event_stream(
             frame,
             main_chunks[1],
             state,
             &agent.id,
-            state.scroll_offsets.agent_events,
+            state.ui.scroll_offsets.agent_events,
             is_right_focused,
         );
     } else {
@@ -79,7 +79,7 @@ fn render_agent_header(
                 let elapsed = finished.signed_duration_since(agent.started_at);
                 format!("{}s", elapsed.num_seconds())
             } else {
-                let elapsed = state.started_at.elapsed();
+                let elapsed = state.meta.started_at.elapsed();
                 format!("{}s", elapsed.as_secs())
             };
 
@@ -190,8 +190,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.selected_agent_index = Some(0);
+        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.ui.selected_agent_index = Some(0);
 
         terminal
             .draw(|frame| render_agent_detail(frame, &state, frame.area()))
@@ -206,9 +206,9 @@ mod tests {
         let mut state = AppState::new();
         let mut a1 = Agent::new("a01".into(), Utc::now());
         a1.agent_type = Some("Explore".into());
-        state.agents.insert("a01".into(), a1);
-        state.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
-        state.selected_agent_index = Some(1);
+        state.domain.agents.insert("a01".into(), a1);
+        state.domain.agents.insert("a02".into(), Agent::new("a02".into(), Utc::now()));
+        state.ui.selected_agent_index = Some(1);
 
         terminal
             .draw(|frame| render_agent_detail(frame, &state, frame.area()))
@@ -223,8 +223,8 @@ mod tests {
         let mut state = AppState::new();
         let now = Utc::now();
         let agent = Agent::new("a01".into(), now).finish(now + chrono::Duration::seconds(10));
-        state.agents.insert("a01".into(), agent);
-        state.selected_agent_index = Some(0);
+        state.domain.agents.insert("a01".into(), agent);
+        state.ui.selected_agent_index = Some(0);
 
         terminal
             .draw(|frame| render_agent_detail(frame, &state, frame.area()))
@@ -237,9 +237,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.focus = PanelFocus::Right;
-        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.selected_agent_index = Some(0);
+        state.ui.focus = PanelFocus::Right;
+        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.ui.selected_agent_index = Some(0);
 
         terminal
             .draw(|frame| render_agent_detail(frame, &state, frame.area()))

@@ -14,15 +14,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
     match event {
         AppEvent::TaskGraphUpdated(graph) => {
             let total = graph.total_tasks as u32;
-            state.task_graph = Some(graph);
+            state.domain.task_graph = Some(graph);
             // Update task count on all active sessions (task graph is project-level)
-            for meta in state.active_sessions.values_mut() {
+            for meta in state.domain.active_sessions.values_mut() {
                 meta.task_count = total;
             }
         }
 
         AppEvent::TranscriptUpdated { agent_id, messages } => {
-            state.agents.entry(agent_id).and_modify(|agent| {
+            state.domain.agents.entry(agent_id).and_modify(|agent| {
                 agent.messages = messages;
             });
         }
@@ -38,13 +38,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             //   which would incorrectly attribute the main session's reasoning to subagents.
             let agent_id = event.agent_id.clone()
                 .or_else(|| {
-                    event_session.and_then(|sid| state.transcript_agent_map.get(sid).cloned())
+                    event_session.and_then(|sid| state.domain.transcript_agent_map.get(sid).cloned())
                 })
                 .or_else(|| {
                     if is_assistant_text {
                         return None; // skip session_id matching for transcript text
                     }
                     let matches: Vec<_> = state
+                        .domain
                         .agents
                         .iter()
                         .filter(|(_, a)| {
@@ -71,8 +72,9 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                             .clone()
                             .or_else(|| task_description.clone());
                         let desc = task_description.clone();
-                        let is_new = !state.agents.contains_key(id);
+                        let is_new = !state.domain.agents.contains_key(id);
                         state
+                            .domain
                             .agents
                             .entry(id.clone())
                             .and_modify(|a| {
@@ -99,13 +101,13 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         // Populate transcript_agent_map for subagent transcript attribution
                         // The agent's session_id (from hook event) is its TRANSCRIPT session_id
                         if let Some(ref sid) = event.session_id {
-                            state.transcript_agent_map.insert(sid.clone(), id.clone());
+                            state.domain.transcript_agent_map.insert(sid.clone(), id.clone());
                         }
 
                         // Increment per-session agent count
                         if is_new {
                             if let Some(ref sid) = event.session_id {
-                                if let Some(meta) = state.active_sessions.get_mut(sid) {
+                                if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
                                     meta.agent_count += 1;
                                 }
                             }
@@ -114,7 +116,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 }
                 HookEventKind::SubagentStop => {
                     if let Some(ref id) = event.agent_id {
-                        state.agents.entry(id.clone()).and_modify(|agent| {
+                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
                             if agent.finished_at.is_none() {
                                 agent.finished_at = Some(event.timestamp);
                             }
@@ -127,7 +129,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     input_summary,
                 } => {
                     if let Some(ref id) = agent_id {
-                        state.agents.entry(id.clone()).and_modify(|agent| {
+                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
                             agent.messages.push(AgentMessage::tool(
                                 event.timestamp,
                                 ToolCall::new(tool_name.clone(), input_summary.clone()),
@@ -141,7 +143,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     duration_ms,
                 } => {
                     if let Some(ref id) = agent_id {
-                        state.agents.entry(id.clone()).and_modify(|agent| {
+                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
                             if let Some(msg) = agent.messages.iter_mut().rev().find(|m| {
                                 matches!(&m.kind, MessageKind::Tool(tc) if tc.tool_name == *tool_name && tc.success.is_none())
                             }) {
@@ -163,7 +165,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     let project_path = event.raw.get("cwd")
                         .and_then(|v| v.as_str())
                         .map(String::from)
-                        .unwrap_or_else(|| state.project_path.clone());
+                        .unwrap_or_else(|| state.meta.project_path.clone());
 
                     // Transcript path is pre-computed in the imperative shell (watcher)
                     let transcript_path = event.raw.get("transcript_path")
@@ -176,22 +178,22 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         project_path,
                     );
                     meta.transcript_path = transcript_path;
-                    state.active_sessions.insert(session_id, meta);
+                    state.domain.active_sessions.insert(session_id, meta);
                 }
                 HookEventKind::SessionEnd => {
                     let session_id = event.session_id.clone()
                         .unwrap_or_default();
-                    if let Some(mut meta) = state.active_sessions.remove(&session_id) {
+                    if let Some(mut meta) = state.domain.active_sessions.remove(&session_id) {
                         meta.status = SessionStatus::Completed;
                         // agent_count, event_count, task_count already tracked incrementally
                         let dur = (event.timestamp - meta.timestamp)
                             .to_std()
                             .unwrap_or_default();
                         meta.duration = Some(dur);
-                        let archive = session::build_archive(state, meta.clone());
+                        let archive = session::build_archive(&state.domain, &meta);
                         let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
                             .with_data(archive);
-                        state.sessions.insert(0, archived);
+                        state.domain.sessions.insert(0, archived);
                     }
                 }
                 _ => {}
@@ -205,11 +207,11 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
             // Increment per-session event count + update last_event_at + backfill project_path
             if let Some(ref sid) = enriched.session_id {
-                if let Some(meta) = state.active_sessions.get_mut(sid) {
+                if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
                     meta.event_count += 1;
                     meta.last_event_at = Some(enriched.timestamp);
                     // Backfill project_path from cwd if still default
-                    if meta.project_path == state.project_path || meta.project_path.is_empty() {
+                    if meta.project_path == state.meta.project_path || meta.project_path.is_empty() {
                         if let Some(cwd) = enriched.raw.get("cwd").and_then(|v| v.as_str()) {
                             if !cwd.is_empty() {
                                 meta.project_path = cwd.to_string();
@@ -220,20 +222,20 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             }
 
             // Ring buffer eviction: pop oldest if at capacity
-            if state.events.len() >= 10_000 {
-                state.events.pop_front();
+            if state.domain.events.len() >= 10_000 {
+                state.domain.events.pop_front();
             }
-            state.events.push_back(enriched);
+            state.domain.events.push_back(enriched);
         }
 
         AppEvent::AgentStarted(agent_id) => {
             let agent = Agent::new(agent_id.clone(), Utc::now());
-            state.agents.insert(agent_id, agent);
+            state.domain.agents.insert(agent_id, agent);
             agents_changed = true;
         }
 
         AppEvent::AgentStopped(agent_id) => {
-            state.agents.entry(agent_id).and_modify(|agent| {
+            state.domain.agents.entry(agent_id).and_modify(|agent| {
                 agent.finished_at = Some(Utc::now());
             });
             agents_changed = true;
@@ -247,6 +249,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             // Expire stale sessions (no event received in 5 minutes)
             let cutoff = now - chrono::Duration::minutes(5);
             let stale_ids: Vec<String> = state
+                .domain
                 .active_sessions
                 .iter()
                 .filter(|(_, meta)| {
@@ -257,39 +260,39 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in stale_ids {
-                if let Some(mut meta) = state.active_sessions.remove(&id) {
+                if let Some(mut meta) = state.domain.active_sessions.remove(&id) {
                     meta.status = SessionStatus::Cancelled;
                     let dur = (now - meta.timestamp).to_std().unwrap_or_default();
                     meta.duration = Some(dur);
-                    let archive = session::build_archive(state, meta.clone());
+                    let archive = session::build_archive(&state.domain, &meta);
                     let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
                         .with_data(archive);
-                    state.sessions.insert(0, archived);
+                    state.domain.sessions.insert(0, archived);
                 }
             }
         }
 
         AppEvent::Error { source, error } => {
-            if state.errors.len() >= 100 {
-                state.errors.pop_front();
+            if state.meta.errors.len() >= 100 {
+                state.meta.errors.pop_front();
             }
             let error_msg = format!("{}: {}", source, error);
-            state.errors.push_back(error_msg);
+            state.meta.errors.push_back(error_msg);
         }
 
         AppEvent::SessionLoaded(archive) => {
-            if let Some(session) = state.sessions.iter_mut().find(|s| s.meta.id == archive.meta.id) {
+            if let Some(session) = state.domain.sessions.iter_mut().find(|s| s.meta.id == archive.meta.id) {
                 session.data = Some(archive);
             }
-            state.loading_session = None;
-            state.view = ViewState::SessionDetail;
-            state.scroll_offsets.session_detail_left = 0;
-            state.scroll_offsets.session_detail_right = 0;
-            state.focus = crate::app::PanelFocus::Left;
+            state.ui.loading_session = None;
+            state.ui.view = ViewState::SessionDetail;
+            state.ui.scroll_offsets.session_detail_left = 0;
+            state.ui.scroll_offsets.session_detail_right = 0;
+            state.ui.focus = crate::app::PanelFocus::Left;
         }
 
         AppEvent::SessionListRefreshed(archives) => {
-            state.sessions = archives
+            state.domain.sessions = archives
                 .into_iter()
                 .map(|a| {
                     let meta = a.meta.clone();
@@ -299,14 +302,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         }
 
         AppEvent::SessionMetasLoaded(metas) => {
-            state.sessions = metas
+            state.domain.sessions = metas
                 .into_iter()
                 .map(|(path, meta)| ArchivedSession::new(meta, path))
                 .collect();
         }
 
         AppEvent::LoadSessionRequested(idx) => {
-            state.loading_session = Some(idx);
+            state.ui.loading_session = Some(idx);
         }
     }
 
@@ -338,15 +341,15 @@ mod tests {
 
         update(&mut state, AppEvent::TaskGraphUpdated(graph.clone()));
 
-        assert!(state.task_graph.is_some());
-        assert_eq!(state.task_graph.unwrap().waves.len(), 1);
+        assert!(state.domain.task_graph.is_some());
+        assert_eq!(state.domain.task_graph.unwrap().waves.len(), 1);
     }
 
     #[test]
     fn update_transcript_existing_agent() {
         let mut state = AppState::new();
         let agent = Agent::new("a01".into(), Utc::now());
-        state.agents.insert("a01".into(), agent);
+        state.domain.agents.insert("a01".into(), agent);
 
         let messages = vec![AgentMessage::reasoning(
             Utc::now(),
@@ -361,7 +364,7 @@ mod tests {
             },
         );
 
-        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+        assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 1);
     }
 
     #[test]
@@ -380,7 +383,7 @@ mod tests {
             },
         );
 
-        assert!(state.agents.is_empty());
+        assert!(state.domain.agents.is_empty());
     }
 
     #[test]
@@ -393,7 +396,7 @@ mod tests {
                     message: format!("event {}", i),
                 },
             );
-            state.events.push_back(event);
+            state.domain.events.push_back(event);
         }
 
         let new_event = HookEvent::new(
@@ -405,9 +408,9 @@ mod tests {
 
         update(&mut state, AppEvent::HookEventReceived(new_event));
 
-        assert_eq!(state.events.len(), 10_000);
+        assert_eq!(state.domain.events.len(), 10_000);
         assert!(matches!(
-            &state.events.back().unwrap().kind,
+            &state.domain.events.back().unwrap().kind,
             HookEventKind::Notification { message } if message == "newest"
         ));
     }
@@ -419,7 +422,7 @@ mod tests {
 
         update(&mut state, AppEvent::HookEventReceived(event));
 
-        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.domain.events.len(), 1);
     }
 
     #[test]
@@ -427,20 +430,20 @@ mod tests {
         let mut state = AppState::new();
         update(&mut state, AppEvent::AgentStarted("a01".into()));
 
-        assert_eq!(state.agents.len(), 1);
-        assert!(state.agents.contains_key("a01"));
-        assert!(state.agents.get("a01").unwrap().finished_at.is_none());
+        assert_eq!(state.domain.agents.len(), 1);
+        assert!(state.domain.agents.contains_key("a01"));
+        assert!(state.domain.agents.get("a01").unwrap().finished_at.is_none());
     }
 
     #[test]
     fn agent_stopped_marks_finished() {
         let mut state = AppState::new();
         let agent = Agent::new("a01".into(), Utc::now());
-        state.agents.insert("a01".into(), agent);
+        state.domain.agents.insert("a01".into(), agent);
 
         update(&mut state, AppEvent::AgentStopped("a01".into()));
 
-        assert!(state.agents.get("a01").unwrap().finished_at.is_some());
+        assert!(state.domain.agents.get("a01").unwrap().finished_at.is_some());
     }
 
     #[test]
@@ -448,7 +451,7 @@ mod tests {
         let mut state = AppState::new();
         update(&mut state, AppEvent::AgentStopped("nonexistent".into()));
 
-        assert!(state.agents.is_empty());
+        assert!(state.domain.agents.is_empty());
     }
 
     #[test]
@@ -458,23 +461,23 @@ mod tests {
 
         update(&mut state, AppEvent::Key(key));
 
-        assert!(matches!(state.view, crate::app::ViewState::Dashboard));
+        assert!(matches!(state.ui.view, crate::app::ViewState::Dashboard));
     }
 
     #[test]
     fn tick_event_is_noop() {
         let mut state = AppState::new();
-        let initial_len = state.events.len();
+        let initial_len = state.domain.events.len();
         update(&mut state, AppEvent::Tick(Utc::now()));
 
-        assert_eq!(state.events.len(), initial_len);
+        assert_eq!(state.domain.events.len(), initial_len);
     }
 
     #[test]
     fn parse_error_ring_buffer_eviction() {
         let mut state = AppState::new();
         for i in 0..100 {
-            state.errors.push_back(format!("error {}", i));
+            state.meta.errors.push_back(format!("error {}", i));
         }
 
         update(
@@ -487,8 +490,8 @@ mod tests {
             },
         );
 
-        assert_eq!(state.errors.len(), 100);
-        assert!(state.errors.back().unwrap().contains("newest error"));
+        assert_eq!(state.meta.errors.len(), 100);
+        assert!(state.meta.errors.back().unwrap().contains("newest error"));
     }
 
     #[test]
@@ -504,8 +507,8 @@ mod tests {
             },
         );
 
-        assert_eq!(state.errors.len(), 1);
-        assert_eq!(state.errors.front().unwrap(), "file.json: parse: JSON parse: invalid JSON");
+        assert_eq!(state.meta.errors.len(), 1);
+        assert_eq!(state.meta.errors.front().unwrap(), "file.json: parse: JSON parse: invalid JSON");
     }
 
     #[test]
@@ -523,11 +526,11 @@ mod tests {
 
         let events = vec![HookEvent::new(Utc::now(), HookEventKind::SessionStart)];
 
-        state.sessions.push(crate::model::ArchivedSession::new(
+        state.domain.sessions.push(crate::model::ArchivedSession::new(
             meta.clone(),
             std::path::PathBuf::new(),
         ));
-        state.loading_session = Some(0);
+        state.ui.loading_session = Some(0);
 
         let archive = SessionArchive::new(meta.clone())
             .with_task_graph(graph)
@@ -536,29 +539,29 @@ mod tests {
 
         update(&mut state, AppEvent::SessionLoaded(archive));
 
-        let data = state.sessions[0].data.as_ref().unwrap();
+        let data = state.domain.sessions[0].data.as_ref().unwrap();
         assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 5);
         assert_eq!(data.agents.len(), 1);
         assert_eq!(data.events.len(), 1);
-        assert!(state.loading_session.is_none());
-        assert!(matches!(state.view, ViewState::SessionDetail));
+        assert!(state.ui.loading_session.is_none());
+        assert!(matches!(state.ui.view, ViewState::SessionDetail));
     }
 
     #[test]
     fn session_loaded_clears_loading_and_navigates() {
         let mut state = AppState::new();
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        state.sessions.push(crate::model::ArchivedSession::new(
+        state.domain.sessions.push(crate::model::ArchivedSession::new(
             meta.clone(),
             std::path::PathBuf::new(),
         ));
-        state.loading_session = Some(0);
+        state.ui.loading_session = Some(0);
 
         let archive = SessionArchive::new(meta);
         update(&mut state, AppEvent::SessionLoaded(archive));
 
-        assert!(state.loading_session.is_none());
-        assert!(matches!(state.view, ViewState::SessionDetail));
+        assert!(state.ui.loading_session.is_none());
+        assert!(matches!(state.ui.view, ViewState::SessionDetail));
     }
 
     #[test]
@@ -571,9 +574,9 @@ mod tests {
 
         update(&mut state, AppEvent::SessionListRefreshed(sessions));
 
-        assert_eq!(state.sessions.len(), 2);
-        assert_eq!(state.sessions[0].meta.id, "s1");
-        assert_eq!(state.sessions[1].meta.id, "s2");
+        assert_eq!(state.domain.sessions.len(), 2);
+        assert_eq!(state.domain.sessions[0].meta.id, "s1");
+        assert_eq!(state.domain.sessions[1].meta.id, "s2");
     }
 
     #[test]
@@ -590,7 +593,7 @@ mod tests {
             update(&mut state, AppEvent::HookEventReceived(event));
         }
 
-        assert_eq!(state.events.len(), 10_000);
+        assert_eq!(state.domain.events.len(), 10_000);
     }
 
     #[test]
@@ -609,7 +612,7 @@ mod tests {
             );
         }
 
-        assert_eq!(state.errors.len(), 100);
+        assert_eq!(state.meta.errors.len(), 100);
     }
 
     #[test]
@@ -620,8 +623,8 @@ mod tests {
 
         update(&mut state, AppEvent::HookEventReceived(event));
 
-        assert_eq!(state.agents.len(), 1);
-        assert!(state.agents.get("a01").unwrap().finished_at.is_none());
+        assert_eq!(state.domain.agents.len(), 1);
+        assert!(state.domain.agents.get("a01").unwrap().finished_at.is_none());
     }
 
     #[test]
@@ -635,7 +638,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(start));
         update(&mut state, AppEvent::HookEventReceived(stop));
 
-        assert!(state.agents.get("a01").unwrap().finished_at.is_some());
+        assert!(state.domain.agents.get("a01").unwrap().finished_at.is_some());
     }
 
     #[test]
@@ -650,7 +653,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(e1));
         update(&mut state, AppEvent::HookEventReceived(e2));
 
-        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.domain.agents.len(), 1);
     }
 
     #[test]
@@ -667,8 +670,8 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(start));
         update(&mut state, AppEvent::HookEventReceived(tool));
 
-        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
-        match &state.agents.get("a01").unwrap().messages[0].kind {
+        assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 1);
+        match &state.domain.agents.get("a01").unwrap().messages[0].kind {
             MessageKind::Tool(tc) => {
                 assert_eq!(tc.tool_name, "Read");
                 assert_eq!(tc.input_summary, "file.rs");
@@ -698,7 +701,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(pre));
         update(&mut state, AppEvent::HookEventReceived(post));
 
-        let msg = &state.agents.get("a01").unwrap().messages[0];
+        let msg = &state.domain.agents.get("a01").unwrap().messages[0];
         match &msg.kind {
             MessageKind::Tool(tc) => {
                 assert_eq!(tc.success, Some(true));
@@ -725,7 +728,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(start));
         update(&mut state, AppEvent::HookEventReceived(tool));
 
-        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 1);
+        assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 1);
     }
 
     #[test]
@@ -750,8 +753,8 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(tool));
 
         // Neither agent gets the tool event (ambiguous attribution)
-        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
-        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 0);
+        assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 0);
+        assert_eq!(state.domain.agents.get("a02").unwrap().messages.len(), 0);
     }
 
     #[test]
@@ -772,8 +775,8 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(s2));
         update(&mut state, AppEvent::HookEventReceived(tool));
 
-        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
-        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 1);
+        assert_eq!(state.domain.agents.get("a01").unwrap().messages.len(), 0);
+        assert_eq!(state.domain.agents.get("a02").unwrap().messages.len(), 1);
     }
 
     #[test]
@@ -787,9 +790,9 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(e1));
         update(&mut state, AppEvent::HookEventReceived(e2));
 
-        assert_eq!(state.active_sessions.len(), 2);
-        assert!(state.active_sessions.contains_key("s1"));
-        assert!(state.active_sessions.contains_key("s2"));
+        assert_eq!(state.domain.active_sessions.len(), 2);
+        assert!(state.domain.active_sessions.contains_key("s1"));
+        assert!(state.domain.active_sessions.contains_key("s2"));
     }
 
     #[test]
@@ -806,18 +809,18 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(e2));
         update(&mut state, AppEvent::HookEventReceived(end));
 
-        assert_eq!(state.active_sessions.len(), 1);
-        assert!(!state.active_sessions.contains_key("s1"));
-        assert!(state.active_sessions.contains_key("s2"));
-        assert_eq!(state.sessions.len(), 1);
-        assert_eq!(state.sessions[0].meta.id, "s1");
+        assert_eq!(state.domain.active_sessions.len(), 1);
+        assert!(!state.domain.active_sessions.contains_key("s1"));
+        assert!(state.domain.active_sessions.contains_key("s2"));
+        assert_eq!(state.domain.sessions.len(), 1);
+        assert_eq!(state.domain.sessions[0].meta.id, "s1");
     }
 
     #[test]
     fn session_start_does_not_clear_live_state() {
         let mut state = AppState::new();
-        state.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
-        state.events.push_back(HookEvent::new(
+        state.domain.agents.insert("a01".into(), Agent::new("a01".into(), Utc::now()));
+        state.domain.events.push_back(HookEvent::new(
             Utc::now(),
             HookEventKind::Notification { message: "existing".into() },
         ));
@@ -826,8 +829,8 @@ mod tests {
             .with_session("s1".into());
         update(&mut state, AppEvent::HookEventReceived(e));
 
-        assert_eq!(state.agents.len(), 1);
-        assert_eq!(state.events.len(), 2);
+        assert_eq!(state.domain.agents.len(), 1);
+        assert_eq!(state.domain.events.len(), 2);
     }
 
     #[test]
@@ -857,8 +860,8 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(a2));
         update(&mut state, AppEvent::HookEventReceived(a3));
 
-        assert_eq!(state.active_sessions["s1"].agent_count, 2);
-        assert_eq!(state.active_sessions["s2"].agent_count, 1);
+        assert_eq!(state.domain.active_sessions["s1"].agent_count, 2);
+        assert_eq!(state.domain.active_sessions["s2"].agent_count, 1);
     }
 
     #[test]
@@ -878,7 +881,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(a1));
         update(&mut state, AppEvent::HookEventReceived(a1_dup));
 
-        assert_eq!(state.active_sessions["s1"].agent_count, 1);
+        assert_eq!(state.domain.active_sessions["s1"].agent_count, 1);
     }
 
     #[test]
@@ -900,7 +903,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(a2));
         update(&mut state, AppEvent::HookEventReceived(end));
 
-        assert_eq!(state.sessions[0].meta.agent_count, 2);
+        assert_eq!(state.domain.sessions[0].meta.agent_count, 2);
     }
 
     #[test]
@@ -924,8 +927,8 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(e));
 
         // +1 each for their own SessionStart
-        assert_eq!(state.active_sessions["s1"].event_count, 4);
-        assert_eq!(state.active_sessions["s2"].event_count, 2);
+        assert_eq!(state.domain.active_sessions["s1"].event_count, 4);
+        assert_eq!(state.domain.active_sessions["s2"].event_count, 2);
     }
 
     #[test]
@@ -942,7 +945,7 @@ mod tests {
         };
         update(&mut state, AppEvent::TaskGraphUpdated(graph));
 
-        assert_eq!(state.active_sessions["s1"].task_count, 7);
+        assert_eq!(state.domain.active_sessions["s1"].task_count, 7);
     }
 
     #[test]
@@ -956,7 +959,7 @@ mod tests {
         update(&mut state, AppEvent::HookEventReceived(s));
         update(&mut state, AppEvent::HookEventReceived(a));
 
-        assert_eq!(state.agents["a01"].session_id.as_deref(), Some("s1"));
+        assert_eq!(state.domain.agents["a01"].session_id.as_deref(), Some("s1"));
     }
 
     #[test]
@@ -969,6 +972,6 @@ mod tests {
 
         update(&mut state, AppEvent::HookEventReceived(tool));
 
-        assert!(state.agents.is_empty());
+        assert!(state.domain.agents.is_empty());
     }
 }

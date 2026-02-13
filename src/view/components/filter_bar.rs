@@ -13,7 +13,7 @@ use crate::model::theme::Theme;
 /// Displayed at bottom of screen when filter is active.
 /// Shows "/ " prefix with current filter text and cursor.
 pub fn render_filter_bar(frame: &mut Frame, state: &AppState) {
-    if let Some(ref filter_text) = state.filter {
+    if let Some(ref filter_text) = state.ui.filter {
         let area = frame.area();
 
         // Position at bottom of screen, height of 3 lines (includes border)
@@ -55,7 +55,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.filter = Some("test query".to_string());
+        state.ui.filter = Some("test query".to_string());
 
         terminal
             .draw(|frame| render_filter_bar(frame, &state))
@@ -98,7 +98,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        state.filter = Some("abc".to_string());
+        state.ui.filter = Some("abc".to_string());
 
         terminal
             .draw(|frame| render_filter_bar(frame, &state))

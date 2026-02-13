@@ -15,9 +15,9 @@ use crate::model::{HookEventKind, Theme};
 pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
     let lines = build_filtered_event_lines(state, None);
 
-    let is_focused = matches!(state.focus, PanelFocus::Right);
+    let is_focused = matches!(state.ui.focus, PanelFocus::Right);
 
-    let title = if state.auto_scroll {
+    let title = if state.ui.auto_scroll {
         "Events [auto-scroll]"
     } else {
         "Events"
@@ -36,7 +36,7 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
         )
         .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
-        .scroll((state.scroll_offsets.event_stream as u16, 0));
+        .scroll((state.ui.scroll_offsets.event_stream as u16, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -52,7 +52,7 @@ pub fn render_agent_event_stream(
 ) {
     let lines = build_filtered_event_lines(state, Some(agent_id));
 
-    let title = if state.auto_scroll {
+    let title = if state.ui.auto_scroll {
         "Activity [auto-scroll]"
     } else {
         "Activity"
@@ -79,7 +79,7 @@ pub fn render_agent_event_stream(
 /// Pure function: build lines from events, optionally filtered by agent_id.
 fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
     let filtered: Vec<_> = state
-        .events
+        .domain.events
         .iter()
         .rev()
         .filter(|e| match agent_filter {
@@ -115,7 +115,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         // Resolve agent display name
         let agent_label = event.agent_id.as_ref().map(|aid| {
             state
-                .agents
+                .domain.agents
                 .get(aid)
                 .map(|a| a.display_name().to_string())
                 .unwrap_or_else(|| short_id(aid))
@@ -437,7 +437,7 @@ mod tests {
         let event1 = HookEvent::new(Utc::now(), HookEventKind::session_start());
         let event2 = HookEvent::new(Utc::now(), HookEventKind::session_end());
 
-        state.events = VecDeque::from(vec![event1, event2]);
+        state.domain.events = VecDeque::from(vec![event1, event2]);
 
         let lines = build_filtered_event_lines(&state, None);
 
@@ -560,14 +560,14 @@ mod tests {
         let mut state = AppState::new();
         let mut agent = Agent::new("a01".into(), Utc::now());
         agent.agent_type = Some("Explore".into());
-        state.agents.insert("a01".into(), agent);
+        state.domain.agents.insert("a01".into(), agent);
 
         let event = HookEvent::new(
             Utc::now(),
             HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
         )
         .with_agent("a01".into());
-        state.events = VecDeque::from(vec![event]);
+        state.domain.events = VecDeque::from(vec![event]);
 
         let lines = build_filtered_event_lines(&state, None);
         // Header line should contain "Explore"

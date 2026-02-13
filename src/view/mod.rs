@@ -31,7 +31,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     components::header::render_header(frame, layout[0], state);
 
     // Route content area to specific view
-    match &state.view {
+    match &state.ui.view {
         ViewState::Dashboard => {
             dashboard::render_dashboard(frame, state, layout[1]);
         }
@@ -47,12 +47,12 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     }
 
     // Overlay filter bar if active
-    if state.filter.is_some() {
+    if state.ui.filter.is_some() {
         components::filter_bar::render_filter_bar(frame, state);
     }
 
     // Overlay help if active (on top of filter bar)
-    if state.show_help {
+    if state.ui.show_help {
         components::help_overlay::render_help_overlay(frame);
     }
 }

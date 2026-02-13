@@ -42,7 +42,7 @@ fn dashboard_renders_without_panic_with_tasks() {
     ];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -70,7 +70,7 @@ fn dashboard_renders_without_panic_with_events() {
         ),
     ];
 
-    state.events = VecDeque::from(events);
+    state.domain.events = VecDeque::from(events);
 
     terminal
         .draw(|frame| {
@@ -171,7 +171,7 @@ fn header_renders_with_tasks() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     let result = terminal
         .draw(|frame| {
@@ -259,7 +259,7 @@ fn wave_river_renders_multiple_waves() {
     ];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     let result = terminal
         .draw(|frame| {
@@ -299,8 +299,8 @@ fn task_list_renders_with_focus() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
-    state.focus = PanelFocus::Left;
+    state.domain.task_graph = Some(TaskGraph::new(waves));
+    state.ui.focus = PanelFocus::Left;
 
     terminal
         .draw(|frame| {
@@ -338,7 +338,7 @@ fn event_stream_renders_with_events() {
         ),
     ];
 
-    state.events = VecDeque::from(events);
+    state.domain.events = VecDeque::from(events);
 
     terminal
         .draw(|frame| {
@@ -353,7 +353,7 @@ fn event_stream_renders_with_auto_scroll() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.auto_scroll = true;
+    state.ui.auto_scroll = true;
 
     terminal
         .draw(|frame| {
@@ -368,7 +368,7 @@ fn event_stream_renders_with_focus() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.focus = PanelFocus::Right;
+    state.ui.focus = PanelFocus::Right;
 
     terminal
         .draw(|frame| {
@@ -435,7 +435,7 @@ fn dashboard_layout_with_all_status_types() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -457,7 +457,7 @@ fn dashboard_layout_with_long_task_descriptions() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
+    state.domain.task_graph = Some(TaskGraph::new(waves));
 
     terminal
         .draw(|frame| {
@@ -474,7 +474,7 @@ fn dashboard_layout_with_many_events() {
     let mut state = AppState::new();
 
     for i in 0..100 {
-        state.events.push_back(HookEvent::new(
+        state.domain.events.push_back(HookEvent::new(
             Utc::now(),
             HookEventKind::notification(format!("Event {}", i)),
         ));
@@ -501,9 +501,9 @@ fn dashboard_layout_with_scroll_offsets() {
     )];
 
     let mut state = AppState::new();
-    state.task_graph = Some(TaskGraph::new(waves));
-    state.scroll_offsets.task_list = 5;
-    state.scroll_offsets.event_stream = 10;
+    state.domain.task_graph = Some(TaskGraph::new(waves));
+    state.ui.scroll_offsets.task_list = 5;
+    state.ui.scroll_offsets.event_stream = 10;
 
     terminal
         .draw(|frame| {
@@ -556,7 +556,7 @@ fn view_render_with_filter_overlay() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.filter = Some("test".to_string());
+    state.ui.filter = Some("test".to_string());
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
@@ -582,7 +582,7 @@ fn view_render_with_help_overlay() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.show_help = true;
+    state.ui.show_help = true;
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))
@@ -611,8 +611,8 @@ fn view_render_with_both_overlays() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     let mut state = AppState::new();
-    state.filter = Some("query".to_string());
-    state.show_help = true;
+    state.ui.filter = Some("query".to_string());
+    state.ui.show_help = true;
 
     terminal
         .draw(|frame| loom_tui::view::render(&state, frame))

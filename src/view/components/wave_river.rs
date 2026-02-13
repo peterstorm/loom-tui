@@ -39,7 +39,7 @@ pub fn render_wave_river(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// Pure function: build wave river text from state.
 fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
-    match &state.task_graph {
+    match &state.domain.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
             let current_wave = calculate_current_wave_num(graph);
             let mut lines = Vec::new();
@@ -170,7 +170,7 @@ mod tests {
         )];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let lines = build_wave_river_text(&state);
         assert!(!lines.is_empty());
@@ -194,7 +194,7 @@ mod tests {
         ];
 
         let mut state = AppState::new();
-        state.task_graph = Some(TaskGraph::new(waves));
+        state.domain.task_graph = Some(TaskGraph::new(waves));
 
         let lines = build_wave_river_text(&state);
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();

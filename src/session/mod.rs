@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::app::AppState;
+use crate::app::state::DomainState;
 use crate::error::SessionError;
 use crate::model::{SessionArchive, SessionMeta};
 
@@ -65,24 +66,38 @@ pub fn extract_metadata(archive: &SessionArchive) -> SessionMeta {
     archive.meta.clone()
 }
 
-/// Build session archive from application state.
-/// Pure function: transforms app state to archive format.
+/// Build session archive from domain state, filtering by session_id.
+/// Pure function: transforms domain state to archive format.
+/// Filters events and agents to only include those belonging to this session.
 ///
 /// # Arguments
-/// * `state` - Current application state
-/// * `meta` - Session metadata
+/// * `domain` - Domain state (agents, events, task graph)
+/// * `meta` - Session metadata (contains session_id for filtering)
 ///
 /// # Returns
-/// Session archive ready for serialization
-pub fn build_archive(state: &AppState, meta: SessionMeta) -> SessionArchive {
-    let mut archive = SessionArchive::new(meta);
+/// Session archive ready for serialization (contains only data for this session)
+pub fn build_archive(domain: &DomainState, meta: &SessionMeta) -> SessionArchive {
+    let mut archive = SessionArchive::new(meta.clone());
 
-    if let Some(ref task_graph) = state.task_graph {
+    if let Some(ref task_graph) = domain.task_graph {
         archive = archive.with_task_graph(task_graph.clone());
     }
 
-    archive = archive.with_events(state.events.iter().cloned().collect());
-    archive = archive.with_agents(state.agents.clone());
+    // Filter events by session_id before cloning
+    let session_events: Vec<_> = domain.events
+        .iter()
+        .filter(|e| e.session_id.as_deref() == Some(&meta.id))
+        .cloned()
+        .collect();
+    archive = archive.with_events(session_events);
+
+    // Filter agents by session_id before cloning
+    let session_agents: BTreeMap<_, _> = domain.agents
+        .iter()
+        .filter(|(_, agent)| agent.session_id.as_deref() == Some(&meta.id))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    archive = archive.with_agents(session_agents);
 
     archive
 }
@@ -292,7 +307,8 @@ pub fn auto_save_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SessionStatus, TaskGraph};
+    use crate::app::AppState;
+    use crate::model::{Agent, SessionStatus, TaskGraph};
     use chrono::Utc;
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -355,17 +371,15 @@ mod tests {
 
     #[test]
     fn build_archive_includes_task_graph() {
-        let state = AppState {
-            task_graph: Some(TaskGraph {
-                waves: vec![],
-                total_tasks: 0,
-                completed_tasks: 0,
-            }),
-            ..AppState::new()
-        };
+        let mut state = AppState::new();
+        state.domain.task_graph = Some(TaskGraph {
+            waves: vec![],
+            total_tasks: 0,
+            completed_tasks: 0,
+        });
 
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        let archive = build_archive(&state, meta);
+        let archive = build_archive(&state.domain, &meta);
 
         assert!(archive.task_graph.is_some());
     }
@@ -373,10 +387,14 @@ mod tests {
     #[test]
     fn build_archive_includes_events_and_agents() {
         let mut state = AppState::new();
-        state.agents.insert("a01".into(), Default::default());
-
         let meta = SessionMeta::new("s1".into(), Utc::now(), "/proj".into());
-        let archive = build_archive(&state, meta);
+
+        // Agent with matching session_id
+        let mut agent = Agent::new("a01".into(), Utc::now());
+        agent.session_id = Some(meta.id.clone());
+        state.domain.agents.insert("a01".into(), agent);
+
+        let archive = build_archive(&state.domain, &meta);
 
         assert_eq!(archive.agents.len(), 1);
         assert!(archive.events.is_empty());

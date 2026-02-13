@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use crossterm::event::KeyEvent;
 
 use crate::model::{AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
@@ -30,7 +31,7 @@ pub enum AppEvent {
     Key(KeyEvent),
 
     /// Timer tick (for elapsed time updates, animations)
-    Tick,
+    Tick(DateTime<Utc>),
 
     /// Parse error occurred (non-fatal)
     ParseError { source: String, error: String },

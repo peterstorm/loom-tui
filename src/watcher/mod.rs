@@ -17,13 +17,33 @@ use std::time::Duration;
 pub type WatcherResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 
-/// Shared map of session_id → transcript_path for active sessions.
-/// Updated by main loop, read by transcript polling thread.
-pub type TranscriptPathMap = Arc<Mutex<BTreeMap<String, PathBuf>>>;
+/// Resolve the Claude Code transcript directory for a given project root.
+/// Returns ~/.claude/projects/{project_hash}/ where project_hash = cwd with / → -
+pub fn transcript_dir_for_project(project_root: &Path) -> Option<PathBuf> {
+    let project_hash = project_root.display().to_string().replace('/', "-");
+    let home = std::env::var("HOME").ok()?;
+    let dir = PathBuf::from(format!("{}/.claude/projects/{}", home, project_hash));
+    if dir.is_dir() { Some(dir) } else { None }
+}
 
-/// Create a new empty transcript path map.
-pub fn new_transcript_path_map() -> TranscriptPathMap {
-    Arc::new(Mutex::new(BTreeMap::new()))
+/// Derive transcript path from cwd + session_id when not provided by hook.
+/// Claude Code stores transcripts at ~/.claude/projects/{project_hash}/{session_id}.jsonl
+/// where project_hash is the cwd with `/` replaced by `-`.
+///
+/// # Imperative Shell
+/// This function performs filesystem I/O (Path::exists check) and belongs in the shell.
+pub fn derive_transcript_path(cwd: &str, session_id: &str) -> Option<String> {
+    if cwd.is_empty() || session_id.is_empty() {
+        return None;
+    }
+    let project_hash = cwd.replace('/', "-");
+    let home = std::env::var("HOME").ok()?;
+    let path = format!("{}/.claude/projects/{}/{}.jsonl", home, project_hash, session_id);
+    if std::path::Path::new(&path).exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Starts file watching for all paths and returns a channel for receiving events.
@@ -36,7 +56,7 @@ pub fn new_transcript_path_map() -> TranscriptPathMap {
 /// Channel receiver for AppEvent stream
 pub fn start_watching(
     paths: &Paths,
-    transcript_paths: TranscriptPathMap,
+    transcript_dir: Option<PathBuf>,
 ) -> WatcherResult<mpsc::Receiver<AppEvent>> {
     let (tx, rx) = mpsc::channel();
 
@@ -97,7 +117,9 @@ pub fn start_watching(
     });
 
     // Poll Claude Code transcript files for assistant reasoning text
-    start_transcript_polling(transcript_paths, tx);
+    if let Some(dir) = transcript_dir {
+        start_transcript_polling(dir, tx);
+    }
 
     // Keep watcher alive by moving it to a separate thread
     std::thread::spawn(move || {
@@ -111,22 +133,43 @@ pub fn start_watching(
 }
 
 /// Start polling Claude Code transcript files for assistant reasoning text.
-/// Runs on a 200ms interval, iterates transcript paths from the shared map,
-/// and emits AssistantText events for new content.
-pub fn start_transcript_polling(
-    transcript_paths: TranscriptPathMap,
-    tx: mpsc::Sender<AppEvent>,
-) {
+/// Scans the transcript directory every 500ms for recently modified .jsonl files,
+/// tails new content, and emits AssistantText events.
+/// Discovers subagent transcripts automatically (each gets its own .jsonl file).
+fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
         let mut tail_state = TailState::new();
+        let mut known_files: BTreeMap<PathBuf, std::time::SystemTime> = BTreeMap::new();
+        let mut scan_counter: u32 = 0;
+
         loop {
             std::thread::sleep(Duration::from_millis(200));
-            let paths_snapshot: Vec<(String, PathBuf)> = match transcript_paths.lock() {
-                Ok(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                Err(_) => continue,
-            };
+            scan_counter += 1;
 
-            for (session_id, path) in &paths_snapshot {
+            // Rescan directory every ~2s (10 iterations) to discover new files
+            if scan_counter % 10 == 1 {
+                if let Ok(entries) = std::fs::read_dir(&transcript_dir) {
+                    let cutoff = std::time::SystemTime::now()
+                        - Duration::from_secs(3600);
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                            continue;
+                        }
+                        let modified = entry
+                            .metadata()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        if modified > cutoff {
+                            known_files.entry(path).or_insert(modified);
+                        }
+                    }
+                }
+            }
+
+            // Tail known files for new content
+            for (path, _) in &known_files {
                 if !path.exists() {
                     continue;
                 }
@@ -135,9 +178,22 @@ pub fn start_transcript_polling(
                     _ => continue,
                 };
 
+                let session_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+
                 let events =
                     parsers::parse_claude_transcript_incremental(&new_content, session_id);
                 for event in events {
+                    let _ = tx.send(AppEvent::HookEventReceived(event));
+                }
+
+                // Also parse agent_progress entries (parent transcripts contain
+                // tool calls with agentId for proper multi-agent attribution)
+                let progress_events =
+                    parsers::parse_agent_progress_tool_calls(&new_content, session_id);
+                for event in progress_events {
                     let _ = tx.send(AppEvent::HookEventReceived(event));
                 }
             }
@@ -286,6 +342,31 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     }
 }
 
+/// Enrich SessionStart event with transcript_path if not already present.
+/// Performs filesystem I/O to derive and verify the transcript path.
+fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::model::HookEvent {
+    // Skip if transcript_path already provided
+    if event.raw.get("transcript_path").is_some() {
+        return event;
+    }
+
+    // Extract cwd and session_id from the event
+    let cwd = event.raw.get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let session_id = event.session_id.as_deref().unwrap_or("");
+
+    // Derive transcript path (I/O happens here, in the shell)
+    if let Some(transcript_path) = derive_transcript_path(cwd, session_id) {
+        // Add to raw JSON so update() can access it
+        if let serde_json::Value::Object(ref mut map) = event.raw {
+            map.insert("transcript_path".to_string(), serde_json::Value::String(transcript_path));
+        }
+    }
+
+    event
+}
+
 /// Handle hook events file update incrementally via TailState.
 /// Only reads new content since last read, avoiding duplicate event processing.
 fn handle_events_incremental(
@@ -320,7 +401,13 @@ fn handle_events_incremental(
     match parsers::parse_hook_events(&new_content) {
         Ok(events) => {
             for event in events {
-                let _ = tx.send(AppEvent::HookEventReceived(event));
+                // Enrich SessionStart events with transcript_path (I/O belongs in shell)
+                let enriched_event = if matches!(event.kind, crate::model::HookEventKind::SessionStart) {
+                    enrich_session_start_event(event)
+                } else {
+                    event
+                };
+                let _ = tx.send(AppEvent::HookEventReceived(enriched_event));
             }
         }
         Err(e) => {

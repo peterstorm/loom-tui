@@ -28,21 +28,38 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         }
 
         AppEvent::HookEventReceived(event) => {
-            // Derive agent lifecycle and tool calls from hook events.
-            // Only attribute orphan events to an agent if they share the same session_id,
-            // so direct tool calls from the main process don't bleed into subagent activity.
+            let is_assistant_text = matches!(event.kind, HookEventKind::AssistantText { .. });
             let event_session = event.session_id.as_deref();
-            let agent_id = event.agent_id.clone().or_else(|| {
-                state
-                    .agents
-                    .iter()
-                    .filter(|(_, a)| {
-                        a.finished_at.is_none()
-                            && a.session_id.as_deref() == event_session
-                    })
-                    .max_by_key(|(_, a)| a.started_at)
-                    .map(|(id, _)| id.clone())
-            });
+
+            // Attribution logic:
+            // - Hook events (tool use etc.): match by session_id (agents store parent session_id)
+            // - AssistantText: ONLY use transcript_agent_map. Don't use session_id matching
+            //   because the main transcript shares the parent session_id with subagents,
+            //   which would incorrectly attribute the main session's reasoning to subagents.
+            let agent_id = event.agent_id.clone()
+                .or_else(|| {
+                    event_session.and_then(|sid| state.transcript_agent_map.get(sid).cloned())
+                })
+                .or_else(|| {
+                    if is_assistant_text {
+                        return None; // skip session_id matching for transcript text
+                    }
+                    let matches: Vec<_> = state
+                        .agents
+                        .iter()
+                        .filter(|(_, a)| {
+                            a.finished_at.is_none()
+                                && a.session_id.as_deref() == event_session
+                        })
+                        .collect();
+
+                    // Only attribute if exactly ONE agent matches (avoids wrong-agent attribution)
+                    if matches.len() == 1 {
+                        Some(matches[0].0.clone())
+                    } else {
+                        None
+                    }
+                });
 
             match &event.kind {
                 HookEventKind::SubagentStart {
@@ -59,10 +76,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                             .agents
                             .entry(id.clone())
                             .and_modify(|a| {
+                                // Clear finished state on restart
+                                a.finished_at = None;
+                                a.started_at = event.timestamp;
                                 if a.agent_type.is_none() {
                                     a.agent_type = resolved_type.clone();
                                 }
-                                if a.task_description.is_none() {
+                                // Update task_description on restart (may have changed)
+                                if desc.is_some() {
                                     a.task_description = desc.clone();
                                 }
                             })
@@ -74,6 +95,12 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 a
                             });
                         agents_changed = true;
+
+                        // Populate transcript_agent_map for subagent transcript attribution
+                        // The agent's session_id (from hook event) is its TRANSCRIPT session_id
+                        if let Some(ref sid) = event.session_id {
+                            state.transcript_agent_map.insert(sid.clone(), id.clone());
+                        }
 
                         // Increment per-session agent count
                         if is_new {
@@ -138,10 +165,10 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         .map(String::from)
                         .unwrap_or_else(|| state.project_path.clone());
 
+                    // Transcript path is pre-computed in the imperative shell (watcher)
                     let transcript_path = event.raw.get("transcript_path")
                         .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(|| derive_transcript_path(&project_path, &session_id));
+                        .map(String::from);
 
                     let mut meta = SessionMeta::new(
                         session_id.clone(),
@@ -176,10 +203,11 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 enriched.agent_id = agent_id;
             }
 
-            // Increment per-session event count + backfill project_path from cwd
+            // Increment per-session event count + update last_event_at + backfill project_path
             if let Some(ref sid) = enriched.session_id {
                 if let Some(meta) = state.active_sessions.get_mut(sid) {
                     meta.event_count += 1;
+                    meta.last_event_at = Some(enriched.timestamp);
                     // Backfill project_path from cwd if still default
                     if meta.project_path == state.project_path || meta.project_path.is_empty() {
                         if let Some(cwd) = enriched.raw.get("cwd").and_then(|v| v.as_str()) {
@@ -215,8 +243,30 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             handle_key(state, key);
         }
 
-        AppEvent::Tick => {
-            // Elapsed time computed in view from started_at
+        AppEvent::Tick(now) => {
+            // Expire stale sessions (no event received in 5 minutes)
+            let cutoff = now - chrono::Duration::minutes(5);
+            let stale_ids: Vec<String> = state
+                .active_sessions
+                .iter()
+                .filter(|(_, meta)| {
+                    meta.last_event_at
+                        .map(|t| t < cutoff)
+                        .unwrap_or(meta.timestamp < cutoff)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in stale_ids {
+                if let Some(mut meta) = state.active_sessions.remove(&id) {
+                    meta.status = SessionStatus::Cancelled;
+                    let dur = (now - meta.timestamp).to_std().unwrap_or_default();
+                    meta.duration = Some(dur);
+                    let archive = session::build_archive(state, meta.clone());
+                    let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
+                        .with_data(archive);
+                    state.sessions.insert(0, archived);
+                }
+            }
         }
 
         AppEvent::ParseError { source, error } => {
@@ -262,23 +312,6 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
     if agents_changed {
         state.recompute_sorted_keys();
-    }
-}
-
-/// Derive transcript path from cwd + session_id when not provided by hook.
-/// Claude Code stores transcripts at ~/.claude/projects/{project_hash}/{session_id}.jsonl
-/// where project_hash is the cwd with `/` replaced by `-`.
-fn derive_transcript_path(cwd: &str, session_id: &str) -> Option<String> {
-    if cwd.is_empty() || session_id.is_empty() {
-        return None;
-    }
-    let project_hash = cwd.replace('/', "-");
-    let home = std::env::var("HOME").ok()?;
-    let path = format!("{}/.claude/projects/{}/{}.jsonl", home, project_hash, session_id);
-    if std::path::Path::new(&path).exists() {
-        Some(path)
-    } else {
-        None
     }
 }
 
@@ -432,7 +465,7 @@ mod tests {
     fn tick_event_is_noop() {
         let mut state = AppState::new();
         let initial_len = state.events.len();
-        update(&mut state, AppEvent::Tick);
+        update(&mut state, AppEvent::Tick(Utc::now()));
 
         assert_eq!(state.events.len(), initial_len);
     }
@@ -690,7 +723,10 @@ mod tests {
     }
 
     #[test]
-    fn hook_tool_use_attributed_to_most_recent_agent() {
+    fn hook_tool_use_unattributed_with_multiple_agents() {
+        // When multiple agents share a session and tool event has no agent_id,
+        // we don't attribute (avoids wrong-agent attribution). Transcript-sourced
+        // events with explicit agent_id will fill the gap.
         let mut state = AppState::new();
         let t1 = Utc::now();
         let t2 = t1 + chrono::Duration::seconds(1);
@@ -702,6 +738,29 @@ mod tests {
             Utc::now(),
             HookEventKind::pre_tool_use("Bash".into(), "cargo test".into()),
         );
+
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+        update(&mut state, AppEvent::HookEventReceived(tool));
+
+        // Neither agent gets the tool event (ambiguous attribution)
+        assert_eq!(state.agents.get("a01").unwrap().messages.len(), 0);
+        assert_eq!(state.agents.get("a02").unwrap().messages.len(), 0);
+    }
+
+    #[test]
+    fn hook_tool_use_with_explicit_agent_id_attributed_correctly() {
+        // Transcript-sourced events carry explicit agent_id, bypassing fallback
+        let mut state = AppState::new();
+        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01".into());
+        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a02".into());
+        let tool = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Read".into(), "file.rs".into()),
+        )
+        .with_agent("a02".into()); // explicit from transcript
 
         update(&mut state, AppEvent::HookEventReceived(s1));
         update(&mut state, AppEvent::HookEventReceived(s2));

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -29,6 +29,28 @@ pub struct SessionMeta {
     pub failed_tasks: Vec<String>,
     #[serde(default)]
     pub transcript_path: Option<String>,
+    /// Last time an event was received for this session (for stale session cleanup)
+    #[serde(skip)]
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+impl PartialEq for SessionMeta {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.timestamp == other.timestamp
+            && self.duration == other.duration
+            && self.status == other.status
+            && self.agent_count == other.agent_count
+            && self.task_count == other.task_count
+            && self.event_count == other.event_count
+            && self.project_path == other.project_path
+            && self.git_branch == other.git_branch
+            && self.loom_plan_id == other.loom_plan_id
+            && self.wave_count == other.wave_count
+            && self.failed_tasks == other.failed_tasks
+            && self.transcript_path == other.transcript_path
+        // last_event_at intentionally excluded (runtime-only, not serialized)
+    }
 }
 
 impl SessionMeta {
@@ -47,6 +69,7 @@ impl SessionMeta {
             wave_count: None,
             failed_tasks: Vec::new(),
             transcript_path: None,
+            last_event_at: Some(timestamp),
         }
     }
 

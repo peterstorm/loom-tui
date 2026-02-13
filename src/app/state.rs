@@ -73,6 +73,11 @@ pub struct AppState {
 
     /// Whether agent keys need re-sorting
     pub agent_keys_dirty: bool,
+
+    /// Maps transcript session_id → agent_id for subagent transcript attribution.
+    /// Subagent transcripts have their own session_id (different from the parent
+    /// session_id stored on Agent). This map links them.
+    pub transcript_agent_map: BTreeMap<String, String>,
 }
 
 /// View state variants
@@ -171,6 +176,7 @@ impl AppState {
             loading_session: None,
             cached_sorted_keys: Vec::new(),
             agent_keys_dirty: true,
+            transcript_agent_map: BTreeMap::new(),
         }
     }
 

@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -141,32 +141,11 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
 
         lines.push(Line::from(header_spans));
 
-        // Line 2: detail if present (no indent)
+        // Line 2+: detail if present, with markdown rendering
         if let Some(detail_text) = detail {
             let clean = clean_detail(&detail_text);
             if !clean.is_empty() {
-                // Diff-style coloring: - lines red, + lines green
-                let has_diff_lines = clean.contains("\n- ") || clean.contains("\n+ ");
-                if has_diff_lines {
-                    for line in clean.split('\n') {
-                        let color = if line.starts_with("- ") {
-                            Theme::ERROR
-                        } else if line.starts_with("+ ") {
-                            Theme::SUCCESS
-                        } else {
-                            Theme::MUTED_TEXT
-                        };
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(color),
-                        )));
-                    }
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        clean,
-                        Style::default().fg(Theme::MUTED_TEXT),
-                    )));
-                }
+                lines.extend(markdown_to_lines(&clean));
             }
         }
     }
@@ -191,6 +170,168 @@ pub fn clean_detail(s: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+/// Convert markdown-ish text to styled ratatui Lines.
+/// Handles: code blocks, inline code, bold, headers, diff lines, plain text.
+fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+
+    for line in text.split('\n') {
+        // Code block fences
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        if in_code_block {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", line),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::DIM),
+            )));
+            continue;
+        }
+
+        // Diff lines
+        if line.starts_with("- ") {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Theme::ERROR),
+            )));
+            continue;
+        }
+        if line.starts_with("+ ") {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Theme::SUCCESS),
+            )));
+            continue;
+        }
+
+        // Headers
+        if line.starts_with("### ") {
+            lines.push(Line::from(Span::styled(
+                line[4..].to_string(),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+        if line.starts_with("## ") {
+            lines.push(Line::from(Span::styled(
+                line[3..].to_string(),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+        if line.starts_with("# ") {
+            lines.push(Line::from(Span::styled(
+                line[2..].to_string(),
+                Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            continue;
+        }
+
+        // List items — render bullet, parse inline markdown for rest
+        if line.starts_with("- ") || line.starts_with("* ") {
+            let mut spans = vec![Span::styled(
+                "• ".to_string(),
+                Style::default().fg(Theme::MUTED_TEXT),
+            )];
+            spans.extend(parse_inline_markdown(&line[2..]));
+            lines.push(Line::from(spans));
+            continue;
+        }
+
+        // Regular line — parse inline markdown
+        lines.push(Line::from(parse_inline_markdown(line)));
+    }
+
+    lines
+}
+
+/// Parse inline markdown: **bold**, `code`, plain text.
+fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        // Find earliest marker
+        let bold_pos = remaining.find("**");
+        let code_pos = remaining.find('`');
+
+        let next = match (bold_pos, code_pos) {
+            (Some(b), Some(c)) => {
+                if b <= c { Some(("**", b)) } else { Some(("`", c)) }
+            }
+            (Some(b), None) => Some(("**", b)),
+            (None, Some(c)) => Some(("`", c)),
+            (None, None) => None,
+        };
+
+        match next {
+            Some(("**", pos)) => {
+                // Push text before marker
+                if pos > 0 {
+                    spans.push(Span::styled(
+                        remaining[..pos].to_string(),
+                        Style::default().fg(Theme::MUTED_TEXT),
+                    ));
+                }
+                remaining = &remaining[pos + 2..];
+                // Find closing **
+                if let Some(end) = remaining.find("**") {
+                    spans.push(Span::styled(
+                        remaining[..end].to_string(),
+                        Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+                    ));
+                    remaining = &remaining[end + 2..];
+                } else {
+                    // No closing ** — emit as plain
+                    spans.push(Span::styled(
+                        format!("**{}", remaining),
+                        Style::default().fg(Theme::MUTED_TEXT),
+                    ));
+                    remaining = "";
+                }
+            }
+            Some(("`", pos)) => {
+                if pos > 0 {
+                    spans.push(Span::styled(
+                        remaining[..pos].to_string(),
+                        Style::default().fg(Theme::MUTED_TEXT),
+                    ));
+                }
+                remaining = &remaining[pos + 1..];
+                if let Some(end) = remaining.find('`') {
+                    spans.push(Span::styled(
+                        remaining[..end].to_string(),
+                        Style::default().fg(Theme::ACCENT),
+                    ));
+                    remaining = &remaining[end + 1..];
+                } else {
+                    spans.push(Span::styled(
+                        format!("`{}", remaining),
+                        Style::default().fg(Theme::MUTED_TEXT),
+                    ));
+                    remaining = "";
+                }
+            }
+            _ => {
+                spans.push(Span::styled(
+                    remaining.to_string(),
+                    Style::default().fg(Theme::MUTED_TEXT),
+                ));
+                remaining = "";
+            }
+        }
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), Style::default().fg(Theme::MUTED_TEXT)));
+    }
+
+    spans
 }
 
 /// Shorten an agent ID to first 7 chars (like git short hash).
@@ -351,6 +492,65 @@ mod tests {
     fn short_id_truncates() {
         assert_eq!(short_id("a36f3e4abcdef"), "a36f3e4");
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn markdown_renders_code_blocks() {
+        let md = "before\n```rust\nfn main() {}\n```\nafter";
+        let lines = markdown_to_lines(md);
+        // before, indented code line, after = 3 lines (fences stripped)
+        assert_eq!(lines.len(), 3);
+        let code_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(code_text.contains("fn main()"));
+    }
+
+    #[test]
+    fn markdown_renders_inline_code() {
+        let lines = markdown_to_lines("use `foo` here");
+        let spans = &lines[0].spans;
+        assert!(spans.len() >= 3); // "use " + "foo" + " here"
+        assert_eq!(spans[1].content.as_ref(), "foo");
+        assert_eq!(spans[1].style.fg, Some(Theme::ACCENT));
+    }
+
+    #[test]
+    fn markdown_renders_bold() {
+        let lines = markdown_to_lines("this is **bold** text");
+        let spans = &lines[0].spans;
+        let bold_span = spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
+        assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn markdown_renders_headers() {
+        let lines = markdown_to_lines("# Title\n## Sub\ntext");
+        assert_eq!(lines.len(), 3);
+        let title_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(title_text, "Title");
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn markdown_renders_diff_lines() {
+        let lines = markdown_to_lines("- removed\n+ added");
+        assert_eq!(lines[0].spans[0].style.fg, Some(Theme::ERROR));
+        assert_eq!(lines[1].spans[0].style.fg, Some(Theme::SUCCESS));
+    }
+
+    #[test]
+    fn markdown_renders_list_items() {
+        let lines = markdown_to_lines("* item one\n* item two");
+        assert_eq!(lines.len(), 2);
+        let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(first.starts_with("• "));
+    }
+
+    #[test]
+    fn markdown_plain_text_unchanged() {
+        let lines = markdown_to_lines("just plain text");
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "just plain text");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use chrono::Utc;
 use color_eyre::eyre::Result;
 use crossterm::{
     event::{self, Event},
@@ -14,7 +15,7 @@ use loom_tui::{
     watcher,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 
@@ -46,14 +47,11 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Shared map: session_id → transcript_path (updated by main loop, read by poller)
-    let transcript_paths = watcher::new_transcript_path_map();
-
-    // Seed with most recent transcript for this project (catches already-running sessions)
-    seed_transcript_paths(&project_root, &transcript_paths);
+    // Resolve Claude Code transcript directory for this project
+    let transcript_dir = watcher::transcript_dir_for_project(&project_root);
 
     // Start file watchers (returns channel for receiving events)
-    let watcher_rx = watcher::start_watching(&paths, transcript_paths.clone())
+    let watcher_rx = watcher::start_watching(&paths, transcript_dir)
         .map_err(|e| color_eyre::eyre::eyre!("Failed to start file watcher: {}", e))?;
 
     // Main event loop (Elm Architecture)
@@ -67,7 +65,6 @@ fn main() -> Result<()> {
         &project_root,
         tick_rate,
         &mut last_tick,
-        &transcript_paths,
     );
 
     // Terminal cleanup (always execute even if event loop errored)
@@ -88,7 +85,6 @@ fn run_event_loop(
     project_root: &PathBuf,
     tick_rate: Duration,
     last_tick: &mut Instant,
-    transcript_paths: &watcher::TranscriptPathMap,
 ) -> Result<()> {
     // Channel for background session loads
     let (load_tx, load_rx) = std::sync::mpsc::channel::<AppEvent>();
@@ -130,16 +126,6 @@ fn run_event_loop(
             update(state, event);
         }
 
-        // Sync active session transcript paths to watcher polling thread
-        if let Ok(mut map) = transcript_paths.lock() {
-            map.clear();
-            for (sid, meta) in &state.active_sessions {
-                if let Some(ref tp) = meta.transcript_path {
-                    map.insert(sid.clone(), std::path::PathBuf::from(tp));
-                }
-            }
-        }
-
         // Drain background session load results
         while let Ok(event) = load_rx.try_recv() {
             update(state, event);
@@ -172,7 +158,7 @@ fn run_event_loop(
 
         // Tick event
         if last_tick.elapsed() >= tick_rate {
-            update(state, AppEvent::Tick);
+            update(state, AppEvent::Tick(Utc::now()));
             *last_tick = Instant::now();
         }
 
@@ -183,49 +169,6 @@ fn run_event_loop(
     }
 
     Ok(())
-}
-
-/// Seed the transcript path map with recently modified transcripts for this project.
-/// Finds ~/.claude/projects/{project_hash}/*.jsonl modified in the last hour.
-/// This catches sessions that started before the TUI launched.
-fn seed_transcript_paths(project_root: &Path, transcript_paths: &watcher::TranscriptPathMap) {
-    let project_hash = project_root.display().to_string().replace('/', "-");
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let transcripts_dir = PathBuf::from(format!("{}/.claude/projects/{}", home, project_hash));
-    let entries = match std::fs::read_dir(&transcripts_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let one_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
-
-    let mut recent: Vec<(String, PathBuf, std::time::SystemTime)> = entries
-        .flatten()
-        .filter(|e| {
-            e.path().extension().and_then(|s| s.to_str()) == Some("jsonl")
-        })
-        .filter_map(|e| {
-            let modified = e.metadata().ok()?.modified().ok()?;
-            if modified > one_hour_ago {
-                let session_id = e.path().file_stem()?.to_str()?.to_string();
-                Some((session_id, e.path(), modified))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Most recently modified first
-    recent.sort_by(|a, b| b.2.cmp(&a.2));
-
-    if let Ok(mut map) = transcript_paths.lock() {
-        for (session_id, path, _) in recent.into_iter().take(5) {
-            map.insert(session_id, path);
-        }
-    }
 }
 
 #[cfg(test)]

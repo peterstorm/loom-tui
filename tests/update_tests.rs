@@ -246,7 +246,7 @@ fn tick_event_is_passive() {
     ));
 
     let original_len = state.events.len();
-    update(&mut state, AppEvent::Tick);
+    update(&mut state, AppEvent::Tick(Utc::now()));
 
     assert_eq!(state.events.len(), original_len);
 }
@@ -551,7 +551,7 @@ fn property_update_never_panics() {
             source: "test".into(),
             error: "error".into(),
         },
-        AppEvent::Tick,
+        AppEvent::Tick(Utc::now()),
         AppEvent::Key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Char('x'),
         )),

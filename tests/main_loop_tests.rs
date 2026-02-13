@@ -1,3 +1,4 @@
+use chrono::Utc;
 use loom_tui::{
     app::{update, AppState, HookStatus, ViewState},
     event::AppEvent,
@@ -37,7 +38,7 @@ fn event_loop_tick_is_passive() {
     let mut state = AppState::new();
     let initial_events_len = state.events.len();
 
-    update(&mut state, AppEvent::Tick);
+    update(&mut state, AppEvent::Tick(Utc::now()));
 
     assert_eq!(state.events.len(), initial_events_len);
     assert!(!state.should_quit);
@@ -106,7 +107,7 @@ fn event_loop_preserves_state_between_updates() {
     let graph = TaskGraph::empty();
     update(&mut state, AppEvent::TaskGraphUpdated(graph));
 
-    update(&mut state, AppEvent::Tick);
+    update(&mut state, AppEvent::Tick(Utc::now()));
 
     assert!(state.task_graph.is_some());
 }

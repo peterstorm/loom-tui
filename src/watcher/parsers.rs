@@ -171,6 +171,140 @@ pub fn extract_active_agent_ids(paths: &[&Path]) -> Vec<String> {
         .collect()
 }
 
+/// Parse Claude Code transcript JSONL incrementally, extracting agent_progress tool calls.
+/// These entries exist in the PARENT transcript and contain `agentId` per tool call,
+/// solving the attribution problem when multiple subagents run in parallel.
+///
+/// # Functional Core
+/// Pure function — extracts PreToolUse events with agent_id from agent_progress entries.
+pub fn parse_agent_progress_tool_calls(
+    content: &str,
+    session_id: &str,
+) -> Vec<HookEvent> {
+    let mut events = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let entry: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Only process agent_progress entries
+        if entry.get("type").and_then(|v| v.as_str()) != Some("progress") {
+            continue;
+        }
+        let data = match entry.get("data") {
+            Some(d) => d,
+            None => continue,
+        };
+        if data.get("type").and_then(|v| v.as_str()) != Some("agent_progress") {
+            continue;
+        }
+
+        let agent_id = match data.get("agentId").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // Extract timestamp
+        let timestamp: DateTime<Utc> = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .or_else(|| {
+                data.get("message")
+                    .and_then(|m| m.get("timestamp"))
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+            })
+            .unwrap_or_else(Utc::now);
+
+        // Look for tool_use blocks in data.message.message.content[]
+        let content_blocks = match data
+            .get("message")
+            .and_then(|m| m.get("message"))
+            .and_then(|m| m.get("content"))
+        {
+            Some(Value::Array(blocks)) => blocks,
+            _ => continue,
+        };
+
+        for block in content_blocks {
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+
+            let tool_name = block
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let input = block.get("input").cloned().unwrap_or(Value::Null);
+            let input_summary = extract_tool_input_summary(&tool_name, &input);
+
+            let event = HookEvent::new(
+                timestamp,
+                HookEventKind::pre_tool_use(tool_name, input_summary),
+            )
+            .with_session(session_id.to_string())
+            .with_agent(agent_id.to_string());
+
+            events.push(event);
+        }
+    }
+
+    events
+}
+
+/// Extract a human-readable summary from tool input JSON (mirrors send_event.sh logic).
+fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
+    let summary = match tool_name {
+        "Read" | "Glob" | "Grep" => input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .or_else(|| input.get("pattern"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Edit" | "Write" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Bash" => input
+            .get("description")
+            .or_else(|| input.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Task" => input
+            .get("description")
+            .or_else(|| input.get("prompt"))
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 80 { format!("{}...", &s[..80]) } else { s.to_string() })
+            .unwrap_or_default(),
+        _ => input
+            .get("file_path")
+            .or_else(|| input.get("command"))
+            .or_else(|| input.get("pattern"))
+            .or_else(|| input.get("query"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    };
+    if summary.len() > 500 {
+        format!("{}...", &summary[..500])
+    } else {
+        summary
+    }
+}
+
 /// Parse Claude Code transcript JSONL incrementally, extracting assistant text blocks.
 ///
 /// # Functional Core
@@ -603,5 +737,61 @@ invalid
             }
             _ => panic!("Expected Failed status"),
         }
+    }
+
+    #[test]
+    fn test_parse_agent_progress_extracts_tool_calls() {
+        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","agentId":"a01","message":{"timestamp":"2026-02-12T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/foo.rs"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
+
+        let events = parse_agent_progress_tool_calls(jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].agent_id.as_deref(), Some("a01"));
+        assert_eq!(events[0].session_id.as_deref(), Some("s1"));
+        match &events[0].kind {
+            HookEventKind::PreToolUse { tool_name, input_summary } => {
+                assert_eq!(tool_name, "Read");
+                assert_eq!(input_summary, "/tmp/foo.rs");
+            }
+            _ => panic!("Expected PreToolUse"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_progress_skips_non_progress() {
+        let jsonl = r#"{"type":"assistant","data":{},"timestamp":"2026-02-12T10:00:00Z"}"#;
+        let events = parse_agent_progress_tool_calls(jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_agent_progress_skips_no_agent_id() {
+        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","message":{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
+        let events = parse_agent_progress_tool_calls(jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_agent_progress_multiple_tools_in_one_entry() {
+        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","agentId":"a02","message":{"timestamp":"2026-02-12T10:00:00Z","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a.rs"}},{"type":"tool_use","name":"Read","input":{"file_path":"b.rs"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
+
+        let events = parse_agent_progress_tool_calls(jsonl, "s1");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.agent_id.as_deref() == Some("a02")));
+    }
+
+    #[test]
+    fn test_extract_tool_input_summary() {
+        assert_eq!(
+            extract_tool_input_summary("Read", &serde_json::json!({"file_path": "/tmp/foo"})),
+            "/tmp/foo"
+        );
+        assert_eq!(
+            extract_tool_input_summary("Bash", &serde_json::json!({"command": "ls", "description": "list files"})),
+            "list files"
+        );
+        assert_eq!(
+            extract_tool_input_summary("Edit", &serde_json::json!({"file_path": "/tmp/bar.rs"})),
+            "/tmp/bar.rs"
+        );
     }
 }

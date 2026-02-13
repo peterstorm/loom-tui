@@ -73,9 +73,10 @@ impl Task {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
+    #[default]
     Pending,
     Running,
     Implemented,
@@ -86,27 +87,16 @@ pub enum TaskStatus {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReviewStatus {
+    #[default]
     Pending,
     Passed,
     Blocked {
         critical: Vec<String>,
         advisory: Vec<String>,
     },
-}
-
-impl Default for TaskStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
-impl Default for ReviewStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[cfg(test)]

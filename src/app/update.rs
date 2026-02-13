@@ -269,7 +269,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             }
         }
 
-        AppEvent::ParseError { source, error } => {
+        AppEvent::Error { source, error } => {
             if state.errors.len() >= 100 {
                 state.errors.pop_front();
             }
@@ -479,9 +479,11 @@ mod tests {
 
         update(
             &mut state,
-            AppEvent::ParseError {
+            AppEvent::Error {
                 source: "test".into(),
-                error: "newest error".into(),
+                error: crate::error::WatcherError::Parse(
+                    crate::error::ParseError::Json("newest error".into())
+                ).into(),
             },
         );
 
@@ -494,14 +496,16 @@ mod tests {
         let mut state = AppState::new();
         update(
             &mut state,
-            AppEvent::ParseError {
+            AppEvent::Error {
                 source: "file.json".into(),
-                error: "invalid JSON".into(),
+                error: crate::error::WatcherError::Parse(
+                    crate::error::ParseError::Json("invalid JSON".into())
+                ).into(),
             },
         );
 
         assert_eq!(state.errors.len(), 1);
-        assert_eq!(state.errors.front().unwrap(), "file.json: invalid JSON");
+        assert_eq!(state.errors.front().unwrap(), "file.json: parse: JSON parse: invalid JSON");
     }
 
     #[test]
@@ -596,9 +600,11 @@ mod tests {
         for i in 0..200 {
             update(
                 &mut state,
-                AppEvent::ParseError {
+                AppEvent::Error {
                     source: "test".into(),
-                    error: format!("error {}", i),
+                    error: crate::error::WatcherError::Parse(
+                        crate::error::ParseError::Json(format!("error {}", i))
+                    ).into(),
                 },
             );
         }

@@ -82,7 +82,7 @@ fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
     watcher_rx: &std::sync::mpsc::Receiver<AppEvent>,
-    project_root: &PathBuf,
+    project_root: &std::path::Path,
     tick_rate: Duration,
     last_tick: &mut Instant,
 ) -> Result<()> {
@@ -106,15 +106,14 @@ fn run_event_loop(
                 update(state, AppEvent::Key(key));
 
                 // Handle hook installation side effect
-                if matches!(key.code, crossterm::event::KeyCode::Char('i')) {
-                    if matches!(state.hook_status, HookStatus::Missing) {
-                        match install_hook(project_root) {
-                            Ok(()) => {
-                                state.hook_status = HookStatus::Installed;
-                            }
-                            Err(e) => {
-                                state.hook_status = HookStatus::InstallFailed(e);
-                            }
+                if matches!(key.code, crossterm::event::KeyCode::Char('i'))
+                    && matches!(state.hook_status, HookStatus::Missing) {
+                    match install_hook(project_root) {
+                        Ok(()) => {
+                            state.hook_status = HookStatus::Installed;
+                        }
+                        Err(e) => {
+                            state.hook_status = HookStatus::InstallFailed(e);
                         }
                     }
                 }
@@ -142,13 +141,17 @@ fn run_event_loop(
                     std::thread::spawn(move || {
                         match session::load_session(&path) {
                             Ok(archive) => {
-                                let _ = tx.send(AppEvent::SessionLoaded(archive));
+                                if tx.send(AppEvent::SessionLoaded(archive)).is_err() {
+                                    eprintln!("Failed to send SessionLoaded event: channel closed");
+                                }
                             }
                             Err(e) => {
-                                let _ = tx.send(AppEvent::ParseError {
+                                if tx.send(AppEvent::Error {
                                     source: path.display().to_string(),
-                                    error: e,
-                                });
+                                    error: e.into(),
+                                }).is_err() {
+                                    eprintln!("Failed to send Error event: channel closed");
+                                }
                             }
                         }
                     });

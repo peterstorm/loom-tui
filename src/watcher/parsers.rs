@@ -1,3 +1,4 @@
+use crate::error::ParseError;
 use crate::model::{AgentMessage, HookEvent, HookEventKind, Task, TaskGraph, Wave};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -10,7 +11,7 @@ use std::path::Path;
 ///
 /// # Functional Core
 /// Pure function - no I/O, just string parsing.
-pub fn parse_task_graph(content: &str) -> Result<TaskGraph, String> {
+pub fn parse_task_graph(content: &str) -> Result<TaskGraph, ParseError> {
     if let Ok(graph) = serde_json::from_str::<TaskGraph>(content) {
         return Ok(graph);
     }
@@ -44,9 +45,9 @@ fn default_wave() -> u32 {
     1
 }
 
-fn parse_loom_format(content: &str) -> Result<TaskGraph, String> {
+fn parse_loom_format(content: &str) -> Result<TaskGraph, ParseError> {
     let loom: LoomFormat =
-        serde_json::from_str(content).map_err(|e| format!("JSON parse error: {}", e))?;
+        serde_json::from_str(content).map_err(|e| ParseError::Json(e.to_string()))?;
 
     let mut wave_map: BTreeMap<u32, Vec<Task>> = BTreeMap::new();
     for lt in loom.tasks {
@@ -77,9 +78,9 @@ fn parse_loom_format(content: &str) -> Result<TaskGraph, String> {
 /// Each line is a separate JSON object representing an AgentMessage.
 ///
 /// # Errors
-/// Returns error string if any line is malformed JSON.
+/// Returns ParseError if any line is malformed JSON.
 /// Skips empty lines gracefully.
-pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, String> {
+pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, ParseError> {
     let mut messages = Vec::new();
 
     for (line_num, line) in content.lines().enumerate() {
@@ -91,11 +92,11 @@ pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, String> {
         match serde_json::from_str::<AgentMessage>(trimmed) {
             Ok(msg) => messages.push(msg),
             Err(e) => {
-                return Err(format!(
-                    "Line {}: JSON parse error: {}",
+                return Err(ParseError::Json(format!(
+                    "Line {}: {}",
                     line_num + 1,
                     e
-                ));
+                )));
             }
         }
     }
@@ -110,9 +111,9 @@ pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, String> {
 /// Each line is a separate JSON object representing a HookEvent.
 ///
 /// # Errors
-/// Returns error string if any line is malformed JSON.
+/// Returns ParseError if any line is malformed JSON.
 /// Skips empty lines gracefully.
-pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, String> {
+pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, ParseError> {
     let mut events = Vec::new();
 
     for (line_num, line) in content.lines().enumerate() {
@@ -130,20 +131,20 @@ pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, String> {
                         events.push(event);
                     }
                     Err(e) => {
-                        return Err(format!(
-                            "Line {}: JSON parse error: {}",
+                        return Err(ParseError::Json(format!(
+                            "Line {}: {}",
                             line_num + 1,
                             e
-                        ));
+                        )));
                     }
                 }
             }
             Err(e) => {
-                return Err(format!(
-                    "Line {}: JSON parse error: {}",
+                return Err(ParseError::Json(format!(
+                    "Line {}: {}",
                     line_num + 1,
                     e
-                ));
+                )));
             }
         }
     }
@@ -422,7 +423,7 @@ mod tests {
         let invalid = "not json at all";
         let result = parse_task_graph(invalid);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("JSON parse error"));
+        assert!(result.unwrap_err().to_string().contains("JSON"));
     }
 
     #[test]
@@ -490,7 +491,7 @@ not valid json
 
         let result = parse_transcript(jsonl);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Line 2"));
+        assert!(result.unwrap_err().to_string().contains("Line 2"));
     }
 
     #[test]
@@ -522,7 +523,7 @@ invalid
 
         let result = parse_hook_events(jsonl);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Line 2"));
+        assert!(result.unwrap_err().to_string().contains("Line 2"));
     }
 
     #[test]

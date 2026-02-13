@@ -210,23 +210,23 @@ fn markdown_to_lines(text: &str) -> Vec<Line<'static>> {
         }
 
         // Headers
-        if line.starts_with("### ") {
+        if let Some(stripped) = line.strip_prefix("### ") {
             lines.push(Line::from(Span::styled(
-                line[4..].to_string(),
+                stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
             continue;
         }
-        if line.starts_with("## ") {
+        if let Some(stripped) = line.strip_prefix("## ") {
             lines.push(Line::from(Span::styled(
-                line[3..].to_string(),
+                stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
             continue;
         }
-        if line.starts_with("# ") {
+        if let Some(stripped) = line.strip_prefix("# ") {
             lines.push(Line::from(Span::styled(
-                line[2..].to_string(),
+                stripped.to_string(),
                 Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
             )));
             continue;

@@ -39,6 +39,10 @@ impl<'a> AgentsRef<'a> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn values(&self) -> Vec<&Agent> {
         match self {
             AgentsRef::Borrowed(m) => m.values().collect(),
@@ -74,6 +78,10 @@ impl<'a> EventsRef<'a> {
             EventsRef::Vec(v) => v.len(),
             EventsRef::Owned(v) => v.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn iter(&'a self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {

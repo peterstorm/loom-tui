@@ -132,7 +132,7 @@ fn test_parse_task_graph_malformed_json() {
     let invalid = "{ not valid json }";
     let result = parse_task_graph(invalid);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("JSON parse error"));
+    assert!(result.unwrap_err().to_string().contains("JSON"));
 }
 
 #[test]
@@ -201,7 +201,7 @@ invalid json line
 
     let result = parse_transcript(jsonl);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Line 2"));
+    assert!(result.unwrap_err().to_string().contains("Line 2"));
 }
 
 #[test]
@@ -296,7 +296,7 @@ not valid json"#;
 
     let result = parse_hook_events(jsonl);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Line 2"));
+    assert!(result.unwrap_err().to_string().contains("Line 2"));
 }
 
 #[test]

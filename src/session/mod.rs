@@ -1,11 +1,11 @@
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
 
 use crate::app::AppState;
+use crate::error::SessionError;
 use crate::model::{SessionArchive, SessionMeta};
 
 // ============================================================================
@@ -20,9 +20,9 @@ use crate::model::{SessionArchive, SessionMeta};
 ///
 /// # Returns
 /// * `Ok(String)` - JSON string representation
-/// * `Err(String)` - Serialization error message
-pub fn serialize_session(archive: &SessionArchive) -> Result<String, String> {
-    serde_json::to_string_pretty(archive).map_err(|e| format!("serialize error: {}", e))
+/// * `Err(SessionError)` - Serialization error
+pub fn serialize_session(archive: &SessionArchive) -> Result<String, SessionError> {
+    serde_json::to_string_pretty(archive).map_err(SessionError::from)
 }
 
 /// Deserialize JSON string to session archive.
@@ -33,9 +33,9 @@ pub fn serialize_session(archive: &SessionArchive) -> Result<String, String> {
 ///
 /// # Returns
 /// * `Ok(SessionArchive)` - Parsed session archive
-/// * `Err(String)` - Deserialization error message
-pub fn deserialize_session(content: &str) -> Result<SessionArchive, String> {
-    serde_json::from_str(content).map_err(|e| format!("deserialize error: {}", e))
+/// * `Err(SessionError)` - Deserialization error
+pub fn deserialize_session(content: &str) -> Result<SessionArchive, SessionError> {
+    serde_json::from_str(content).map_err(SessionError::from)
 }
 
 /// Generate deterministic filename for session archive.
@@ -114,19 +114,20 @@ pub fn should_auto_save(last_save: Instant, now: Instant, interval_secs: u64) ->
 ///
 /// # Returns
 /// * `Ok(PathBuf)` - Path to saved file
-/// * `Err(String)` - I/O or serialization error
-pub fn save_session(path: &Path, archive: &SessionArchive) -> Result<PathBuf, String> {
+/// * `Err(SessionError)` - I/O or serialization error
+pub fn save_session(path: &Path, archive: &SessionArchive) -> Result<PathBuf, SessionError> {
     // Serialize (functional core)
     let content = serialize_session(archive)?;
 
     // Create parent directory if needed (I/O)
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create dir {}: {}", parent.display(), e))?;
+            .map_err(|e| SessionError::Io { path: parent.display().to_string(), source: e })?;
     }
 
     // Write to disk (I/O)
-    fs::write(path, content).map_err(|e| format!("failed to write {}: {}", path.display(), e))?;
+    fs::write(path, &content)
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })?;
 
     Ok(path.to_path_buf())
 }
@@ -139,11 +140,11 @@ pub fn save_session(path: &Path, archive: &SessionArchive) -> Result<PathBuf, St
 ///
 /// # Returns
 /// * `Ok(SessionArchive)` - Loaded session archive
-/// * `Err(String)` - I/O or deserialization error
-pub fn load_session(path: &Path) -> Result<SessionArchive, String> {
+/// * `Err(SessionError)` - I/O or deserialization error
+pub fn load_session(path: &Path) -> Result<SessionArchive, SessionError> {
     // Read from disk (I/O)
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+    let content = fs::read_to_string(path)
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })?;
 
     // Deserialize (functional core)
     deserialize_session(&content)
@@ -163,14 +164,14 @@ pub fn load_session(path: &Path) -> Result<SessionArchive, String> {
 ///
 /// # Returns
 /// * `Ok(Vec<SessionArchive>)` - Full archives sorted by timestamp (newest first)
-/// * `Err(String)` - I/O error reading directory
-pub fn list_sessions(dir: &Path) -> Result<Vec<SessionArchive>, String> {
+/// * `Err(SessionError)` - I/O error reading directory
+pub fn list_sessions(dir: &Path) -> Result<Vec<SessionArchive>, SessionError> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
 
     let entries = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read dir {}: {}", dir.display(), e))?;
+        .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
 
     let mut sessions = Vec::new();
 
@@ -205,13 +206,13 @@ struct MetaOnly {
 /// List session metas without deserializing full archives.
 /// Much faster than `list_sessions` — skips events/agents/task_graph.
 /// Returns `(path, meta)` tuples so full archive can be loaded later by path.
-pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, String> {
+pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, SessionError> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
 
     let entries = fs::read_dir(dir)
-        .map_err(|e| format!("failed to read dir {}: {}", dir.display(), e))?;
+        .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
 
     let mut metas = Vec::new();
 
@@ -250,15 +251,10 @@ pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, Str
 ///
 /// # Returns
 /// * `Ok(())` - File deleted successfully
-/// * `Err(String)` - I/O error
-pub fn delete_session(path: &Path) -> Result<(), String> {
-    fs::remove_file(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            format!("file not found: {}", path.display())
-        } else {
-            format!("failed to delete {}: {}", path.display(), e)
-        }
-    })
+/// * `Err(SessionError)` - I/O error
+pub fn delete_session(path: &Path) -> Result<(), SessionError> {
+    fs::remove_file(path)
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })
 }
 
 /// Auto-save tick: save session if interval elapsed.
@@ -338,7 +334,7 @@ mod tests {
     fn deserialize_invalid_json() {
         let result = deserialize_session("not valid json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("deserialize error"));
+        assert!(result.unwrap_err().to_string().contains("JSON"));
     }
 
     #[test]

@@ -256,16 +256,18 @@ fn parse_error_adds_formatted_message() {
     let mut state = AppState::new();
     update(
         &mut state,
-        AppEvent::ParseError {
+        AppEvent::Error {
             source: "task_graph.json".into(),
-            error: "unexpected token at line 5".into(),
+            error: loom_tui::error::WatcherError::Parse(
+                loom_tui::error::ParseError::Json("unexpected token at line 5".into())
+            ).into(),
         },
     );
 
     assert_eq!(state.errors.len(), 1);
     assert_eq!(
         state.errors.front().unwrap(),
-        "task_graph.json: unexpected token at line 5"
+        "task_graph.json: parse: JSON parse: unexpected token at line 5"
     );
 }
 
@@ -283,9 +285,11 @@ fn parse_error_evicts_oldest_at_capacity() {
     // Add one more
     update(
         &mut state,
-        AppEvent::ParseError {
+        AppEvent::Error {
             source: "file".into(),
-            error: "error 100".into(),
+            error: loom_tui::error::WatcherError::Parse(
+                loom_tui::error::ParseError::Json("error 100".into())
+            ).into(),
         },
     );
 
@@ -523,9 +527,11 @@ fn property_error_buffer_never_exceeds_100() {
     for i in 0..500 {
         update(
             &mut state,
-            AppEvent::ParseError {
+            AppEvent::Error {
                 source: "test".into(),
-                error: format!("error {}", i),
+                error: loom_tui::error::WatcherError::Parse(
+                    loom_tui::error::ParseError::Json(format!("error {}", i))
+                ).into(),
             },
         );
         assert!(state.errors.len() <= 100);
@@ -547,9 +553,11 @@ fn property_update_never_panics() {
             messages: vec![],
         },
         AppEvent::HookEventReceived(HookEvent::new(Utc::now(), HookEventKind::SessionStart)),
-        AppEvent::ParseError {
+        AppEvent::Error {
             source: "test".into(),
-            error: "error".into(),
+            error: loom_tui::error::WatcherError::Parse(
+                loom_tui::error::ParseError::Json("error".into())
+            ).into(),
         },
         AppEvent::Tick(Utc::now()),
         AppEvent::Key(crossterm::event::KeyEvent::from(

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use crossterm::event::KeyEvent;
 
+use crate::error::LoomError;
 use crate::model::{AgentMessage, HookEvent, SessionArchive, SessionMeta, TaskGraph};
 
 /// All events that can occur in the application.
@@ -33,8 +34,8 @@ pub enum AppEvent {
     /// Timer tick (for elapsed time updates, animations)
     Tick(DateTime<Utc>),
 
-    /// Parse error occurred (non-fatal)
-    ParseError { source: String, error: String },
+    /// Error occurred (non-fatal - parse, I/O, watcher, session)
+    Error { source: String, error: LoomError },
 
     /// Session loaded from archive
     SessionLoaded(SessionArchive),

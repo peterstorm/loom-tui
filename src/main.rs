@@ -146,11 +146,11 @@ fn run_event_loop(
                                 }
                             }
                             Err(e) => {
-                                if tx.send(AppEvent::ParseError {
+                                if tx.send(AppEvent::Error {
                                     source: path.display().to_string(),
-                                    error: e,
+                                    error: e.into(),
                                 }).is_err() {
-                                    eprintln!("Failed to send ParseError event: channel closed");
+                                    eprintln!("Failed to send Error event: channel closed");
                                 }
                             }
                         }

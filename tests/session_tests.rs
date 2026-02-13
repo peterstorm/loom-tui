@@ -55,7 +55,7 @@ fn load_nonexistent_file_returns_error() {
 
     let result = load_session(&path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("failed to read"));
+    assert!(result.unwrap_err().to_string().contains("I/O"));
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn load_corrupt_file_returns_error() {
 
     let result = load_session(&path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("deserialize error"));
+    assert!(result.unwrap_err().to_string().contains("JSON"));
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn delete_nonexistent_file_returns_error() {
 
     let result = delete_session(&path);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("file not found"));
+    assert!(result.unwrap_err().to_string().contains("I/O"));
 }
 
 #[test]

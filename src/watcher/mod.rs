@@ -4,6 +4,7 @@ mod tail;
 pub use parsers::*;
 pub use tail::TailState;
 
+use crate::error::WatcherError;
 use crate::event::AppEvent;
 use crate::paths::Paths;
 use crate::session;
@@ -14,7 +15,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 /// Result type for watcher operations
-pub type WatcherResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type WatcherResult<T> = Result<T, WatcherError>;
 
 
 /// Resolve the Claude Code transcript directory for a given project root.
@@ -239,9 +240,9 @@ fn load_existing_files(
         }
         Ok(_) => {}
         Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+            let _ = tx.send(AppEvent::Error {
                 source: "sessions".to_string(),
-                error: e,
+                error: e.into(),
             });
         }
     }
@@ -284,9 +285,9 @@ fn handle_watch_event(
             }
         }
         Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+            let _ = tx.send(AppEvent::Error {
                 source: "file_watcher".to_string(),
-                error: format!("Watch error: {}", e),
+                error: WatcherError::Notify(e.to_string()).into(),
             });
         }
     }
@@ -300,16 +301,16 @@ fn handle_task_graph_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
                 let _ = tx.send(AppEvent::TaskGraphUpdated(graph));
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::ParseError {
+                let _ = tx.send(AppEvent::Error {
                     source: path.display().to_string(),
-                    error: e,
+                    error: WatcherError::Parse(e).into(),
                 });
             }
         },
         Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+            let _ = tx.send(AppEvent::Error {
                 source: path.display().to_string(),
-                error: format!("Failed to read file: {}", e),
+                error: WatcherError::Io(e.to_string()).into(),
             });
         }
     }
@@ -331,16 +332,16 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
                 let _ = tx.send(AppEvent::TranscriptUpdated { agent_id, messages });
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::ParseError {
+                let _ = tx.send(AppEvent::Error {
                     source: path.display().to_string(),
-                    error: e,
+                    error: WatcherError::Parse(e).into(),
                 });
             }
         },
         Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+            let _ = tx.send(AppEvent::Error {
                 source: path.display().to_string(),
-                error: format!("Failed to read file: {}", e),
+                error: WatcherError::Io(e.to_string()).into(),
             });
         }
     }
@@ -382,17 +383,17 @@ fn handle_events_incremental(
         Ok(mut ts) => match ts.read_new_lines(path) {
             Ok(content) => content,
             Err(e) => {
-                let _ = tx.send(AppEvent::ParseError {
+                let _ = tx.send(AppEvent::Error {
                     source: path.display().to_string(),
-                    error: format!("Failed to read file: {}", e),
+                    error: WatcherError::Io(e.to_string()).into(),
                 });
                 return;
             }
         },
-        Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+        Err(_) => {
+            let _ = tx.send(AppEvent::Error {
                 source: "tail_state".to_string(),
-                error: format!("Lock poisoned: {}", e),
+                error: WatcherError::LockPoisoned.into(),
             });
             return;
         }
@@ -417,9 +418,9 @@ fn handle_events_incremental(
             }
         }
         Err(e) => {
-            let _ = tx.send(AppEvent::ParseError {
+            let _ = tx.send(AppEvent::Error {
                 source: path.display().to_string(),
-                error: e,
+                error: WatcherError::Parse(e).into(),
             });
         }
     }
@@ -489,11 +490,11 @@ mod tests {
 
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         match event {
-            AppEvent::ParseError { source, error } => {
+            AppEvent::Error { source, error } => {
                 assert!(source.contains("task_graph.json"));
-                assert!(error.contains("JSON"));
+                assert!(error.to_string().contains("JSON"));
             }
-            _ => panic!("Expected ParseError event"),
+            _ => panic!("Expected Error event"),
         }
     }
 

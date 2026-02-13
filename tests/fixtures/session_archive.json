@@ -1,0 +1,87 @@
+{
+  "meta": {
+    "id": "s20260211-095900",
+    "timestamp": "2026-02-11T09:59:00Z",
+    "duration": 1265000,
+    "status": "completed",
+    "agent_count": 2,
+    "task_count": 3,
+    "event_count": 12,
+    "project_path": "/home/user/dev/rust",
+    "git_branch": "main",
+    "loom_plan_id": "2026-02-11-loom-tui",
+    "wave_count": 2,
+    "failed_tasks": []
+  },
+  "task_graph": {
+    "waves": [
+      {
+        "number": 1,
+        "tasks": [
+          {
+            "id": "T1",
+            "description": "Create scaffold",
+            "status": "completed",
+            "review_status": "passed",
+            "files_modified": ["Cargo.toml"],
+            "tests_passed": true
+          },
+          {
+            "id": "T2",
+            "description": "Domain models",
+            "status": "completed",
+            "review_status": "passed",
+            "files_modified": ["src/model/task.rs"],
+            "tests_passed": true
+          }
+        ]
+      },
+      {
+        "number": 2,
+        "tasks": [
+          {
+            "id": "T3",
+            "description": "Update logic",
+            "status": "pending",
+            "review_status": "pending"
+          }
+        ]
+      }
+    ],
+    "total_tasks": 3,
+    "completed_tasks": 2
+  },
+  "events": [
+    {
+      "timestamp": "2026-02-11T09:59:00Z",
+      "event": "session_start",
+      "session_id": "s20260211-095900"
+    },
+    {
+      "timestamp": "2026-02-11T10:00:00Z",
+      "event": "subagent_start",
+      "agent_id": "a01",
+      "task_description": "Create scaffold"
+    },
+    {
+      "timestamp": "2026-02-11T10:05:00Z",
+      "event": "subagent_stop",
+      "agent_id": "a01"
+    }
+  ],
+  "agents": {
+    "a01": {
+      "id": "a01",
+      "task_id": "T1",
+      "started_at": "2026-02-11T10:00:00Z",
+      "finished_at": "2026-02-11T10:05:00Z",
+      "messages": []
+    },
+    "a02": {
+      "id": "a02",
+      "task_id": "T2",
+      "started_at": "2026-02-11T10:06:00Z",
+      "messages": []
+    }
+  }
+}

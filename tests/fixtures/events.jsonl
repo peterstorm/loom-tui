@@ -1,0 +1,12 @@
+{"timestamp":"2026-02-11T09:59:00Z","event":"session_start","session_id":"s20260211-095900"}
+{"timestamp":"2026-02-11T09:59:30Z","event":"subagent_start","agent_id":"a01","task_description":"Create project scaffold"}
+{"timestamp":"2026-02-11T10:00:00Z","event":"pre_tool_use","agent_id":"a01","tool_name":"Write","input_summary":"Cargo.toml"}
+{"timestamp":"2026-02-11T10:00:02Z","event":"post_tool_use","agent_id":"a01","tool_name":"Write","result_summary":"Success","duration_ms":150}
+{"timestamp":"2026-02-11T10:05:00Z","event":"subagent_stop","agent_id":"a01"}
+{"timestamp":"2026-02-11T10:05:30Z","event":"subagent_start","agent_id":"a02","task_description":"Implement domain models"}
+{"timestamp":"2026-02-11T10:06:00Z","event":"pre_tool_use","agent_id":"a02","tool_name":"Read","input_summary":"plan.md"}
+{"timestamp":"2026-02-11T10:06:01Z","event":"post_tool_use","agent_id":"a02","tool_name":"Read","result_summary":"Success","duration_ms":120}
+{"timestamp":"2026-02-11T10:10:00Z","event":"notification","message":"Wave 1 implementation started"}
+{"timestamp":"2026-02-11T10:15:00Z","event":"user_prompt_submit"}
+{"timestamp":"2026-02-11T10:20:00Z","event":"stop","reason":"User requested stop"}
+{"timestamp":"2026-02-11T10:20:05Z","event":"session_end","session_id":"s20260211-095900"}

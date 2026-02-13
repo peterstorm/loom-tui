@@ -974,4 +974,91 @@ mod tests {
 
         assert!(state.domain.agents.is_empty());
     }
+
+    // ============================================================================
+    // Stale Session Expiration Tests
+    // ============================================================================
+
+    #[test]
+    fn stale_session_expired_after_5_minutes() {
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Create session that's 6 minutes old
+        let old_time = now - chrono::Duration::minutes(6);
+        let mut meta = SessionMeta::new("s1", old_time, "/proj".to_string());
+        meta.last_event_at = Some(old_time);
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
+
+        // Tick should expire the stale session
+        update(&mut state, AppEvent::Tick(now));
+
+        assert!(state.domain.active_sessions.is_empty());
+        assert_eq!(state.domain.sessions.len(), 1);
+        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn active_session_with_recent_events_not_expired() {
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Create session with recent event (2 minutes ago)
+        let recent_time = now - chrono::Duration::minutes(2);
+        let mut meta = SessionMeta::new("s1", now - chrono::Duration::minutes(10), "/proj".to_string());
+        meta.last_event_at = Some(recent_time);
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
+
+        // Tick should NOT expire the session
+        update(&mut state, AppEvent::Tick(now));
+
+        assert_eq!(state.domain.active_sessions.len(), 1);
+        assert!(state.domain.sessions.is_empty());
+    }
+
+    #[test]
+    fn session_expiration_falls_back_to_timestamp_when_no_last_event() {
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Create session with old timestamp, no last_event_at
+        let old_time = now - chrono::Duration::minutes(6);
+        let meta = SessionMeta::new("s1", old_time, "/proj".to_string());
+        // last_event_at is None — should fall back to timestamp
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
+
+        // Tick should expire based on timestamp
+        update(&mut state, AppEvent::Tick(now));
+
+        assert!(state.domain.active_sessions.is_empty());
+        assert_eq!(state.domain.sessions.len(), 1);
+        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn expired_session_added_to_archived_list() {
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Pre-populate archived sessions
+        let old_archived = ArchivedSession::new(
+            SessionMeta::new("s_old", now - chrono::Duration::hours(1), "/proj".to_string()),
+            std::path::PathBuf::new(),
+        );
+        state.domain.sessions.push(old_archived);
+
+        // Create stale session
+        let stale_time = now - chrono::Duration::minutes(6);
+        let mut meta = SessionMeta::new("s_stale", stale_time, "/proj".to_string());
+        meta.last_event_at = Some(stale_time);
+        state.domain.active_sessions.insert(SessionId::new("s_stale"), meta);
+
+        // Tick expires stale session
+        update(&mut state, AppEvent::Tick(now));
+
+        // Archived list should have 2 sessions (stale inserted at front)
+        assert_eq!(state.domain.sessions.len(), 2);
+        assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s_stale");
+        assert_eq!(state.domain.sessions[1].meta.id.as_str(), "s_old");
+    }
 }

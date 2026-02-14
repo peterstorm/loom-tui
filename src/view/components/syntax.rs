@@ -19,8 +19,9 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 pub fn highlight_code_block(lines: &[&str], extension: &str) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
     let theme = best_theme();
+    let normalized = lang_to_extension(extension);
     let syntax = ss
-        .find_syntax_by_extension(extension)
+        .find_syntax_by_extension(&normalized)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let mut h = HighlightLines::new(syntax, theme);
 
@@ -42,8 +43,9 @@ pub fn highlight_code_block(lines: &[&str], extension: &str) -> Vec<Line<'static
 pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
     let theme = best_theme();
+    let normalized = lang_to_extension(extension);
     let syntax = ss
-        .find_syntax_by_extension(extension)
+        .find_syntax_by_extension(&normalized)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
     let mut h = HighlightLines::new(syntax, theme);
 
@@ -177,18 +179,26 @@ fn highlight_line_spans(
     // SyntaxSet::load_defaults_newlines requires lines to end with \n
     // for syntax regexes to match correctly.
     let line_nl = format!("{}\n", line);
-    h.highlight_line(&line_nl, ss)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(style, text)| {
-            let fg = style.foreground;
-            Span::styled(
-                text.trim_end_matches('\n').to_string(),
-                Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b)),
-            )
-        })
-        .filter(|span| !span.content.is_empty())
-        .collect()
+    match h.highlight_line(&line_nl, ss) {
+        Ok(ranges) => ranges
+            .into_iter()
+            .map(|(style, text)| {
+                let fg = style.foreground;
+                Span::styled(
+                    text.trim_end_matches('\n').to_string(),
+                    Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b)),
+                )
+            })
+            .filter(|span| !span.content.is_empty())
+            .collect(),
+        Err(_) => {
+            // Fallback: render as plain text rather than dropping the line
+            vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(Theme::MUTED_TEXT),
+            )]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +300,20 @@ mod tests {
         assert_eq!(lang_to_extension("typescript"), "js");
         assert_eq!(lang_to_extension("ts"), "js");
         assert_eq!(lang_to_extension("tsx"), "js");
+    }
+
+    #[test]
+    fn highlight_code_block_normalizes_ts_extension() {
+        // Raw "ts" extension (from detect_extension) should produce syntax colors, not plain text
+        let code = vec!["const x: number = 42;", "function foo(s: string) {}"];
+        let lines = highlight_code_block(&code, "ts");
+        assert_eq!(lines.len(), 2);
+        let has_color = lines.iter().any(|line| {
+            line.spans.iter().skip(1).any(|span| {
+                matches!(span.style.fg, Some(Color::Rgb(r, g, b)) if !(r == 255 && g == 255 && b == 255))
+            })
+        });
+        assert!(has_color, "TypeScript with 'ts' extension should get JS syntax colors");
     }
 
     #[test]

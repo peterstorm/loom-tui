@@ -149,12 +149,7 @@ fn render_status_column(
                 Span::styled(" ", Style::default().bg(bg)),
             ];
 
-            // Truncate long descriptions (>15 chars) to 12 chars + "..."
-            let description = if kt.task.description.len() > 15 {
-                format!("{}...", &kt.task.description[..12])
-            } else {
-                kt.task.description.clone()
-            };
+            let description = crate::watcher::truncate_str(&kt.task.description, 12);
             spans.push(Span::styled(
                 description,
                 Style::default().fg(Theme::TEXT).bg(bg),

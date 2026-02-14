@@ -94,11 +94,7 @@ fn build_task_list_items(state: &AppState) -> Vec<ListItem<'static>> {
                         Span::styled(" ", Style::default().bg(bg)),
                     ];
 
-                    let description = if task.description.len() > 50 {
-                        format!("{}...", &task.description[..47])
-                    } else {
-                        task.description.clone()
-                    };
+                    let description = crate::watcher::truncate_str(&task.description, 47);
                     spans.push(Span::styled(description, Style::default().fg(Theme::TEXT).bg(bg)));
 
                     if let Some(ref agent_id) = task.agent_id {

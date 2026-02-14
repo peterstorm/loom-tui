@@ -109,7 +109,7 @@ pub fn derive_transcript_path(cwd: &str, session_id: &str) -> Option<String> {
 }
 
 /// Starts file watching for all paths and returns a channel for receiving events.
-/// Debounces file changes at 200ms per NFR-012.
+/// Debounces file changes at 200ms.
 ///
 /// # Imperative Shell
 /// This function handles I/O setup (file watching) but delegates parsing to pure functions.

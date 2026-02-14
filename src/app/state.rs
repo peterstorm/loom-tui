@@ -49,7 +49,7 @@ pub struct DomainState {
     /// Active agents keyed by agent ID
     pub agents: BTreeMap<AgentId, Agent>,
 
-    /// Ring buffer of hook events (max 10,000 per NFR-005)
+    /// Ring buffer of hook events (max 10,000)
     pub events: VecDeque<HookEvent>,
 
     /// List of archived sessions (meta always available, full data loaded on demand)
@@ -96,7 +96,7 @@ struct CacheState {
 }
 
 /// Main application state.
-/// Updated via pure `update(state, event) -> state` function.
+/// Updated via `update(&mut state, event)` function.
 /// Decomposed into sub-states for better organization.
 #[derive(Debug, Clone)]
 pub struct AppState {

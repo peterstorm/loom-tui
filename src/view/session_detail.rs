@@ -647,7 +647,7 @@ fn render_events_list(
 }
 
 fn short_id(id: &str) -> String {
-    if id.len() > 7 { id[..7].to_string() } else { id.to_string() }
+    if id.chars().count() > 7 { id.chars().take(7).collect() } else { id.to_string() }
 }
 
 fn render_session_detail_footer(frame: &mut Frame, area: Rect) {

@@ -25,7 +25,7 @@ pub fn render_help_overlay(frame: &mut Frame) {
     let paragraph = Paragraph::new(help_text)
         .block(
             Block::default()
-                .title(" Help - Press ? or Esc to close ")
+                .title(" Help - Press any key to close ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Theme::ACTIVE_BORDER)),
         )

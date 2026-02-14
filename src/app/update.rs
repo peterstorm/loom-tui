@@ -6,8 +6,7 @@ use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind,
 use crate::session;
 use std::time::Duration;
 
-/// Update function following Elm Architecture.
-/// Mutates state in place — no cloning needed.
+/// Event handler (Elm-inspired loop). Mutates state in place.
 pub fn update(state: &mut AppState, event: AppEvent) {
     let mut agents_changed = false;
 
@@ -1353,5 +1352,85 @@ mod tests {
 
         let last = state.domain.events.back().unwrap();
         assert_eq!(last.agent_id, Some(AgentId::new("a01")));
+    }
+
+    // --- resolve_agent_attribution unit tests ---
+
+    fn make_agent(id: &str, session: &str, finished: bool) -> (AgentId, Agent) {
+        let mut a = Agent::default();
+        a.id = AgentId::new(id);
+        a.session_id = Some(SessionId::new(session));
+        a.started_at = Utc::now();
+        if finished {
+            a.finished_at = Some(Utc::now());
+        }
+        (AgentId::new(id), a)
+    }
+
+    #[test]
+    fn attribution_explicit_id_is_confident() {
+        let id = AgentId::new("a01");
+        let (resolved, confident) = resolve_agent_attribution(
+            Some(&id), None, &BTreeMap::new(), &BTreeMap::new(), false,
+        );
+        assert_eq!(resolved, Some(AgentId::new("a01")));
+        assert!(confident);
+    }
+
+    #[test]
+    fn attribution_single_transcript_candidate_is_confident() {
+        let mut map = BTreeMap::new();
+        map.insert(SessionId::new("s1"), vec![AgentId::new("a01")]);
+        let agents = BTreeMap::new();
+        let sid = SessionId::new("s1");
+        let (resolved, confident) = resolve_agent_attribution(
+            None, Some(&sid), &map, &agents, false,
+        );
+        assert_eq!(resolved, Some(AgentId::new("a01")));
+        assert!(confident);
+    }
+
+    #[test]
+    fn attribution_multiple_candidates_not_confident() {
+        let mut map = BTreeMap::new();
+        map.insert(SessionId::new("s1"), vec![AgentId::new("a01"), AgentId::new("a02")]);
+        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false), make_agent("a02", "s1", false)].into();
+        let sid = SessionId::new("s1");
+        let (resolved, confident) = resolve_agent_attribution(
+            None, Some(&sid), &map, &agents, false,
+        );
+        assert!(resolved.is_some());
+        assert!(!confident);
+    }
+
+    #[test]
+    fn attribution_assistant_text_no_session_fallback() {
+        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false)].into();
+        let sid = SessionId::new("s1");
+        let (resolved, confident) = resolve_agent_attribution(
+            None, Some(&sid), &BTreeMap::new(), &agents, true,
+        );
+        assert_eq!(resolved, None);
+        assert!(!confident);
+    }
+
+    #[test]
+    fn attribution_session_fallback_single_match() {
+        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false)].into();
+        let sid = SessionId::new("s1");
+        let (resolved, confident) = resolve_agent_attribution(
+            None, Some(&sid), &BTreeMap::new(), &agents, false,
+        );
+        assert_eq!(resolved, Some(AgentId::new("a01")));
+        assert!(confident);
+    }
+
+    #[test]
+    fn attribution_no_match_returns_none() {
+        let (resolved, confident) = resolve_agent_attribution(
+            None, None, &BTreeMap::new(), &BTreeMap::new(), false,
+        );
+        assert_eq!(resolved, None);
+        assert!(!confident);
     }
 }

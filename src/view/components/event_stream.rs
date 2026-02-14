@@ -440,8 +440,8 @@ fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
 
 /// Shorten an agent ID to first 7 chars (like git short hash).
 fn short_id(id: &str) -> String {
-    if id.len() > 7 {
-        id[..7].to_string()
+    if id.chars().count() > 7 {
+        id.chars().take(7).collect()
     } else {
         id.to_string()
     }
@@ -546,11 +546,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
         }
         HookEventKind::UserPromptSubmit => ("→", "User prompt".into(), None, Theme::INFO, None),
         HookEventKind::AssistantText { content } => {
-            let truncated = if content.len() > 4000 {
-                format!("{}...", &content[..4000])
-            } else {
-                content.clone()
-            };
+            let truncated = crate::watcher::truncate_str(content, 4000);
             ("💭", "Thinking".into(), Some(truncated), Theme::MUTED_TEXT, None)
         }
     }

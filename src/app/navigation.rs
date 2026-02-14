@@ -2,11 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{AppState, PanelFocus, TaskViewMode, ViewState};
 
-/// Half-page jump size for Ctrl+D / Ctrl+U
+/// Jump size for Ctrl+D / Ctrl+U (fixed at 20 lines).
 const PAGE_JUMP: usize = 20;
 
-/// Navigation state transition function.
-/// Mutates state in place based on keyboard event.
+/// Key event handler. Mutates state in place.
 pub fn handle_key(state: &mut AppState, key: KeyEvent) {
     // Help overlay has priority
     if state.ui.show_help {

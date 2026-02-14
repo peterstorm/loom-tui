@@ -86,11 +86,7 @@ fn render_agent_header(
             let task_info = agent.task_description.as_deref()
                 .or_else(|| agent.task_id.as_ref().map(|id| id.as_str()))
                 .map(|desc| {
-                    let truncated = if desc.len() > 60 {
-                        format!("{}…", &desc[..60])
-                    } else {
-                        desc.to_string()
-                    };
+                    let truncated = crate::watcher::truncate_str(desc, 60);
                     format!(" | {}", truncated)
                 })
                 .unwrap_or_default();

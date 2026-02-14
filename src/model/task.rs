@@ -32,6 +32,11 @@ impl TaskGraph {
             completed_tasks: 0,
         }
     }
+
+    /// Returns an iterator over all tasks across all waves, flattened.
+    pub fn flat_tasks(&self) -> impl Iterator<Item = &Task> {
+        self.waves.iter().flat_map(|w| &w.tasks)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

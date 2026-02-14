@@ -54,8 +54,9 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
             spans.extend(kb("g/G", ":top/bottom"));
             spans.push(sep());
             spans.extend(kb("Enter", ":drill "));
-            spans.extend(kb("Space", ":auto-scroll "));
-            spans.extend(kb("/", ":filter "));
+            spans.extend(kb("p", ":popup "));
+            spans.extend(kb("v", ":kanban "));
+            spans.extend(kb("/", ":search "));
             spans.extend(kb("?", ":help"));
         }
         ViewState::AgentDetail => {
@@ -133,8 +134,9 @@ mod tests {
         assert!(text.contains("j/k:scroll"));
         assert!(text.contains("g/G:top/bottom"));
         assert!(text.contains("Enter:drill"));
-        assert!(text.contains("Space:auto-scroll"));
-        assert!(text.contains("/:filter"));
+        assert!(text.contains("p:popup"));
+        assert!(text.contains("v:kanban"));
+        assert!(text.contains("/:search"));
         assert!(text.contains("?:help"));
     }
 

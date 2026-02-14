@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use chrono::Utc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Stylize,
@@ -301,7 +302,15 @@ fn render_session_header(frame: &mut Frame, area: Rect, data: &SessionViewData<'
         SessionStatus::Cancelled => Theme::MUTED_TEXT,
     };
 
-    let duration_str = format_duration(meta.duration);
+    // For active sessions, calculate duration from start to now
+    let duration_str = match meta.duration {
+        Some(d) => format_duration(Some(d)),
+        None if meta.status == SessionStatus::Active => {
+            let elapsed = Utc::now().signed_duration_since(meta.timestamp);
+            format_duration(elapsed.to_std().ok())
+        }
+        None => format_duration(None),
+    };
     let branch_str = meta.git_branch.as_deref().unwrap_or("—");
 
     let line = Line::from(vec![
@@ -348,7 +357,15 @@ fn render_left_panel(
 fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>, is_focused: bool) {
     let meta = data.meta;
     let started = meta.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-    let duration_str = format_duration(meta.duration);
+    // For active sessions, calculate duration from start to now
+    let duration_str = match meta.duration {
+        Some(d) => format_duration(Some(d)),
+        None if meta.status == SessionStatus::Active => {
+            let elapsed = Utc::now().signed_duration_since(meta.timestamp);
+            format_duration(elapsed.to_std().ok())
+        }
+        None => format_duration(None),
+    };
     let event_count = data.events.len();
     let agent_count = data.agents.len();
 
@@ -566,7 +583,7 @@ fn render_events_list(
         first = false;
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, detail, event_color, _tool_name) =
+        let (icon, header, detail, event_color, tool_name) =
             crate::view::components::event_stream::format_event_lines(&event.kind);
 
         let agent_label = event.agent_id.as_ref().map(|aid| {
@@ -591,31 +608,23 @@ fn render_events_list(
 
         lines.push(Line::from(spans));
 
-        // Detail line with content (input/output summaries)
+        // Detail with markdown + syntax highlighting (shared with dashboard event stream)
         if let Some(detail_text) = detail {
             let clean = crate::view::components::event_stream::clean_detail(&detail_text);
             if !clean.is_empty() {
-                let has_diff_lines = clean.contains("\n- ") || clean.contains("\n+ ");
-                if has_diff_lines {
-                    for line in clean.split('\n') {
-                        let color = if line.starts_with("- ") {
-                            Theme::ERROR
-                        } else if line.starts_with("+ ") {
-                            Theme::SUCCESS
-                        } else {
-                            Theme::MUTED_TEXT
-                        };
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(color),
-                        )));
-                    }
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        clean,
-                        Style::default().fg(Theme::MUTED_TEXT),
-                    )));
-                }
+                let ext_hint = tool_name
+                    .as_ref()
+                    .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
+                    .and_then(|_| {
+                        // Check first few lines for file path/extension
+                        clean.lines()
+                            .take(5)
+                            .find_map(crate::view::components::syntax::detect_extension)
+                    });
+                lines.extend(crate::view::components::event_stream::render_detail_lines(
+                    &clean,
+                    ext_hint.as_deref(),
+                ));
             }
         }
     }
@@ -631,7 +640,6 @@ fn render_events_list(
                     Theme::PANEL_BORDER
                 })),
         )
-        .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
 
@@ -639,7 +647,7 @@ fn render_events_list(
 }
 
 fn short_id(id: &str) -> String {
-    if id.len() > 7 { id[..7].to_string() } else { id.to_string() }
+    if id.chars().count() > 7 { id.chars().take(7).collect() } else { id.to_string() }
 }
 
 fn render_session_detail_footer(frame: &mut Frame, area: Rect) {

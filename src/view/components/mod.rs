@@ -5,6 +5,9 @@ pub mod filter_bar;
 pub mod footer;
 pub mod header;
 pub mod help_overlay;
+pub mod kanban;
+pub mod popup;
+pub mod syntax;
 pub mod task_list;
 pub mod wave_river;
 
@@ -15,5 +18,7 @@ pub use filter_bar::render_filter_bar;
 pub use footer::render_footer;
 pub use header::render_header;
 pub use help_overlay::render_help_overlay;
+pub use kanban::render_kanban_board;
+pub use popup::render_agent_popup;
 pub use task_list::render_task_list;
 pub use wave_river::render_wave_river;

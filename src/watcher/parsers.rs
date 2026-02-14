@@ -6,6 +6,17 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Safely truncate a string to a maximum character count (not bytes).
+/// Prevents panics from slicing on multibyte UTF-8 character boundaries.
+pub(crate) fn truncate_str(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect::<String>() + "..."
+    }
+}
+
 /// Parse task graph JSON file into TaskGraph model.
 /// Supports both native TUI format and loom orchestration format.
 ///
@@ -288,7 +299,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .get("description")
             .or_else(|| input.get("prompt"))
             .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 80 { format!("{}...", &s[..80]) } else { s.to_string() })
+            .map(|s| truncate_str(s, 200))
             .unwrap_or_default(),
         _ => input
             .get("file_path")
@@ -299,26 +310,15 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .unwrap_or("")
             .to_string(),
     };
-    if summary.len() > 500 {
-        format!("{}...", &summary[..500])
-    } else {
-        summary
-    }
+    truncate_str(&summary, 8000)
 }
 
 /// Parse Claude Code transcript JSONL incrementally, extracting assistant text blocks.
 ///
 /// # Functional Core
-/// Pure function — takes raw content + byte offset, returns HookEvents.
+/// Pure function — takes raw content + session_id, returns HookEvents.
 /// Only extracts `type: "text"` blocks from `type: "assistant"` entries.
-/// Skips `type: "thinking"` blocks (too verbose). Truncates to 500 chars per block.
-///
-/// # Arguments
-/// * `content` - Raw JSONL content (full file or tail segment)
-/// * `session_id` - Session ID to attribute events to
-///
-/// # Returns
-/// Vector of HookEvents with AssistantText kind, plus the number of bytes consumed.
+/// Skips `type: "thinking"` blocks (too verbose). Truncates to 4000 chars per block.
 pub fn parse_claude_transcript_incremental(
     content: &str,
     session_id: &str,
@@ -364,11 +364,7 @@ pub fn parse_claude_transcript_incremental(
                 _ => continue,
             };
 
-            let truncated = if text.len() > 500 {
-                format!("{}...", &text[..500])
-            } else {
-                text.to_string()
-            };
+            let truncated = truncate_str(text, 4000);
 
             let event = HookEvent::new(timestamp, HookEventKind::assistant_text(truncated))
                 .with_session(session_id.to_string());
@@ -671,7 +667,7 @@ invalid
 
     #[test]
     fn test_parse_claude_transcript_truncates_long_text() {
-        let long_text = "x".repeat(600);
+        let long_text = "x".repeat(5000);
         let jsonl = format!(
             r#"{{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
             long_text
@@ -681,7 +677,7 @@ invalid
         assert_eq!(events.len(), 1);
         match &events[0].kind {
             HookEventKind::AssistantText { content } => {
-                assert!(content.len() <= 503); // 500 + "..."
+                assert!(content.len() <= 4003); // 4000 + "..."
                 assert!(content.ends_with("..."));
             }
             _ => panic!("Expected AssistantText"),
@@ -794,5 +790,39 @@ invalid
             extract_tool_input_summary("Edit", &serde_json::json!({"file_path": "/tmp/bar.rs"})),
             "/tmp/bar.rs"
         );
+    }
+
+    #[test]
+    fn truncate_str_under_limit() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_str_over_limit() {
+        assert_eq!(truncate_str("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_str_exact_boundary() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn truncate_str_multibyte_cjk() {
+        let cjk = "日本語テスト文字列";
+        let result = truncate_str(cjk, 3);
+        assert_eq!(result, "日本語...");
+    }
+
+    #[test]
+    fn truncate_str_emoji() {
+        let emoji = "🎉🎊🎈🎁🎂";
+        let result = truncate_str(emoji, 2);
+        assert_eq!(result, "🎉🎊...");
     }
 }

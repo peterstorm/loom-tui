@@ -9,11 +9,17 @@ pub struct UiState {
     /// Current view mode
     pub view: ViewState,
 
+    /// Task view mode (wave vs kanban) for Dashboard
+    pub task_view_mode: TaskViewMode,
+
     /// Current panel focus
     pub focus: PanelFocus,
 
     /// Show help overlay
     pub show_help: bool,
+
+    /// Show agent popup overlay (agent ID if active)
+    pub show_agent_popup: Option<AgentId>,
 
     /// Active filter string (None if no filter)
     pub filter: Option<String>,
@@ -43,7 +49,7 @@ pub struct DomainState {
     /// Active agents keyed by agent ID
     pub agents: BTreeMap<AgentId, Agent>,
 
-    /// Ring buffer of hook events (max 10,000 per NFR-005)
+    /// Ring buffer of hook events (max 10,000)
     pub events: VecDeque<HookEvent>,
 
     /// List of archived sessions (meta always available, full data loaded on demand)
@@ -55,10 +61,9 @@ pub struct DomainState {
     /// Current task graph (None if not yet loaded)
     pub task_graph: Option<TaskGraph>,
 
-    /// Maps transcript session_id → agent_id for subagent transcript attribution.
-    /// Subagent transcripts have their own session_id (different from the parent
-    /// session_id stored on Agent). This map links them.
-    pub transcript_agent_map: BTreeMap<SessionId, AgentId>,
+    /// Maps session_id → agent_ids for subagent event attribution.
+    /// Multiple agents can share the same parent session_id when spawned in bulk.
+    pub transcript_agent_map: BTreeMap<SessionId, Vec<AgentId>>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
@@ -91,7 +96,7 @@ struct CacheState {
 }
 
 /// Main application state.
-/// Updated via pure `update(state, event) -> state` function.
+/// Updated via `update(&mut state, event)` function.
 /// Decomposed into sub-states for better organization.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -115,6 +120,16 @@ pub enum ViewState {
 
     /// Session detail view (inspecting a single session)
     SessionDetail,
+}
+
+/// Task view mode for Dashboard
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskViewMode {
+    /// Wave-based grouping (default)
+    Wave,
+
+    /// Kanban board (status-based columns)
+    Kanban,
 }
 
 /// Panel focus for two-panel layouts
@@ -169,8 +184,10 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             view: ViewState::Dashboard,
+            task_view_mode: TaskViewMode::Wave,
             focus: PanelFocus::Left,
             show_help: false,
+            show_agent_popup: None,
             filter: None,
             auto_scroll: true,
             scroll_offsets: ScrollState::default(),

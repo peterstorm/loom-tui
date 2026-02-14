@@ -9,11 +9,17 @@ pub struct UiState {
     /// Current view mode
     pub view: ViewState,
 
+    /// Task view mode (wave vs kanban) for Dashboard
+    pub task_view_mode: TaskViewMode,
+
     /// Current panel focus
     pub focus: PanelFocus,
 
     /// Show help overlay
     pub show_help: bool,
+
+    /// Show agent popup overlay (agent ID if active)
+    pub show_agent_popup: Option<AgentId>,
 
     /// Active filter string (None if no filter)
     pub filter: Option<String>,
@@ -116,6 +122,16 @@ pub enum ViewState {
     SessionDetail,
 }
 
+/// Task view mode for Dashboard
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskViewMode {
+    /// Wave-based grouping (default)
+    Wave,
+
+    /// Kanban board (status-based columns)
+    Kanban,
+}
+
 /// Panel focus for two-panel layouts
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelFocus {
@@ -168,8 +184,10 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             view: ViewState::Dashboard,
+            task_view_mode: TaskViewMode::Wave,
             focus: PanelFocus::Left,
             show_help: false,
+            show_agent_popup: None,
             filter: None,
             auto_scroll: true,
             scroll_offsets: ScrollState::default(),

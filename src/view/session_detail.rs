@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use chrono::Utc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Stylize,
@@ -301,7 +302,15 @@ fn render_session_header(frame: &mut Frame, area: Rect, data: &SessionViewData<'
         SessionStatus::Cancelled => Theme::MUTED_TEXT,
     };
 
-    let duration_str = format_duration(meta.duration);
+    // For active sessions, calculate duration from start to now
+    let duration_str = match meta.duration {
+        Some(d) => format_duration(Some(d)),
+        None if meta.status == SessionStatus::Active => {
+            let elapsed = Utc::now().signed_duration_since(meta.timestamp);
+            format_duration(elapsed.to_std().ok())
+        }
+        None => format_duration(None),
+    };
     let branch_str = meta.git_branch.as_deref().unwrap_or("—");
 
     let line = Line::from(vec![
@@ -348,7 +357,15 @@ fn render_left_panel(
 fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>, is_focused: bool) {
     let meta = data.meta;
     let started = meta.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-    let duration_str = format_duration(meta.duration);
+    // For active sessions, calculate duration from start to now
+    let duration_str = match meta.duration {
+        Some(d) => format_duration(Some(d)),
+        None if meta.status == SessionStatus::Active => {
+            let elapsed = Utc::now().signed_duration_since(meta.timestamp);
+            format_duration(elapsed.to_std().ok())
+        }
+        None => format_duration(None),
+    };
     let event_count = data.events.len();
     let agent_count = data.agents.len();
 
@@ -599,8 +616,10 @@ fn render_events_list(
                     .as_ref()
                     .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
                     .and_then(|_| {
-                        clean.lines().next()
-                            .and_then(crate::view::components::syntax::detect_extension)
+                        // Check first few lines for file path/extension
+                        clean.lines()
+                            .take(5)
+                            .find_map(crate::view::components::syntax::detect_extension)
                     });
                 lines.extend(crate::view::components::event_stream::render_detail_lines(
                     &clean,
@@ -621,7 +640,6 @@ fn render_events_list(
                     Theme::PANEL_BORDER
                 })),
         )
-        .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
 

@@ -69,8 +69,10 @@ fn build_help_text() -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Enter       - Drill down / select"),
-        Line::from("  Esc         - Go back / close"),
-        Line::from("  /           - Start filter/search"),
+        Line::from("  Esc         - Go back / close popup"),
+        Line::from("  /           - Search tasks & events (Esc to clear)"),
+        Line::from("  p           - Preview agent in popup"),
+        Line::from("  v           - Toggle wave/kanban view"),
         Line::from("  ?           - Toggle help overlay"),
         Line::from("  q           - Quit application"),
         Line::from(""),
@@ -81,10 +83,21 @@ fn build_help_text() -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from("  Dashboard:"),
-        Line::from("    Enter on task  - Jump to agent detail"),
+        Line::from("    v              - Toggle wave/kanban board"),
+        Line::from("    Enter on task  - Jump to agent detail (full view)"),
+        Line::from("    p on task      - Preview agent in popup"),
         Line::from(""),
         Line::from("  Sessions:"),
-        Line::from("    Enter      - Load archived session"),
+        Line::from("    Enter          - Load archived session"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "SEARCH",
+            Style::default()
+                .fg(Theme::INFO)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Searches in: task IDs, descriptions, agent IDs,"),
+        Line::from("               event types, tool names, details"),
         Line::from(""),
     ]
 }

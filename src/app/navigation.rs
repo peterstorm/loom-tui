@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{AppState, PanelFocus, ViewState};
+use crate::app::{AppState, PanelFocus, TaskViewMode, ViewState};
 
 /// Half-page jump size for Ctrl+D / Ctrl+U
 const PAGE_JUMP: usize = 20;
@@ -11,6 +11,12 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
     // Help overlay has priority
     if state.ui.show_help {
         handle_help_key(state, key);
+        return;
+    }
+
+    // Agent popup has second priority
+    if state.ui.show_agent_popup.is_some() {
+        handle_popup_key(state, key);
         return;
     }
 
@@ -48,6 +54,8 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Enter => drill_down(state),
         KeyCode::Esc => go_back(state),
         KeyCode::Char('/') => start_filter(state),
+        KeyCode::Char('p') => show_agent_popup(state),
+        KeyCode::Char('v') => toggle_task_view_mode(state),
         KeyCode::Char('?') => toggle_help(state),
         KeyCode::Char(' ') => toggle_auto_scroll(state),
         _ => {}
@@ -56,6 +64,15 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
 
 fn handle_help_key(state: &mut AppState, _key: KeyEvent) {
     state.ui.show_help = false;
+}
+
+fn handle_popup_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
+            state.ui.show_agent_popup = None;
+        }
+        _ => {}
+    }
 }
 
 fn handle_filter_key(state: &mut AppState, key: KeyEvent) {
@@ -442,6 +459,45 @@ fn toggle_help(state: &mut AppState) {
 
 fn toggle_auto_scroll(state: &mut AppState) {
     state.ui.auto_scroll = !state.ui.auto_scroll;
+}
+
+fn show_agent_popup(state: &mut AppState) {
+    // Show popup for selected task's agent (Dashboard only)
+    if !matches!(state.ui.view, ViewState::Dashboard) {
+        return;
+    }
+
+    if let Some(task_idx) = state.ui.selected_task_index {
+        if let Some(ref task_graph) = state.domain.task_graph {
+            let all_tasks: Vec<_> = task_graph
+                .waves
+                .iter()
+                .flat_map(|w| &w.tasks)
+                .collect();
+
+            if let Some(task) = all_tasks.get(task_idx) {
+                if let Some(ref agent_id) = task.agent_id {
+                    state.ui.show_agent_popup = Some(agent_id.clone());
+                }
+            }
+        }
+    }
+}
+
+fn toggle_task_view_mode(state: &mut AppState) {
+    // Only toggle in Dashboard view
+    if !matches!(state.ui.view, ViewState::Dashboard) {
+        return;
+    }
+
+    state.ui.task_view_mode = match state.ui.task_view_mode {
+        TaskViewMode::Wave => TaskViewMode::Kanban,
+        TaskViewMode::Kanban => TaskViewMode::Wave,
+    };
+
+    // Reset task selection when switching modes
+    state.ui.selected_task_index = Some(0);
+    state.ui.scroll_offsets.task_list = 0;
 }
 
 #[cfg(test)]

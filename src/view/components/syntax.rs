@@ -72,10 +72,30 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static
         .collect()
 }
 
-/// Extract file extension from a path string.
-pub fn detect_extension(path: &str) -> Option<String> {
-    let path = path.trim();
-    let filename = path.rsplit('/').next().unwrap_or(path);
+/// Extract file extension from a path string or diff header.
+/// Handles formats like:
+/// - "src/foo.ts"
+/// - "--- a/src/foo.ts"
+/// - "+++ b/src/foo.ts"
+/// - "diff --git a/src/foo.ts b/src/foo.ts"
+pub fn detect_extension(line: &str) -> Option<String> {
+    let path = line.trim();
+
+    // Strip diff prefixes
+    let clean_path = path
+        .strip_prefix("--- a/").or_else(|| path.strip_prefix("--- "))
+        .or_else(|| path.strip_prefix("+++ b/").or_else(|| path.strip_prefix("+++ ")))
+        .or_else(|| {
+            // Handle "diff --git a/file b/file"
+            if path.starts_with("diff --git") {
+                path.split_whitespace().nth(2)?.strip_prefix("a/")
+            } else {
+                None
+            }
+        })
+        .unwrap_or(path);
+
+    let filename = clean_path.rsplit('/').next().unwrap_or(clean_path);
     let ext = filename.rsplit('.').next()?;
     if ext == filename || ext.is_empty() {
         return None;
@@ -89,7 +109,8 @@ pub fn lang_to_extension(lang: &str) -> String {
     match lower.as_str() {
         "rust" | "rs" => "rs",
         "javascript" | "js" => "js",
-        "typescript" | "ts" => "ts",
+        // TypeScript not in default set - use JS highlighting
+        "typescript" | "ts" | "tsx" => "js",
         "python" | "py" => "py",
         "java" => "java",
         "go" | "golang" => "go",
@@ -256,5 +277,43 @@ mod tests {
             })
         });
         assert!(has_color, "syntax highlighting should produce non-white colors");
+    }
+
+    #[test]
+    fn typescript_uses_javascript_highlighting() {
+        assert_eq!(lang_to_extension("typescript"), "js");
+        assert_eq!(lang_to_extension("ts"), "js");
+        assert_eq!(lang_to_extension("tsx"), "js");
+    }
+
+    #[test]
+    fn sql_highlighting_works() {
+        let code = vec!["SELECT * FROM users", "WHERE id = 1;"];
+        let lines = highlight_code_block(&code, "sql");
+        assert_eq!(lines.len(), 2);
+        // Verify we got highlighting (not just plain text)
+        assert!(lines[0].spans.len() > 1, "SQL should be syntax highlighted");
+    }
+
+    #[test]
+    fn detect_extension_handles_diff_headers() {
+        assert_eq!(detect_extension("--- a/src/foo.ts"), Some("ts".into()));
+        assert_eq!(detect_extension("+++ b/src/bar.rs"), Some("rs".into()));
+        assert_eq!(detect_extension("--- src/test.py"), Some("py".into()));
+        assert_eq!(detect_extension("+++ lib/main.js"), Some("js".into()));
+    }
+
+    #[test]
+    fn detect_extension_handles_git_diff() {
+        assert_eq!(
+            detect_extension("diff --git a/src/app.ts b/src/app.ts"),
+            Some("ts".into())
+        );
+    }
+
+    #[test]
+    fn detect_extension_plain_path() {
+        assert_eq!(detect_extension("src/components/Button.tsx"), Some("tsx".into()));
+        assert_eq!(detect_extension("/absolute/path/file.sql"), Some("sql".into()));
     }
 }

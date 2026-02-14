@@ -34,7 +34,6 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
                 }))
                 .title(title),
         )
-        .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
         .scroll((state.ui.scroll_offsets.event_stream as u16, 0));
 
@@ -69,7 +68,6 @@ pub fn render_agent_event_stream(
                 }))
                 .title(title),
         )
-        .style(Style::default().fg(Theme::TEXT))
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
 
@@ -86,19 +84,45 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
             .and_then(|a| a.session_id.clone())
     });
 
+    // Get search filter from state (only applies when agent_filter is None - dashboard view)
+    let search_filter = if agent_filter.is_none() {
+        state.ui.filter.as_deref()
+    } else {
+        None
+    };
+
+    // Optimize: only lowercase the query once if we have a search filter
+    let search_query_lower = search_filter
+        .filter(|q| !q.is_empty())
+        .map(|q| q.to_lowercase());
+
     let filtered: Vec<_> = state
         .domain.events
         .iter()
         .rev()
-        .filter(|e| match agent_filter {
-            Some(aid) => {
-                let direct = e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid);
-                let shared = e.agent_id.is_none()
-                    && agent_session.is_some()
-                    && e.session_id == agent_session;
-                direct || shared
+        .filter(|e| {
+            // First, filter by agent if specified
+            let agent_match = match agent_filter {
+                Some(aid) => {
+                    let direct = e.agent_id.as_ref().map(|id| id.as_str()) == Some(aid);
+                    let shared = e.agent_id.is_none()
+                        && agent_session.is_some()
+                        && e.session_id == agent_session;
+                    direct || shared
+                }
+                None => true,
+            };
+
+            if !agent_match {
+                return false;
             }
-            None => true,
+
+            // Then, filter by search text if specified
+            if let Some(ref query_lower) = search_query_lower {
+                event_matches_search(&e.kind, query_lower, e.agent_id.as_ref())
+            } else {
+                true
+            }
         })
         .take(500)
         .collect();
@@ -168,10 +192,11 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
                         )
                     })
                     .and_then(|_| {
+                        // Check first few lines for file path/extension
                         clean
                             .lines()
-                            .next()
-                            .and_then(super::syntax::detect_extension)
+                            .take(5)
+                            .find_map(super::syntax::detect_extension)
                     });
                 lines.extend(markdown_to_lines(&clean, ext_hint.as_deref()));
             }
@@ -411,6 +436,57 @@ fn short_id(id: &str) -> String {
     } else {
         id.to_string()
     }
+}
+
+/// Check if an event matches the search query.
+/// Searches in: header text, detail text, tool name, agent type, task description, agent ID.
+fn event_matches_search(kind: &HookEventKind, query: &str, agent_id: Option<&crate::model::AgentId>) -> bool {
+    let (_, header, detail, _, tool_name) = format_event_lines(kind);
+
+    // Check header
+    if header.to_lowercase().contains(query) {
+        return true;
+    }
+
+    // Check detail text
+    if let Some(detail_text) = detail {
+        if detail_text.to_lowercase().contains(query) {
+            return true;
+        }
+    }
+
+    // Check tool name
+    if let Some(tool) = tool_name {
+        if tool.to_lowercase().contains(query) {
+            return true;
+        }
+    }
+
+    // Check agent ID
+    if let Some(aid) = agent_id {
+        if aid.as_str().to_lowercase().contains(query) {
+            return true;
+        }
+    }
+
+    // Check type-specific fields
+    match kind {
+        HookEventKind::SubagentStart { agent_type, task_description } => {
+            if let Some(t) = agent_type {
+                if t.to_lowercase().contains(query) {
+                    return true;
+                }
+            }
+            if let Some(desc) = task_description {
+                if desc.to_lowercase().contains(query) {
+                    return true;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    false
 }
 
 /// Format hook event kind into (icon, header, optional detail, color, optional tool_name).

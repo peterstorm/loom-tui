@@ -55,4 +55,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.ui.show_help {
         components::help_overlay::render_help_overlay(frame);
     }
+
+    // Overlay agent popup if active (on top of everything)
+    if let Some(ref agent_id) = state.ui.show_agent_popup {
+        components::render_agent_popup(frame, state, agent_id.as_str());
+    }
 }

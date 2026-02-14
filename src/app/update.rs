@@ -203,12 +203,27 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         .and_then(|v| v.as_str())
                         .map(String::from);
 
+                    // Git branch from event or fallback to current branch
+                    let git_branch = event.raw.get("git_branch")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(|| {
+                            std::process::Command::new("git")
+                                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+                                .output()
+                                .ok()
+                                .and_then(|o| String::from_utf8(o.stdout).ok())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                        });
+
                     let mut meta = SessionMeta::new(
                         session_id.clone(),
                         event.timestamp,
                         project_path,
                     );
                     meta.transcript_path = transcript_path;
+                    meta.git_branch = git_branch;
                     state.domain.active_sessions.insert(session_id, meta);
                 }
                 HookEventKind::SessionEnd => {

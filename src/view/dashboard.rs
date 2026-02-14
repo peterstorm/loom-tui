@@ -1,25 +1,54 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
-use crate::app::AppState;
+use crate::app::{AppState, TaskViewMode};
+use crate::model::Theme;
 
 use super::components::{
-    render_banner, render_event_stream, render_footer, render_task_list, render_wave_river,
+    render_banner, render_event_stream, render_footer, render_kanban_board, render_task_list,
+    render_wave_river,
 };
 
 /// Render dashboard view into the given content area.
 /// Header is rendered globally by the view dispatcher.
 pub fn render_dashboard(frame: &mut Frame, state: &AppState, area: Rect) {
+    // Add search bar if filter is active
+    let has_search = state.ui.filter.is_some();
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Wave river
-            Constraint::Min(10),  // Main content area
-            Constraint::Length(1), // Footer
-        ])
+        .constraints(if has_search {
+            vec![
+                Constraint::Length(3), // Wave river
+                Constraint::Length(3), // Search bar
+                Constraint::Min(10),  // Main content area
+                Constraint::Length(1), // Footer
+            ]
+        } else {
+            vec![
+                Constraint::Length(3), // Wave river
+                Constraint::Min(10),  // Main content area
+                Constraint::Length(1), // Footer
+            ]
+        })
         .split(area);
+
+    // Adjust indices based on whether search bar is present
+    let (content_idx, footer_idx) = if has_search {
+        (2, 3)
+    } else {
+        (1, 2)
+    };
+
+    // Render search bar if active
+    if has_search {
+        render_search_bar(frame, main_layout[1], state);
+    }
 
     // Render banner if hook status is Missing or InstallFailed
     let content_area = match &state.meta.hook_status {
@@ -31,12 +60,12 @@ pub fn render_dashboard(frame: &mut Frame, state: &AppState, area: Rect) {
                     Constraint::Length(2), // Banner
                     Constraint::Min(8),   // Content
                 ])
-                .split(main_layout[1]);
+                .split(main_layout[content_idx]);
 
             render_banner(frame, banner_layout[0], state);
             banner_layout[1]
         }
-        _ => main_layout[1],
+        _ => main_layout[content_idx],
     };
 
     // Split content area into two columns
@@ -50,9 +79,36 @@ pub fn render_dashboard(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Render all components
     render_wave_river(frame, main_layout[0], state);
-    render_task_list(frame, content_columns[0], state);
+
+    // Render task list OR kanban based on view mode
+    match state.ui.task_view_mode {
+        TaskViewMode::Wave => render_task_list(frame, content_columns[0], state),
+        TaskViewMode::Kanban => render_kanban_board(frame, content_columns[0], state),
+    }
+
     render_event_stream(frame, content_columns[1], state);
-    render_footer(frame, main_layout[2], state);
+    render_footer(frame, main_layout[footer_idx], state);
+}
+
+/// Render search bar showing current filter text.
+fn render_search_bar(frame: &mut Frame, area: Rect, state: &AppState) {
+    let filter_text = state.ui.filter.as_deref().unwrap_or("");
+
+    let content = Line::from(vec![
+        Span::styled("/ ", Style::default().fg(Theme::INFO).add_modifier(Modifier::BOLD)),
+        Span::styled(filter_text, Style::default().fg(Theme::TEXT)),
+        Span::styled("_", Style::default().fg(Theme::MUTED_TEXT)),
+    ]);
+
+    let paragraph = Paragraph::new(content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Theme::ACTIVE_BORDER))
+                .title("Search (Esc to clear)"),
+        );
+
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]

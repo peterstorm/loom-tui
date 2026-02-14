@@ -387,11 +387,7 @@ fn drill_down(state: &mut AppState) {
         ViewState::Dashboard => {
             if let Some(task_idx) = state.ui.selected_task_index {
                 if let Some(ref task_graph) = state.domain.task_graph {
-                    let all_tasks: Vec<_> = task_graph
-                        .waves
-                        .iter()
-                        .flat_map(|w| &w.tasks)
-                        .collect();
+                    let all_tasks: Vec<_> = task_graph.flat_tasks().collect();
 
                     if let Some(task) = all_tasks.get(task_idx) {
                         if let Some(ref agent_id) = task.agent_id {
@@ -469,11 +465,7 @@ fn show_agent_popup(state: &mut AppState) {
 
     if let Some(task_idx) = state.ui.selected_task_index {
         if let Some(ref task_graph) = state.domain.task_graph {
-            let all_tasks: Vec<_> = task_graph
-                .waves
-                .iter()
-                .flat_map(|w| &w.tasks)
-                .collect();
+            let all_tasks: Vec<_> = task_graph.flat_tasks().collect();
 
             if let Some(task) = all_tasks.get(task_idx) {
                 if let Some(ref agent_id) = task.agent_id {
@@ -996,5 +988,134 @@ mod tests {
         assert!(matches!(state.ui.view, ViewState::AgentDetail));
         // sorted_agent_keys: [a02 (newest), a01 (oldest)] → a02 is at index 0
         assert_eq!(state.ui.selected_agent_index, Some(0));
+    }
+
+    #[test]
+    fn show_agent_popup_with_no_agent_id() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Dashboard;
+
+        let task = Task {
+            id: TaskId::new("T1"),
+            description: "Unassigned task".to_string(),
+            agent_id: None, // No agent assigned
+            status: TaskStatus::Pending,
+            review_status: Default::default(),
+            files_modified: vec![],
+            tests_passed: None,
+        };
+        state.domain.task_graph = Some(TaskGraph::new(vec![Wave::new(1, vec![task])]));
+        state.ui.selected_task_index = Some(0);
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        // Should be no-op since task has no agent_id
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn show_agent_popup_task_index_out_of_bounds() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Dashboard;
+        state.domain.task_graph = Some(TaskGraph::new(vec![Wave::new(1, vec![])]));
+        state.ui.selected_task_index = Some(99); // Out of bounds
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn show_agent_popup_only_works_in_dashboard() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Sessions; // Not Dashboard
+
+        let mut task = Task::new("T1", "Task".into(), TaskStatus::Running);
+        task.agent_id = Some(AgentId::new("a01"));
+        state.domain.task_graph = Some(TaskGraph::new(vec![Wave::new(1, vec![task])]));
+        state.ui.selected_task_index = Some(0);
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        // Should be no-op since not in Dashboard
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn show_agent_popup_no_task_graph() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Dashboard;
+        state.domain.task_graph = None;
+        state.ui.selected_task_index = Some(0);
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn toggle_task_view_mode_resets_selection() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Dashboard;
+        state.ui.selected_task_index = Some(5);
+        state.ui.task_view_mode = crate::app::TaskViewMode::Wave;
+
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        assert_eq!(state.ui.selected_task_index, Some(0)); // Reset to 0
+    }
+
+    #[test]
+    fn toggle_task_view_mode_resets_scroll() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Dashboard;
+        state.ui.scroll_offsets.task_list = 10;
+        state.ui.task_view_mode = crate::app::TaskViewMode::Wave;
+
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        assert_eq!(state.ui.scroll_offsets.task_list, 0); // Reset to 0
+    }
+
+    #[test]
+    fn toggle_task_view_mode_only_in_dashboard() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::Sessions;
+        state.ui.task_view_mode = crate::app::TaskViewMode::Wave;
+
+        handle_key(&mut state, key(KeyCode::Char('v')));
+        // Should still be Wave (no toggle happened)
+        assert_eq!(state.ui.task_view_mode, crate::app::TaskViewMode::Wave);
+    }
+
+    #[test]
+    fn handle_popup_key_escape_dismisses() {
+        let mut state = AppState::new();
+        state.ui.show_agent_popup = Some(AgentId::new("a01"));
+
+        handle_key(&mut state, key(KeyCode::Esc));
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn handle_popup_key_q_dismisses() {
+        let mut state = AppState::new();
+        state.ui.show_agent_popup = Some(AgentId::new("a01"));
+
+        handle_key(&mut state, key(KeyCode::Char('q')));
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn handle_popup_key_p_dismisses() {
+        let mut state = AppState::new();
+        state.ui.show_agent_popup = Some(AgentId::new("a01"));
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert_eq!(state.ui.show_agent_popup, None);
+    }
+
+    #[test]
+    fn handle_popup_key_other_keys_ignored() {
+        let mut state = AppState::new();
+        state.ui.show_agent_popup = Some(AgentId::new("a01"));
+
+        handle_key(&mut state, key(KeyCode::Char('x')));
+        // Popup should still be open
+        assert_eq!(state.ui.show_agent_popup, Some(AgentId::new("a01")));
     }
 }

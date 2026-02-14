@@ -78,6 +78,8 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static
 /// - "--- a/src/foo.ts"
 /// - "+++ b/src/foo.ts"
 /// - "diff --git a/src/foo.ts b/src/foo.ts"
+///
+/// Returns None for extensionless files (e.g., "Makefile", "README").
 pub fn detect_extension(line: &str) -> Option<String> {
     let path = line.trim();
 
@@ -132,12 +134,16 @@ pub fn lang_to_extension(lang: &str) -> String {
 }
 
 fn best_theme() -> &'static syntect::highlighting::Theme {
+    use syntect::highlighting::Theme as SyntectTheme;
+
+    static FALLBACK: LazyLock<SyntectTheme> = LazyLock::new(SyntectTheme::default);
+
     let ts = &*THEME_SET;
     ts.themes
         .get("base16-eighties.dark")
         .or_else(|| ts.themes.get("base16-ocean.dark"))
         .or_else(|| ts.themes.values().next())
-        .expect("no themes available")
+        .unwrap_or(&FALLBACK)
 }
 
 fn gutter_span(line_num: usize, width: usize) -> Span<'static> {

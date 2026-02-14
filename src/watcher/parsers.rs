@@ -6,6 +6,17 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Safely truncate a string to a maximum character count (not bytes).
+/// Prevents panics from slicing on multibyte UTF-8 character boundaries.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect::<String>() + "..."
+    }
+}
+
 /// Parse task graph JSON file into TaskGraph model.
 /// Supports both native TUI format and loom orchestration format.
 ///
@@ -288,7 +299,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .get("description")
             .or_else(|| input.get("prompt"))
             .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 200 { format!("{}...", &s[..200]) } else { s.to_string() })
+            .map(|s| truncate_str(s, 200))
             .unwrap_or_default(),
         _ => input
             .get("file_path")
@@ -299,11 +310,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .unwrap_or("")
             .to_string(),
     };
-    if summary.len() > 8000 {
-        format!("{}...", &summary[..8000])
-    } else {
-        summary
-    }
+    truncate_str(&summary, 8000)
 }
 
 /// Parse Claude Code transcript JSONL incrementally, extracting assistant text blocks.

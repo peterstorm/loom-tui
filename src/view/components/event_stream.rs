@@ -77,8 +77,8 @@ pub fn render_agent_event_stream(
 /// Pure function: build lines from events, optionally filtered by agent_id.
 fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
     // When filtering by agent, also include unattributed events from the same session.
-    // Claude Code doesn't include agent_id in tool events for subagents, so concurrent
-    // agents produce unattributed events that belong to any active agent in the session.
+    // TODO: Claude Code should include agent_id in all hook events for subagents.
+    // Workaround: concurrent agents produce unattributed events, so we match by session_id.
     let agent_session = agent_filter.and_then(|aid| {
         state.domain.agents.get(&crate::model::AgentId::new(aid))
             .and_then(|a| a.session_id.clone())
@@ -207,7 +207,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
 }
 
 /// Strip JSON escapes and control chars from detail text for clean display.
-/// Preserves real newlines for diff-style content.
+/// Converts escaped newlines (\\n) to actual newlines for diff-style content.
 pub fn clean_detail(s: &str) -> String {
     s.replace("\\\"", "\"")
         .replace("\\t", " ")
@@ -261,12 +261,21 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
                 i += 1; // skip closing fence
             }
 
-            let ext = lang
-                .as_deref()
-                .map(super::syntax::lang_to_extension)
-                .or_else(|| ext_hint.map(|e| e.to_string()))
-                .unwrap_or_else(|| "txt".to_string());
-            result.extend(super::syntax::highlight_code_block(&code_lines, &ext));
+            if code_lines.is_empty() {
+                result.push(Line::from(Span::styled(
+                    "  (empty code block)",
+                    Style::default()
+                        .fg(Theme::MUTED_TEXT)
+                        .add_modifier(Modifier::DIM),
+                )));
+            } else {
+                let ext = lang
+                    .as_deref()
+                    .map(super::syntax::lang_to_extension)
+                    .or_else(|| ext_hint.map(|e| e.to_string()))
+                    .unwrap_or_else(|| "txt".to_string());
+                result.extend(super::syntax::highlight_code_block(&code_lines, &ext));
+            }
             continue;
         }
 
@@ -723,5 +732,68 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(header_text.contains("Explore"));
+    }
+
+    #[test]
+    fn event_matches_search_empty_query() {
+        let kind = HookEventKind::SessionStart;
+        assert!(event_matches_search(&kind, "", None));
+    }
+
+    #[test]
+    fn event_matches_search_case_insensitive() {
+        // Note: event_matches_search expects the query to be pre-lowercased
+        let kind = HookEventKind::pre_tool_use("Read", "file.rs".to_string());
+        assert!(event_matches_search(&kind, "read", None));
+        // Mixed case tool name "Read" matches lowercase query "read"
+    }
+
+    #[test]
+    fn event_matches_search_in_tool_name() {
+        let kind = HookEventKind::pre_tool_use("Read", "file.rs".to_string());
+        assert!(event_matches_search(&kind, "read", None));
+        assert!(!event_matches_search(&kind, "write", None));
+    }
+
+    #[test]
+    fn event_matches_search_in_detail() {
+        let kind = HookEventKind::pre_tool_use("Read", "my_file.rs".to_string());
+        assert!(event_matches_search(&kind, "my_file", None));
+        assert!(event_matches_search(&kind, "file", None));
+        assert!(!event_matches_search(&kind, "other", None));
+    }
+
+    #[test]
+    fn event_matches_search_in_agent_id() {
+        let kind = HookEventKind::subagent_start(Some("Test task".into()));
+        let agent_id = crate::model::AgentId::new("explore-agent-123");
+        assert!(event_matches_search(&kind, "explore", Some(&agent_id)));
+        assert!(event_matches_search(&kind, "123", Some(&agent_id)));
+        assert!(!event_matches_search(&kind, "write", Some(&agent_id)));
+    }
+
+    #[test]
+    fn event_matches_search_special_chars_no_panic() {
+        // Regex metacharacters should be treated as literal strings
+        let kind = HookEventKind::pre_tool_use("Read", "file[1].rs".to_string());
+        // Should not panic even with regex metacharacters
+        let _ = event_matches_search(&kind, "a.*[b]", None);
+        let _ = event_matches_search(&kind, "[1]", None);
+        let _ = event_matches_search(&kind, "(test)", None);
+    }
+
+    #[test]
+    fn event_matches_search_unicode() {
+        let kind = HookEventKind::pre_tool_use("Read", "日本語.rs".to_string());
+        assert!(event_matches_search(&kind, "日本", None));
+        assert!(event_matches_search(&kind, "本語", None));
+        assert!(!event_matches_search(&kind, "中文", None));
+    }
+
+    #[test]
+    fn event_matches_search_header_text() {
+        let kind = HookEventKind::SessionStart;
+        assert!(event_matches_search(&kind, "session", None));
+        assert!(event_matches_search(&kind, "started", None));
     }
 }

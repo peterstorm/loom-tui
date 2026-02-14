@@ -149,7 +149,7 @@ fn render_status_column(
                 Span::styled(" ", Style::default().bg(bg)),
             ];
 
-            // Truncate description
+            // Truncate long descriptions (>15 chars) to 12 chars + "..."
             let description = if kt.task.description.len() > 15 {
                 format!("{}...", &kt.task.description[..12])
             } else {
@@ -266,5 +266,156 @@ fn group_tasks_by_status<'a>(
         implemented,
         completed,
         failed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Task, TaskGraph, TaskStatus, Wave};
+
+    #[test]
+    fn group_tasks_by_status_all_statuses() {
+        let tasks = vec![
+            Task::new("t1", "Pending task".into(), TaskStatus::Pending),
+            Task::new("t2", "Running task".into(), TaskStatus::Running),
+            Task::new("t3", "Implemented task".into(), TaskStatus::Implemented),
+            Task::new("t4", "Completed task".into(), TaskStatus::Completed),
+            Task::new(
+                "t5",
+                "Failed task".into(),
+                TaskStatus::Failed {
+                    reason: "error".into(),
+                    retry_count: 0,
+                },
+            ),
+        ];
+
+        let wave = Wave::new(1, tasks);
+        let task_graph = TaskGraph::new(vec![wave]);
+        let grouped = group_tasks_by_status(&task_graph, "");
+
+        assert_eq!(grouped.pending.len(), 1);
+        assert_eq!(grouped.running.len(), 1);
+        assert_eq!(grouped.implemented.len(), 1);
+        assert_eq!(grouped.completed.len(), 1);
+        assert_eq!(grouped.failed.len(), 1);
+    }
+
+    #[test]
+    fn group_tasks_by_status_empty_task_graph() {
+        let task_graph = TaskGraph::new(vec![]);
+        let grouped = group_tasks_by_status(&task_graph, "");
+
+        assert_eq!(grouped.pending.len(), 0);
+        assert_eq!(grouped.running.len(), 0);
+        assert_eq!(grouped.implemented.len(), 0);
+        assert_eq!(grouped.completed.len(), 0);
+        assert_eq!(grouped.failed.len(), 0);
+    }
+
+    #[test]
+    fn group_tasks_by_status_with_filter() {
+        let tasks = vec![
+            Task::new("t1", "Test task one".into(), TaskStatus::Pending),
+            Task::new("t2", "Another task".into(), TaskStatus::Pending),
+            Task::new("t3", "Test task two".into(), TaskStatus::Running),
+        ];
+
+        let wave = Wave::new(1, tasks);
+        let task_graph = TaskGraph::new(vec![wave]);
+        let grouped = group_tasks_by_status(&task_graph, "test");
+
+        // Should only include tasks with "test" in description
+        assert_eq!(grouped.pending.len(), 1);
+        assert_eq!(grouped.running.len(), 1);
+        assert_eq!(grouped.implemented.len(), 0);
+    }
+
+    #[test]
+    fn group_tasks_by_status_filter_case_insensitive() {
+        let tasks = vec![
+            Task::new("t1", "TEST task".into(), TaskStatus::Pending),
+            Task::new("t2", "test task".into(), TaskStatus::Running),
+            Task::new("t3", "TeSt task".into(), TaskStatus::Completed),
+        ];
+
+        let wave = Wave::new(1, tasks);
+        let task_graph = TaskGraph::new(vec![wave]);
+        let grouped = group_tasks_by_status(&task_graph, "TEST");
+
+        assert_eq!(grouped.pending.len(), 1);
+        assert_eq!(grouped.running.len(), 1);
+        assert_eq!(grouped.completed.len(), 1);
+    }
+
+    #[test]
+    fn group_tasks_by_status_filter_by_task_id() {
+        let tasks = vec![
+            Task::new("task-123", "Some description".into(), TaskStatus::Pending),
+            Task::new("other-456", "Another description".into(), TaskStatus::Running),
+        ];
+
+        let wave = Wave::new(1, tasks);
+        let task_graph = TaskGraph::new(vec![wave]);
+        let grouped = group_tasks_by_status(&task_graph, "123");
+
+        assert_eq!(grouped.pending.len(), 1);
+        assert_eq!(grouped.running.len(), 0);
+    }
+
+    #[test]
+    fn group_tasks_by_status_filter_by_agent_id() {
+        let mut task1 = Task::new("t1", "Task one".into(), TaskStatus::Pending);
+        task1.agent_id = Some("explore-agent".into());
+
+        let mut task2 = Task::new("t2", "Task two".into(), TaskStatus::Running);
+        task2.agent_id = Some("code-agent".into());
+
+        let wave = Wave::new(1, vec![task1, task2]);
+        let task_graph = TaskGraph::new(vec![wave]);
+        let grouped = group_tasks_by_status(&task_graph, "explore");
+
+        assert_eq!(grouped.pending.len(), 1);
+        assert_eq!(grouped.running.len(), 0);
+    }
+
+    #[test]
+    fn group_tasks_by_status_flat_index_correctness() {
+        let wave1 = Wave::new(
+            1,
+            vec![
+                Task::new("t1", "Task 1".into(), TaskStatus::Completed),
+                Task::new("t2", "Task 2".into(), TaskStatus::Pending),
+            ],
+        );
+        let wave2 = Wave::new(
+            2,
+            vec![
+                Task::new("t3", "Task 3".into(), TaskStatus::Running),
+                Task::new("t4", "Task 4".into(), TaskStatus::Completed),
+            ],
+        );
+
+        let task_graph = TaskGraph::new(vec![wave1, wave2]);
+        let grouped = group_tasks_by_status(&task_graph, "");
+
+        // Verify flat_index tracks correctly across waves
+        assert_eq!(grouped.completed[0].flat_index, 0); // t1 is first
+        assert_eq!(grouped.pending[0].flat_index, 1); // t2 is second
+        assert_eq!(grouped.running[0].flat_index, 2); // t3 is third
+        assert_eq!(grouped.completed[1].flat_index, 3); // t4 is fourth
+    }
+
+    #[test]
+    fn group_tasks_by_status_wave_number_correctness() {
+        let wave1 = Wave::new(1, vec![Task::new("t1", "Task 1".into(), TaskStatus::Pending)]);
+        let wave2 = Wave::new(2, vec![Task::new("t2", "Task 2".into(), TaskStatus::Running)]);
+
+        let task_graph = TaskGraph::new(vec![wave1, wave2]);
+        let grouped = group_tasks_by_status(&task_graph, "");
+
+        assert_eq!(grouped.pending[0].wave_number, 1);
+        assert_eq!(grouped.running[0].wave_number, 2);
     }
 }

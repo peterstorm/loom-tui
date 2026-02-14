@@ -407,29 +407,52 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     }
 }
 
-/// Enrich SessionStart event with transcript_path if not already present.
-/// Performs filesystem I/O to derive and verify the transcript path.
+/// Enrich SessionStart event with transcript_path and git_branch if not already present.
+/// Performs filesystem I/O to derive and verify the transcript path and get git branch.
 fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::model::HookEvent {
-    // Skip if transcript_path already provided
-    if event.raw.get("transcript_path").is_some() {
+    let needs_transcript = event.raw.get("transcript_path").is_none();
+    let needs_git_branch = event.raw.get("git_branch").is_none();
+
+    if !needs_transcript && !needs_git_branch {
         return event;
     }
 
-    // Extract cwd and session_id from the event
+    // Extract cwd and session_id from the event (clone to avoid borrow conflicts)
     let cwd = event.raw.get("cwd")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     let session_id = event.session_id.as_ref().map(|s| s.as_str()).unwrap_or("");
 
-    // Derive transcript path (I/O happens here, in the shell)
-    if let Some(transcript_path) = derive_transcript_path(cwd, session_id) {
-        // Add to raw JSON so update() can access it
-        if let serde_json::Value::Object(ref mut map) = event.raw {
-            map.insert("transcript_path".to_string(), serde_json::Value::String(transcript_path));
+    if let serde_json::Value::Object(ref mut map) = event.raw {
+        // Derive transcript path (I/O happens here, in the shell)
+        if needs_transcript {
+            if let Some(transcript_path) = derive_transcript_path(&cwd, session_id) {
+                map.insert("transcript_path".to_string(), serde_json::Value::String(transcript_path));
+            }
+        }
+
+        // Get git branch (I/O happens here, in the shell)
+        if needs_git_branch {
+            if let Some(git_branch) = get_current_git_branch() {
+                map.insert("git_branch".to_string(), serde_json::Value::String(git_branch));
+            }
         }
     }
 
     event
+}
+
+/// Get current git branch by executing git command.
+/// Returns None if not in a git repo or git command fails.
+fn get_current_git_branch() -> Option<String> {
+    std::process::Command::new("git")
+        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

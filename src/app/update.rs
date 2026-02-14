@@ -31,62 +31,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             let is_assistant_text = matches!(event.kind, HookEventKind::AssistantText { .. });
             let event_session = &event.session_id;
 
-            // Attribution logic:
-            // - Hook events (tool use etc.): match by session_id (agents store parent session_id)
-            // - AssistantText: ONLY use transcript_agent_map. Don't use session_id matching
-            //   because the main transcript shares the parent session_id with subagents,
-            //   which would incorrectly attribute the main session's reasoning to subagents.
-            // Attribution: resolve agent_id + track confidence.
-            // Confident = explicit agent_id or single-candidate match.
-            // Not confident = multiple active agents in session (ambiguous).
-            let mut attribution_confident = false;
-            let agent_id = event.agent_id.clone()
-                .map(|id| { attribution_confident = true; id })
-                .or_else(|| {
-                    event_session.as_ref().and_then(|sid| {
-                        let candidates = state.domain.transcript_agent_map.get(sid)?;
-                        if candidates.len() == 1 {
-                            attribution_confident = true;
-                            return Some(candidates[0].clone());
-                        }
-                        // Multiple agents — best guess for agent messages, not confident
-                        candidates.iter()
-                            .filter_map(|aid| state.domain.agents.get(aid).map(|a| (aid, a)))
-                            .filter(|(_, a)| a.finished_at.is_none())
-                            .max_by_key(|(_, a)| a.started_at)
-                            .map(|(aid, _)| aid.clone())
-                            .or_else(|| {
-                                candidates.iter()
-                                    .filter_map(|aid| state.domain.agents.get(aid).map(|a| (aid, a)))
-                                    .max_by_key(|(_, a)| a.started_at)
-                                    .map(|(aid, _)| aid.clone())
-                            })
-                    })
-                })
-                .or_else(|| {
-                    if is_assistant_text {
-                        return None;
-                    }
-                    let mut matches: Vec<_> = state
-                        .domain
-                        .agents
-                        .iter()
-                        .filter(|(_, a)| {
-                            a.finished_at.is_none()
-                                && a.session_id == *event_session
-                        })
-                        .collect();
-
-                    if matches.len() == 1 {
-                        attribution_confident = true;
-                        Some(matches[0].0.clone())
-                    } else if matches.len() > 1 {
-                        matches.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
-                        Some(matches[0].0.clone())
-                    } else {
-                        None
-                    }
-                });
+            // Resolve agent attribution using pure function
+            let (agent_id, attribution_confident) = resolve_agent_attribution(
+                event.agent_id.as_ref(),
+                event_session.as_ref(),
+                &state.domain.transcript_agent_map,
+                &state.domain.agents,
+                is_assistant_text,
+            );
 
             match &event.kind {
                 HookEventKind::SubagentStart {
@@ -193,38 +145,32 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     let session_id = event.session_id.clone()
                         .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")).into());
 
-                    let project_path = event.raw.get("cwd")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .unwrap_or_else(|| state.meta.project_path.clone());
+                    // Only create session if not already active (idempotent)
+                    // Prevents duplicate SessionStart events from resetting counters
+                    if !state.domain.active_sessions.contains_key(&session_id) {
+                        let project_path = event.raw.get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| state.meta.project_path.clone());
 
-                    // Transcript path is pre-computed in the imperative shell (watcher)
-                    let transcript_path = event.raw.get("transcript_path")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+                        // Transcript path and git branch are pre-computed in the imperative shell (watcher)
+                        let transcript_path = event.raw.get("transcript_path")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
 
-                    // Git branch from event or fallback to current branch
-                    let git_branch = event.raw.get("git_branch")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(|| {
-                            std::process::Command::new("git")
-                                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                                .output()
-                                .ok()
-                                .and_then(|o| String::from_utf8(o.stdout).ok())
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                        });
+                        let git_branch = event.raw.get("git_branch")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
 
-                    let mut meta = SessionMeta::new(
-                        session_id.clone(),
-                        event.timestamp,
-                        project_path,
-                    );
-                    meta.transcript_path = transcript_path;
-                    meta.git_branch = git_branch;
-                    state.domain.active_sessions.insert(session_id, meta);
+                        let mut meta = SessionMeta::new(
+                            session_id.clone(),
+                            event.timestamp,
+                            project_path,
+                        );
+                        meta.transcript_path = transcript_path;
+                        meta.git_branch = git_branch;
+                        state.domain.active_sessions.insert(session_id, meta);
+                    }
                 }
                 HookEventKind::SessionEnd => {
                     let session_id = event.session_id.clone()
@@ -392,6 +338,81 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
     if agents_changed {
         state.recompute_sorted_keys();
+    }
+}
+
+/// Pure function to resolve agent attribution from event data.
+///
+/// Returns (agent_id, is_confident) where:
+/// - Confident = explicit agent_id or single-candidate match
+/// - Not confident = multiple active agents (ambiguous, best guess)
+///
+/// Attribution strategy:
+/// 1. Explicit agent_id → confident
+/// 2. Single candidate in transcript_agent_map → confident
+/// 3. Multiple candidates → pick most recent active, not confident
+/// 4. Fall back to session_id match (unless is_assistant_text) → confident if single match
+fn resolve_agent_attribution(
+    explicit_agent_id: Option<&AgentId>,
+    session_id: Option<&SessionId>,
+    transcript_agent_map: &std::collections::BTreeMap<SessionId, Vec<AgentId>>,
+    agents: &std::collections::BTreeMap<AgentId, Agent>,
+    is_assistant_text: bool,
+) -> (Option<AgentId>, bool) {
+    // Explicit agent_id is always confident
+    if let Some(id) = explicit_agent_id {
+        return (Some(id.clone()), true);
+    }
+
+    // Try transcript_agent_map (session → agents mapping)
+    if let Some(sid) = session_id {
+        if let Some(candidates) = transcript_agent_map.get(sid) {
+            if candidates.len() == 1 {
+                return (Some(candidates[0].clone()), true);
+            }
+
+            // Multiple agents — best guess: most recent active agent
+            let agent_id = candidates
+                .iter()
+                .filter_map(|aid| agents.get(aid).map(|a| (aid, a)))
+                .filter(|(_, a)| a.finished_at.is_none())
+                .max_by_key(|(_, a)| a.started_at)
+                .map(|(aid, _)| aid.clone())
+                .or_else(|| {
+                    // No active agents, pick most recent finished
+                    candidates
+                        .iter()
+                        .filter_map(|aid| agents.get(aid).map(|a| (aid, a)))
+                        .max_by_key(|(_, a)| a.started_at)
+                        .map(|(aid, _)| aid.clone())
+                });
+
+            if agent_id.is_some() {
+                return (agent_id, false); // Multiple candidates, not confident
+            }
+        }
+    }
+
+    // AssistantText events should not fall back to session_id matching
+    // (main transcript shares parent session_id with subagents)
+    if is_assistant_text {
+        return (None, false);
+    }
+
+    // Last resort: match by session_id among active agents
+    let mut matches: Vec<_> = agents
+        .iter()
+        .filter(|(_, a)| a.finished_at.is_none() && a.session_id.as_ref() == session_id)
+        .collect();
+
+    match matches.len() {
+        0 => (None, false),
+        1 => (Some(matches[0].0.clone()), true),
+        _ => {
+            // Multiple active agents, pick most recent
+            matches.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
+            (Some(matches[0].0.clone()), false)
+        }
     }
 }
 
@@ -908,6 +929,41 @@ mod tests {
 
         assert_eq!(state.domain.agents.len(), 1);
         assert_eq!(state.domain.events.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_session_start_is_idempotent() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+
+        // First SessionStart creates the session
+        let e1 = HookEvent::new(ts, HookEventKind::SessionStart)
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(e1));
+
+        // Simulate some activity that increments counters
+        let agent = HookEvent::new(ts, HookEventKind::subagent_start(None))
+            .with_agent("a01")
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(agent));
+
+        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".into()))
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(tool));
+
+        // Verify counters are set
+        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 1);
+        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].event_count, 3); // SessionStart + SubagentStart + PreToolUse
+
+        // Duplicate SessionStart should be ignored (not reset counters)
+        let e2 = HookEvent::new(ts, HookEventKind::SessionStart)
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(e2));
+
+        // Counters should remain unchanged (duplicate event still added to ring buffer and counted)
+        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 1);
+        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].event_count, 4); // +1 for duplicate event
+        assert_eq!(state.domain.active_sessions.len(), 1); // Still only 1 session
     }
 
     #[test]

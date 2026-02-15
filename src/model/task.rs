@@ -5,8 +5,8 @@ use super::ids::{AgentId, TaskId};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskGraph {
     pub waves: Vec<Wave>,
-    pub total_tasks: usize,
-    pub completed_tasks: usize,
+    total_tasks: usize,
+    completed_tasks: usize,
 }
 
 impl TaskGraph {
@@ -33,9 +33,35 @@ impl TaskGraph {
         }
     }
 
+    pub fn total_tasks(&self) -> usize {
+        self.total_tasks
+    }
+
+    pub fn completed_tasks(&self) -> usize {
+        self.completed_tasks
+    }
+
     /// Returns an iterator over all tasks across all waves, flattened.
     pub fn flat_tasks(&self) -> impl Iterator<Item = &Task> {
         self.waves.iter().flat_map(|w| &w.tasks)
+    }
+
+    /// Calculate current wave number.
+    /// Current wave = first wave with incomplete tasks, or last wave if all complete.
+    pub fn current_wave(&self) -> u32 {
+        for wave in &self.waves {
+            let all_complete = wave
+                .tasks
+                .iter()
+                .all(|t| matches!(t.status, TaskStatus::Completed));
+
+            if !all_complete {
+                return wave.number;
+            }
+        }
+
+        // All waves complete, return last wave number
+        self.waves.last().map(|w| w.number).unwrap_or(0)
     }
 }
 
@@ -127,8 +153,8 @@ mod tests {
         ];
 
         let graph = TaskGraph::new(waves);
-        assert_eq!(graph.total_tasks, 3);
-        assert_eq!(graph.completed_tasks, 1);
+        assert_eq!(graph.total_tasks(), 3);
+        assert_eq!(graph.completed_tasks(), 1);
     }
 
     #[test]
@@ -144,5 +170,192 @@ mod tests {
         let json = serde_json::to_string(&failed).unwrap();
         assert!(json.contains("\"failed\""));
         assert!(json.contains("\"retry_count\":2"));
+    }
+
+    #[test]
+    fn current_wave_returns_first_incomplete() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
+            ),
+            Wave::new(
+                2,
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
+            ),
+            Wave::new(
+                3,
+                vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.current_wave(), 2);
+    }
+
+    #[test]
+    fn current_wave_returns_last_if_all_complete() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
+            ),
+            Wave::new(
+                2,
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Completed)],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.current_wave(), 2);
+    }
+
+    #[test]
+    fn current_wave_returns_zero_for_empty_graph() {
+        let graph = TaskGraph::empty();
+        assert_eq!(graph.current_wave(), 0);
+    }
+
+    #[test]
+    fn task_graph_new_with_empty_waves() {
+        let graph = TaskGraph::new(vec![]);
+        assert_eq!(graph.total_tasks(), 0);
+        assert_eq!(graph.completed_tasks(), 0);
+        assert_eq!(graph.waves.len(), 0);
+    }
+
+    #[test]
+    fn task_graph_new_all_completed() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Completed),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Completed),
+                ],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 3);
+        assert_eq!(graph.completed_tasks(), 3);
+    }
+
+    #[test]
+    fn task_graph_new_all_pending() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Pending),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Pending),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
+                ],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 3);
+        assert_eq!(graph.completed_tasks(), 0);
+    }
+
+    #[test]
+    fn task_graph_new_mixed_statuses() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T4", "Task 4".to_string(), TaskStatus::Implemented),
+                    Task::new("T5", "Task 5".to_string(), TaskStatus::Failed {
+                        reason: "error".to_string(),
+                        retry_count: 1,
+                    }),
+                ],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 5);
+        assert_eq!(graph.completed_tasks(), 1); // Only T1 is completed
+    }
+
+    #[test]
+    fn task_graph_new_computes_totals_correctly() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Completed),
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Completed),
+                ],
+            ),
+            Wave::new(
+                3,
+                vec![
+                    Task::new("T4", "Task 4".to_string(), TaskStatus::Running),
+                    Task::new("T5", "Task 5".to_string(), TaskStatus::Pending),
+                    Task::new("T6", "Task 6".to_string(), TaskStatus::Pending),
+                ],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 6);
+        assert_eq!(graph.completed_tasks(), 3);
+    }
+
+    #[test]
+    fn task_graph_new_single_wave_empty_tasks() {
+        let waves = vec![Wave::new(1, vec![])];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 0);
+        assert_eq!(graph.completed_tasks(), 0);
+        assert_eq!(graph.waves.len(), 1);
+    }
+
+    #[test]
+    fn task_graph_new_multiple_waves_some_empty() {
+        let waves = vec![
+            Wave::new(
+                1,
+                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
+            ),
+            Wave::new(2, vec![]), // Empty wave
+            Wave::new(
+                3,
+                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Pending)],
+            ),
+        ];
+
+        let graph = TaskGraph::new(waves);
+        assert_eq!(graph.total_tasks(), 2);
+        assert_eq!(graph.completed_tasks(), 1);
+        assert_eq!(graph.waves.len(), 3);
     }
 }

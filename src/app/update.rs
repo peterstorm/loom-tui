@@ -1,8 +1,6 @@
-use chrono::Utc;
-
 use crate::app::{handle_key, AppState, ViewState};
 use crate::event::AppEvent;
-use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall, ToolName};
+use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall};
 use crate::session;
 use std::time::Duration;
 
@@ -12,7 +10,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
     match event {
         AppEvent::TaskGraphUpdated(graph) => {
-            let total = graph.total_tasks as u32;
+            let total = graph.total_tasks() as u32;
             state.domain.task_graph = Some(graph);
             // Update task count on all active sessions (task graph is project-level)
             for meta in state.domain.active_sessions.values_mut() {
@@ -138,6 +136,8 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 }
                             }
                         });
+                        // Increment cached tool count
+                        state.increment_tool_count(id);
                     }
                 }
                 HookEventKind::SessionStart => {
@@ -190,7 +190,12 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                             .to_std()
                             .unwrap_or_default();
                         meta.duration = Some(dur);
-                        let archive = session::build_archive(&state.domain, &meta);
+                        let archive = session::build_archive(
+                            state.domain.task_graph.as_ref(),
+                            &state.domain.events,
+                            &state.domain.agents,
+                            &meta,
+                        );
                         let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
                             .with_data(archive);
                         state.domain.sessions.insert(0, archived);
@@ -250,15 +255,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             state.domain.events.push_back(enriched);
         }
 
-        AppEvent::AgentStarted(agent_id) => {
-            let agent = Agent::new(agent_id.clone(), Utc::now());
+        AppEvent::AgentStarted { agent_id, timestamp } => {
+            let agent = Agent::new(agent_id.clone(), timestamp);
             state.domain.agents.insert(agent_id, agent);
             agents_changed = true;
         }
 
-        AppEvent::AgentStopped(agent_id) => {
+        AppEvent::AgentStopped { agent_id, timestamp } => {
             state.domain.agents.entry(agent_id).and_modify(|agent| {
-                agent.finished_at = Some(Utc::now());
+                agent.finished_at = Some(timestamp);
             });
             agents_changed = true;
         }
@@ -286,7 +291,12 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     meta.status = SessionStatus::Cancelled;
                     let dur = (now - meta.timestamp).to_std().unwrap_or_default();
                     meta.duration = Some(dur);
-                    let archive = session::build_archive(&state.domain, &meta);
+                    let archive = session::build_archive(
+                        state.domain.task_graph.as_ref(),
+                        &state.domain.events,
+                        &state.domain.agents,
+                        &meta,
+                    );
                     let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
                         .with_data(archive);
                     state.domain.sessions.insert(0, archived);
@@ -332,6 +342,11 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
         AppEvent::LoadSessionRequested(idx) => {
             state.ui.loading_session = Some(idx);
+        }
+
+        AppEvent::InstallHookRequested => {
+            // Side-effect (install_hook) handled in main event loop
+            // Update just marks intent — no I/O in functional core
         }
     }
 
@@ -418,23 +433,20 @@ fn resolve_agent_attribution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use crate::model::{
         Agent, AgentId, AgentMessage, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta, TaskGraph,
-        TaskId, Wave,
+        Wave,
     };
     use std::collections::BTreeMap;
 
     #[test]
     fn update_task_graph() {
         let mut state = AppState::new();
-        let graph = TaskGraph {
-            waves: vec![Wave {
-                number: 1,
-                tasks: vec![],
-            }],
-            total_tasks: 0,
-            completed_tasks: 0,
-        };
+        let graph = TaskGraph::new(vec![Wave {
+            number: 1,
+            tasks: vec![],
+        }]);
 
         update(&mut state, AppEvent::TaskGraphUpdated(graph.clone()));
 
@@ -525,28 +537,43 @@ mod tests {
     #[test]
     fn agent_started_inserts_new_agent() {
         let mut state = AppState::new();
-        update(&mut state, AppEvent::AgentStarted("a01".into()));
+        let timestamp = Utc::now();
+        update(&mut state, AppEvent::AgentStarted {
+            agent_id: "a01".into(),
+            timestamp,
+        });
 
         assert_eq!(state.domain.agents.len(), 1);
         assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
-        assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_none());
+        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
+        assert!(agent.finished_at.is_none());
+        assert_eq!(agent.started_at, timestamp);
     }
 
     #[test]
     fn agent_stopped_marks_finished() {
         let mut state = AppState::new();
-        let agent = Agent::new("a01", Utc::now());
+        let start_time = Utc::now();
+        let agent = Agent::new("a01", start_time);
         state.domain.agents.insert("a01".into(), agent);
 
-        update(&mut state, AppEvent::AgentStopped("a01".into()));
+        let stop_time = start_time + chrono::Duration::seconds(10);
+        update(&mut state, AppEvent::AgentStopped {
+            agent_id: "a01".into(),
+            timestamp: stop_time,
+        });
 
-        assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_some());
+        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
+        assert_eq!(agent.finished_at, Some(stop_time));
     }
 
     #[test]
     fn agent_stopped_nonexistent_no_panic() {
         let mut state = AppState::new();
-        update(&mut state, AppEvent::AgentStopped("nonexistent".into()));
+        update(&mut state, AppEvent::AgentStopped {
+            agent_id: "nonexistent".into(),
+            timestamp: Utc::now(),
+        });
 
         assert!(state.domain.agents.is_empty());
     }
@@ -610,13 +637,29 @@ mod tests {
 
     #[test]
     fn session_loaded_populates_data() {
+        use crate::model::{Task, TaskStatus};
+
         let mut state = AppState::new();
         let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
-        let graph = TaskGraph {
-            waves: vec![],
-            total_tasks: 5,
-            completed_tasks: 2,
-        };
+
+        // Create task graph with 5 tasks (2 completed)
+        let graph = TaskGraph::new(vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Completed),
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T4", "Task 4".to_string(), TaskStatus::Running),
+                    Task::new("T5", "Task 5".to_string(), TaskStatus::Pending),
+                ],
+            ),
+        ]);
 
         let mut agents = BTreeMap::new();
         agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
@@ -637,7 +680,7 @@ mod tests {
         update(&mut state, AppEvent::SessionLoaded(archive));
 
         let data = state.domain.sessions[0].data.as_ref().unwrap();
-        assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 5);
+        assert_eq!(data.task_graph.as_ref().unwrap().total_tasks(), 5);
         assert_eq!(data.agents.len(), 1);
         assert_eq!(data.events.len(), 1);
         assert!(state.ui.loading_session.is_none());
@@ -1070,14 +1113,10 @@ mod tests {
             .with_session("s1");
         update(&mut state, AppEvent::HookEventReceived(s));
 
-        let graph = crate::model::TaskGraph {
-            waves: vec![],
-            total_tasks: 7,
-            completed_tasks: 2,
-        };
+        let graph = crate::model::TaskGraph::empty();
         update(&mut state, AppEvent::TaskGraphUpdated(graph));
 
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].task_count, 7);
+        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].task_count, 0);
     }
 
     #[test]
@@ -1432,5 +1471,156 @@ mod tests {
         );
         assert_eq!(resolved, None);
         assert!(!confident);
+    }
+
+    // ============================================================================
+    // Agent Tool Count Cache Tests
+    // ============================================================================
+
+    #[test]
+    fn tool_count_incremented_on_post_tool_use() {
+        let mut state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01");
+        let pre = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
+        )
+        .with_agent("a01");
+        let post = HookEvent::new(
+            Utc::now(),
+            HookEventKind::post_tool_use("Read", "ok".to_string(), Some(250)),
+        )
+        .with_agent("a01");
+
+        update(&mut state, AppEvent::HookEventReceived(start));
+        update(&mut state, AppEvent::HookEventReceived(pre));
+        update(&mut state, AppEvent::HookEventReceived(post));
+
+        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 1);
+    }
+
+    #[test]
+    fn tool_count_zero_for_agent_with_no_tools() {
+        let mut state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01");
+        update(&mut state, AppEvent::HookEventReceived(start));
+
+        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 0);
+    }
+
+    #[test]
+    fn tool_count_tracks_multiple_tools() {
+        let mut state = AppState::new();
+        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01");
+        update(&mut state, AppEvent::HookEventReceived(start));
+
+        // 3 tool calls
+        for i in 0..3 {
+            let pre = HookEvent::new(
+                Utc::now(),
+                HookEventKind::pre_tool_use("Read", format!("file{}.rs", i)),
+            )
+            .with_agent("a01");
+            let post = HookEvent::new(
+                Utc::now(),
+                HookEventKind::post_tool_use("Read", "ok".to_string(), None),
+            )
+            .with_agent("a01");
+            update(&mut state, AppEvent::HookEventReceived(pre));
+            update(&mut state, AppEvent::HookEventReceived(post));
+        }
+
+        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 3);
+    }
+
+    #[test]
+    fn tool_count_per_agent_independent() {
+        let mut state = AppState::new();
+        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a01");
+        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
+            .with_agent("a02");
+        update(&mut state, AppEvent::HookEventReceived(s1));
+        update(&mut state, AppEvent::HookEventReceived(s2));
+
+        // a01: 2 tools, a02: 1 tool
+        for _ in 0..2 {
+            let pre = HookEvent::new(
+                Utc::now(),
+                HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
+            )
+            .with_agent("a01");
+            let post = HookEvent::new(
+                Utc::now(),
+                HookEventKind::post_tool_use("Read", "ok".to_string(), None),
+            )
+            .with_agent("a01");
+            update(&mut state, AppEvent::HookEventReceived(pre));
+            update(&mut state, AppEvent::HookEventReceived(post));
+        }
+
+        let pre = HookEvent::new(
+            Utc::now(),
+            HookEventKind::pre_tool_use("Bash", "ls".to_string()),
+        )
+        .with_agent("a02");
+        let post = HookEvent::new(
+            Utc::now(),
+            HookEventKind::post_tool_use("Bash", "ok".to_string(), None),
+        )
+        .with_agent("a02");
+        update(&mut state, AppEvent::HookEventReceived(pre));
+        update(&mut state, AppEvent::HookEventReceived(post));
+
+        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 2);
+        assert_eq!(state.agent_tool_count(&AgentId::new("a02")), 1);
+    }
+
+    // ============================================================================
+    // Timestamp Injection Tests (FR-I9)
+    // ============================================================================
+
+    #[test]
+    fn agent_started_event_uses_provided_timestamp_not_utc_now() {
+        let mut state = AppState::new();
+        let past_timestamp = Utc::now() - chrono::Duration::hours(2);
+
+        update(&mut state, AppEvent::AgentStarted {
+            agent_id: "a01".into(),
+            timestamp: past_timestamp,
+        });
+
+        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
+        assert_eq!(agent.started_at, past_timestamp);
+        // Verify it's NOT using current time
+        assert!(agent.started_at < Utc::now() - chrono::Duration::hours(1));
+    }
+
+    #[test]
+    fn agent_stopped_event_uses_provided_timestamp_not_utc_now() {
+        let mut state = AppState::new();
+        let start = Utc::now() - chrono::Duration::hours(2);
+        state.domain.agents.insert("a01".into(), Agent::new("a01", start));
+
+        let stop = start + chrono::Duration::minutes(30);
+        update(&mut state, AppEvent::AgentStopped {
+            agent_id: "a01".into(),
+            timestamp: stop,
+        });
+
+        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
+        assert_eq!(agent.finished_at, Some(stop));
+        // Verify it's NOT using current time
+        assert!(agent.finished_at.unwrap() < Utc::now() - chrono::Duration::hours(1));
+    }
+
+    #[test]
+    fn install_hook_requested_is_handled() {
+        let mut state = AppState::new();
+        // Should not panic or error
+        update(&mut state, AppEvent::InstallHookRequested);
     }
 }

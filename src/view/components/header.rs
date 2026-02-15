@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{AppState, ViewState};
 use crate::model::Theme;
+use super::format::format_elapsed;
 
 /// Render header bar.
 /// Shows: view indicator, wave, task progress, agents, elapsed time.
@@ -27,7 +28,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 /// Pure function: build header text from state.
 fn build_header_text(state: &AppState) -> Line<'static> {
     let active_agents = state.domain.agents.values().filter(|a| a.finished_at.is_none()).count();
-    let elapsed = format_elapsed(state.meta.started_at.elapsed().as_secs());
+    let elapsed = format_elapsed(state.meta.started_at.elapsed().as_secs() as i64);
 
     let view_indicator = match state.ui.view {
         ViewState::Dashboard => "[1:Dashboard]",
@@ -54,8 +55,8 @@ fn build_header_text(state: &AppState) -> Line<'static> {
 
     match &state.domain.task_graph {
         Some(graph) => {
-            let current_wave = calculate_current_wave(graph);
-            let progress = format!("{}/{}", graph.completed_tasks, graph.total_tasks);
+            let current_wave = graph.current_wave();
+            let progress = format!("{}/{}", graph.completed_tasks(), graph.total_tasks());
 
             spans.push(Span::styled(
                 "  W",
@@ -91,36 +92,6 @@ fn build_header_text(state: &AppState) -> Line<'static> {
     ));
 
     Line::from(spans)
-}
-
-fn format_elapsed(secs: u64) -> String {
-    let mins = secs / 60;
-    let hours = mins / 60;
-    if hours > 0 {
-        format!("{}h{}m", hours, mins % 60)
-    } else if mins > 0 {
-        format!("{}m{}s", mins, secs % 60)
-    } else {
-        format!("{}s", secs)
-    }
-}
-
-/// Calculate current wave number from task graph.
-/// Current wave = first wave with incomplete tasks, or last wave if all complete.
-fn calculate_current_wave(graph: &crate::model::TaskGraph) -> u32 {
-    for wave in &graph.waves {
-        let all_complete = wave
-            .tasks
-            .iter()
-            .all(|t| matches!(t.status, crate::model::TaskStatus::Completed));
-
-        if !all_complete {
-            return wave.number;
-        }
-    }
-
-    // All waves complete, return last wave number
-    graph.waves.last().map(|w| w.number).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -191,50 +162,6 @@ mod tests {
         assert!(text.contains("W1"));
         assert!(text.contains("1/2"));
         assert!(text.contains("1 agents"));
-    }
-
-    #[test]
-    fn calculate_current_wave_returns_first_incomplete() {
-        let waves = vec![
-            Wave::new(
-                1,
-                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
-            ),
-            Wave::new(
-                2,
-                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Running)],
-            ),
-            Wave::new(
-                3,
-                vec![Task::new("T3", "Task 3".to_string(), TaskStatus::Pending)],
-            ),
-        ];
-
-        let graph = TaskGraph::new(waves);
-        assert_eq!(calculate_current_wave(&graph), 2);
-    }
-
-    #[test]
-    fn calculate_current_wave_returns_last_if_all_complete() {
-        let waves = vec![
-            Wave::new(
-                1,
-                vec![Task::new("T1", "Task 1".to_string(), TaskStatus::Completed)],
-            ),
-            Wave::new(
-                2,
-                vec![Task::new("T2", "Task 2".to_string(), TaskStatus::Completed)],
-            ),
-        ];
-
-        let graph = TaskGraph::new(waves);
-        assert_eq!(calculate_current_wave(&graph), 2);
-    }
-
-    #[test]
-    fn calculate_current_wave_returns_zero_for_empty_graph() {
-        let graph = TaskGraph::empty();
-        assert_eq!(calculate_current_wave(&graph), 0);
     }
 
     #[test]

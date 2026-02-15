@@ -1,4 +1,4 @@
-use loom_tui::model::{AgentId, HookEventKind, MessageKind, SessionId, TaskId, TaskStatus, ToolName};
+use loom_tui::model::{AgentId, HookEventKind, MessageKind, SessionId, TaskStatus};
 use loom_tui::watcher::{
     extract_active_agent_ids, parse_hook_events, parse_task_graph, parse_transcript, TailState,
 };
@@ -54,8 +54,8 @@ fn test_parse_task_graph_comprehensive() {
 
     let graph = result.unwrap();
     assert_eq!(graph.waves.len(), 2);
-    assert_eq!(graph.total_tasks, 3);
-    assert_eq!(graph.completed_tasks, 1);
+    assert_eq!(graph.total_tasks(), 3);
+    assert_eq!(graph.completed_tasks(), 1);
 
     // Verify wave 1
     assert_eq!(graph.waves[0].number, 1);
@@ -124,7 +124,7 @@ fn test_parse_task_graph_empty() {
 
     let graph = result.unwrap();
     assert_eq!(graph.waves.len(), 0);
-    assert_eq!(graph.total_tasks, 0);
+    assert_eq!(graph.total_tasks(), 0);
 }
 
 #[test]

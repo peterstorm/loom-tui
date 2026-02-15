@@ -408,8 +408,8 @@ mod tests {
         assert!(result.is_ok());
 
         let graph = result.unwrap();
-        assert_eq!(graph.total_tasks, 2);
-        assert_eq!(graph.completed_tasks, 0);
+        assert_eq!(graph.total_tasks(), 2);
+        assert_eq!(graph.completed_tasks(), 0);
         assert_eq!(graph.waves.len(), 1);
         assert_eq!(graph.waves[0].tasks.len(), 2);
     }
@@ -434,7 +434,7 @@ mod tests {
         assert!(result.is_ok());
 
         let graph = result.unwrap();
-        assert_eq!(graph.total_tasks, 0);
+        assert_eq!(graph.total_tasks(), 0);
         assert_eq!(graph.waves.len(), 0);
     }
 
@@ -614,7 +614,7 @@ invalid
 
         let graph = result.unwrap();
         assert_eq!(graph.waves.len(), 2);
-        assert_eq!(graph.total_tasks, 3);
+        assert_eq!(graph.total_tasks(), 3);
 
         // Wave 1 has 2 tasks
         assert_eq!(graph.waves[0].number, 1);

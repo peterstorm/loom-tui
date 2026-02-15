@@ -618,3 +618,57 @@ fn view_render_with_both_overlays() {
         .draw(|frame| loom_tui::view::render(&state, frame))
         .unwrap();
 }
+
+// Scroll offset clamping tests (FR-C2)
+
+#[test]
+fn event_stream_clamps_scroll_offset_beyond_u16_max() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut state = AppState::new();
+    // Set scroll_offset beyond u16::MAX to test clamping
+    state.ui.scroll_offsets.event_stream = 70000; // > u16::MAX (65535)
+
+    // Should not panic — scroll offset is clamped to safe maximum
+    terminal
+        .draw(|frame| {
+            loom_tui::view::components::render_event_stream(frame, frame.area(), &state);
+        })
+        .unwrap();
+}
+
+#[test]
+fn session_detail_clamps_scroll_offset_beyond_u16_max() {
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut state = AppState::with_view(ViewState::SessionDetail);
+    // Set both left and right scroll offsets beyond u16::MAX
+    state.ui.scroll_offsets.session_detail_left = 80000;
+    state.ui.scroll_offsets.session_detail_right = 90000;
+
+    // Should not panic — scroll offsets are clamped to safe maximum
+    terminal
+        .draw(|frame| {
+            loom_tui::view::session_detail::render_session_detail(frame, &state, frame.area());
+        })
+        .unwrap();
+}
+
+#[test]
+fn event_stream_handles_large_scroll_offset() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut state = AppState::new();
+    // Test with a large but reasonable offset
+    state.ui.scroll_offsets.event_stream = 5000;
+
+    // Should render without panic
+    terminal
+        .draw(|frame| {
+            loom_tui::view::components::render_event_stream(frame, frame.area(), &state);
+        })
+        .unwrap();
+}

@@ -41,7 +41,7 @@ pub fn render_wave_river(frame: &mut Frame, area: Rect, state: &AppState) {
 fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
     match &state.domain.task_graph {
         Some(graph) if !graph.waves.is_empty() => {
-            let current_wave = calculate_current_wave_num(graph);
+            let current_wave = graph.current_wave();
             let mut lines = Vec::new();
 
             let mut wave_spans = Vec::new();
@@ -103,17 +103,6 @@ fn build_wave_river_text(state: &AppState) -> Vec<Line<'static>> {
             Style::default().fg(Theme::MUTED_TEXT),
         ))],
     }
-}
-
-/// Determine which wave is currently active (first incomplete).
-fn calculate_current_wave_num(graph: &crate::model::TaskGraph) -> u32 {
-    for wave in &graph.waves {
-        let all_complete = wave.tasks.iter().all(|t| matches!(t.status, TaskStatus::Completed));
-        if !all_complete {
-            return wave.number;
-        }
-    }
-    graph.waves.last().map(|w| w.number).unwrap_or(0)
 }
 
 /// Get symbol and color for task status.

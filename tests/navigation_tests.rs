@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use loom_tui::app::{handle_key, AppState, PanelFocus, ViewState};
-use loom_tui::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionId, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
+use loom_tui::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
 use std::path::PathBuf;
 use chrono::Utc;
 

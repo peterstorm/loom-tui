@@ -85,7 +85,7 @@ pub struct AppMeta {
     pub should_quit: bool,
 }
 
-/// Cache state (private): sorted keys, dirty flags
+/// Cache state (private): sorted keys, dirty flags, agent tool counts
 #[derive(Debug, Clone)]
 struct CacheState {
     /// Cached sorted agent keys (recomputed when dirty)
@@ -93,6 +93,9 @@ struct CacheState {
 
     /// Whether agent keys need re-sorting
     dirty: bool,
+
+    /// Cached tool counts per agent (incremented on PostToolUse events)
+    agent_tool_counts: BTreeMap<AgentId, usize>,
 }
 
 /// Main application state.
@@ -229,6 +232,7 @@ impl Default for CacheState {
         Self {
             sorted_keys: Vec::new(),
             dirty: true,
+            agent_tool_counts: BTreeMap::new(),
         }
     }
 }
@@ -308,6 +312,17 @@ impl AppState {
     /// Mark cache as dirty
     pub fn mark_cache_dirty(&mut self) {
         self.cache.dirty = true;
+    }
+
+    /// Get cached tool count for an agent.
+    /// Returns 0 if agent has no tool events.
+    pub fn agent_tool_count(&self, id: &AgentId) -> usize {
+        self.cache.agent_tool_counts.get(id).copied().unwrap_or(0)
+    }
+
+    /// Increment tool count for an agent (called on PostToolUse events).
+    pub(crate) fn increment_tool_count(&mut self, id: &AgentId) {
+        *self.cache.agent_tool_counts.entry(id.clone()).or_insert(0) += 1;
     }
 }
 
@@ -459,5 +474,142 @@ mod tests {
     fn test_errors_capacity() {
         let state = AppState::new();
         assert_eq!(state.meta.errors.capacity(), 100);
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_empty_state() {
+        let mut state = AppState::new();
+        state.recompute_sorted_keys();
+        assert!(state.sorted_agent_keys().is_empty());
+        assert!(!state.is_cache_dirty());
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_active_first_ordering() {
+        use chrono::Utc;
+
+        let mut state = AppState::new();
+
+        // Create agents with different statuses and timestamps
+        let now = Utc::now();
+
+        // Active agent (newest)
+        let mut a1 = Agent::new("a01", now);
+        a1.finished_at = None;
+        state.domain.agents.insert("a01".into(), a1);
+
+        // Finished agent
+        let mut a2 = Agent::new("a02", now - chrono::Duration::seconds(10));
+        a2.finished_at = Some(now);
+        state.domain.agents.insert("a02".into(), a2);
+
+        // Active agent (older)
+        let mut a3 = Agent::new("a03", now - chrono::Duration::seconds(20));
+        a3.finished_at = None;
+        state.domain.agents.insert("a03".into(), a3);
+
+        state.recompute_sorted_keys();
+
+        let keys = state.sorted_agent_keys();
+        assert_eq!(keys.len(), 3);
+
+        // Active agents first (newest to oldest), then finished
+        assert_eq!(keys[0].as_str(), "a01"); // active, newest
+        assert_eq!(keys[1].as_str(), "a03"); // active, older
+        assert_eq!(keys[2].as_str(), "a02"); // finished
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_all_finished() {
+        use chrono::Utc;
+
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // All finished agents, sorted by started_at desc
+        let mut a1 = Agent::new("a01", now);
+        a1.finished_at = Some(now + chrono::Duration::seconds(10));
+        state.domain.agents.insert("a01".into(), a1);
+
+        let mut a2 = Agent::new("a02", now - chrono::Duration::seconds(10));
+        a2.finished_at = Some(now);
+        state.domain.agents.insert("a02".into(), a2);
+
+        state.recompute_sorted_keys();
+
+        let keys = state.sorted_agent_keys();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].as_str(), "a01"); // newer started_at
+        assert_eq!(keys[1].as_str(), "a02");
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_all_active() {
+        use chrono::Utc;
+
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // All active agents, sorted by started_at desc
+        let a1 = Agent::new("a01", now);
+        state.domain.agents.insert("a01".into(), a1);
+
+        let a2 = Agent::new("a02", now - chrono::Duration::seconds(10));
+        state.domain.agents.insert("a02".into(), a2);
+
+        let a3 = Agent::new("a03", now - chrono::Duration::seconds(20));
+        state.domain.agents.insert("a03".into(), a3);
+
+        state.recompute_sorted_keys();
+
+        let keys = state.sorted_agent_keys();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0].as_str(), "a01"); // newest
+        assert_eq!(keys[1].as_str(), "a02");
+        assert_eq!(keys[2].as_str(), "a03"); // oldest
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_mixed_statuses() {
+        use chrono::Utc;
+
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Mix of active and finished
+        let mut a1 = Agent::new("a01", now - chrono::Duration::seconds(30));
+        a1.finished_at = Some(now);
+        state.domain.agents.insert("a01".into(), a1);
+
+        let a2 = Agent::new("a02", now - chrono::Duration::seconds(10));
+        state.domain.agents.insert("a02".into(), a2);
+
+        let mut a3 = Agent::new("a03", now - chrono::Duration::seconds(40));
+        a3.finished_at = Some(now - chrono::Duration::seconds(5));
+        state.domain.agents.insert("a03".into(), a3);
+
+        let a4 = Agent::new("a04", now - chrono::Duration::seconds(20));
+        state.domain.agents.insert("a04".into(), a4);
+
+        state.recompute_sorted_keys();
+
+        let keys = state.sorted_agent_keys();
+        assert_eq!(keys.len(), 4);
+
+        // All active first (a02, a04 by started_at desc), then finished (a01, a03 by started_at desc)
+        assert_eq!(keys[0].as_str(), "a02"); // active, newest
+        assert_eq!(keys[1].as_str(), "a04"); // active, older
+        assert_eq!(keys[2].as_str(), "a01"); // finished, newer started_at
+        assert_eq!(keys[3].as_str(), "a03"); // finished, oldest started_at
+    }
+
+    #[test]
+    fn test_recompute_sorted_keys_marks_cache_clean() {
+        let mut state = AppState::new();
+        state.mark_cache_dirty();
+        assert!(state.is_cache_dirty());
+
+        state.recompute_sorted_keys();
+        assert!(!state.is_cache_dirty());
     }
 }

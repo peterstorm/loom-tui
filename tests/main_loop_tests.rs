@@ -68,7 +68,11 @@ fn event_loop_handles_watcher_events() {
     update(&mut state, AppEvent::TaskGraphUpdated(graph));
     assert!(state.domain.task_graph.is_some());
 
-    update(&mut state, AppEvent::AgentStarted(AgentId::new("a01")));
+    let timestamp = Utc::now();
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: AgentId::new("a01"),
+        timestamp,
+    });
     assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
 
     let hook_event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
@@ -89,9 +93,19 @@ fn tick_rate_configuration() {
 fn event_loop_drains_multiple_watcher_events() {
     let mut state = AppState::new();
 
-    update(&mut state, AppEvent::AgentStarted(AgentId::new("a01")));
-    update(&mut state, AppEvent::AgentStarted(AgentId::new("a02")));
-    update(&mut state, AppEvent::AgentStarted(AgentId::new("a03")));
+    let timestamp = Utc::now();
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: AgentId::new("a01"),
+        timestamp,
+    });
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: AgentId::new("a02"),
+        timestamp,
+    });
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: AgentId::new("a03"),
+        timestamp,
+    });
 
     assert_eq!(state.domain.agents.len(), 3);
     assert!(state.domain.agents.contains_key(&AgentId::new("a01")));

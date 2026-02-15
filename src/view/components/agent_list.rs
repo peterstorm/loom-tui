@@ -9,6 +9,7 @@ use ratatui::{
 
 use crate::app::{AppState, PanelFocus};
 use crate::model::Theme;
+use super::format::format_elapsed;
 
 /// Render agent list panel for agent detail view.
 /// Shows all agents with selection highlight.
@@ -85,11 +86,8 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
                 String::new()
             };
 
-            // Count tool events for this agent
-            let tool_count = state.domain.events.iter()
-                .filter(|e| e.agent_id.as_ref() == Some(key))
-                .filter(|e| matches!(&e.kind, crate::model::HookEventKind::PostToolUse { .. }))
-                .count();
+            // Use cached tool count (O(1) lookup instead of O(n) scan)
+            let tool_count = state.agent_tool_count(key);
 
             let is_selected = selected == Some(idx);
             let bg = if is_selected {
@@ -126,16 +124,6 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
         .collect()
 }
 
-fn format_elapsed(secs: i64) -> String {
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,20 +148,5 @@ mod tests {
 
         let items = build_agent_items(&state);
         assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn format_elapsed_seconds() {
-        assert_eq!(format_elapsed(45), "45s");
-    }
-
-    #[test]
-    fn format_elapsed_minutes() {
-        assert_eq!(format_elapsed(125), "2m5s");
-    }
-
-    #[test]
-    fn format_elapsed_hours() {
-        assert_eq!(format_elapsed(3661), "1h1m");
     }
 }

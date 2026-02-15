@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::app::state::HookStatus;
+use crate::error::HookInstallError;
 
 /// Embedded hook script content (compiled into binary)
 const HOOK_SCRIPT: &str = include_str!("../../hooks/send_event.sh");
@@ -87,7 +88,7 @@ pub fn detect_hook(project_root: &Path) -> HookStatus {
 /// # Returns
 ///
 /// * `Ok(())` - Hook successfully installed
-/// * `Err(String)` - Installation failed with error message
+/// * `Err(HookInstallError)` - Installation failed with structured error
 ///
 /// # Behavior
 ///
@@ -107,28 +108,39 @@ pub fn detect_hook(project_root: &Path) -> HookStatus {
 ///     Err(e) => eprintln!("Installation failed: {}", e),
 /// }
 /// ```
-pub fn install_hook(project_root: &Path) -> Result<(), String> {
+pub fn install_hook(project_root: &Path) -> Result<(), HookInstallError> {
     let hooks_dir = project_root.join(".claude").join("hooks");
     let hook_path = hooks_dir.join(HOOK_SCRIPT_NAME);
 
     // Create hooks directory if missing
-    fs::create_dir_all(&hooks_dir)
-        .map_err(|e| format!("Failed to create hooks directory: {}", e))?;
+    fs::create_dir_all(&hooks_dir).map_err(|source| HookInstallError::CreateDir {
+        path: hooks_dir.display().to_string(),
+        source,
+    })?;
 
     // Write hook script
-    fs::write(&hook_path, HOOK_SCRIPT)
-        .map_err(|e| format!("Failed to write hook script: {}", e))?;
+    fs::write(&hook_path, HOOK_SCRIPT).map_err(|source| HookInstallError::WriteScript {
+        path: hook_path.display().to_string(),
+        source,
+    })?;
 
     // Set executable permission (Unix only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = fs::metadata(&hook_path)
-            .map_err(|e| format!("Failed to read hook metadata: {}", e))?
+            .map_err(|source| HookInstallError::SetPermissions {
+                path: hook_path.display().to_string(),
+                source,
+            })?
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&hook_path, permissions)
-            .map_err(|e| format!("Failed to set executable permission: {}", e))?;
+        fs::set_permissions(&hook_path, permissions).map_err(|source| {
+            HookInstallError::SetPermissions {
+                path: hook_path.display().to_string(),
+                source,
+            }
+        })?;
     }
 
     Ok(())
@@ -319,7 +331,7 @@ mod tests {
     #[test]
     fn test_install_hook_error_message_format() {
         // Try to install to a read-only location (this may be platform-specific)
-        // We test that the error contains useful information
+        // We test that the error is structured and contains useful information
         let temp_dir = TempDir::new().unwrap();
         let project_root = temp_dir.path();
 
@@ -338,11 +350,67 @@ mod tests {
             assert!(result.is_err());
 
             let error = result.unwrap_err();
+            let error_string = error.to_string();
             // Error message should mention the failure reason
             assert!(
-                error.contains("Failed to create hooks directory")
-                    || error.contains("Failed to write hook script")
+                error_string.contains("failed to create hooks directory")
+                    || error_string.contains("failed to write hook script")
             );
+
+            // Verify it's the CreateDir variant
+            match error {
+                HookInstallError::CreateDir { path, .. } => {
+                    assert!(path.contains(".claude/hooks"));
+                }
+                HookInstallError::WriteScript { path, .. } => {
+                    assert!(path.contains("send_event.sh"));
+                }
+                _ => panic!("Unexpected error variant"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_install_hook_returns_structured_error_on_permission_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_root = temp_dir.path();
+
+        // Pre-create hooks directory and script
+        let hooks_dir = project_root.join(".claude").join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join(HOOK_SCRIPT_NAME);
+        fs::write(&hook_path, HOOK_SCRIPT).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Make the hook file read-only
+            let mut permissions = fs::metadata(&hook_path).unwrap().permissions();
+            permissions.set_mode(0o444);
+            fs::set_permissions(&hook_path, permissions).unwrap();
+
+            // Make parent directory read-only to prevent permission changes
+            let mut dir_permissions = fs::metadata(&hooks_dir).unwrap().permissions();
+            dir_permissions.set_mode(0o555);
+            fs::set_permissions(&hooks_dir, dir_permissions).unwrap();
+
+            let result = install_hook(project_root);
+
+            // Should fail because we can't set permissions
+            if result.is_err() {
+                let error = result.unwrap_err();
+                match error {
+                    HookInstallError::SetPermissions { path, source } => {
+                        assert!(path.contains("send_event.sh"));
+                        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+                    }
+                    HookInstallError::WriteScript { .. } => {
+                        // May also fail at write stage depending on OS
+                    }
+                    _ => panic!("Unexpected error variant: {:?}", error),
+                }
+            }
         }
     }
 }

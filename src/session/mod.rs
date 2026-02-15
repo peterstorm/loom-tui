@@ -1,13 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Deserialize;
 
-use crate::app::state::DomainState;
 use crate::error::SessionError;
-use crate::model::{SessionArchive, SessionId, SessionMeta};
+use crate::model::{Agent, AgentId, HookEvent, SessionArchive, SessionMeta, TaskGraph};
 
 // ============================================================================
 // FUNCTIONAL CORE: Pure functions for serialization and data transformation
@@ -66,25 +65,32 @@ pub fn extract_metadata(archive: &SessionArchive) -> SessionMeta {
     archive.meta.clone()
 }
 
-/// Build session archive from domain state, filtering by session_id.
-/// Pure function: transforms domain state to archive format.
+/// Build session archive from explicit domain parameters, filtering by session_id.
+/// Pure function: transforms domain data to archive format.
 /// Filters events and agents to only include those belonging to this session.
 ///
 /// # Arguments
-/// * `domain` - Domain state (agents, events, task graph)
+/// * `task_graph` - Optional task graph (project-level, not session-specific)
+/// * `events` - Ring buffer of hook events
+/// * `agents` - Active agents keyed by agent ID
 /// * `meta` - Session metadata (contains session_id for filtering)
 ///
 /// # Returns
 /// Session archive ready for serialization (contains only data for this session)
-pub fn build_archive(domain: &DomainState, meta: &SessionMeta) -> SessionArchive {
+pub fn build_archive(
+    task_graph: Option<&TaskGraph>,
+    events: &VecDeque<HookEvent>,
+    agents: &BTreeMap<AgentId, Agent>,
+    meta: &SessionMeta,
+) -> SessionArchive {
     let mut archive = SessionArchive::new(meta.clone());
 
-    if let Some(ref task_graph) = domain.task_graph {
-        archive = archive.with_task_graph(task_graph.clone());
+    if let Some(tg) = task_graph {
+        archive = archive.with_task_graph(tg.clone());
     }
 
     // Filter events by session_id before cloning
-    let session_events: Vec<_> = domain.events
+    let session_events: Vec<_> = events
         .iter()
         .filter(|e| e.session_id.as_ref() == Some(&meta.id))
         .cloned()
@@ -92,7 +98,7 @@ pub fn build_archive(domain: &DomainState, meta: &SessionMeta) -> SessionArchive
     archive = archive.with_events(session_events);
 
     // Filter agents by session_id before cloning
-    let session_agents: BTreeMap<_, _> = domain.agents
+    let session_agents: BTreeMap<_, _> = agents
         .iter()
         .filter(|(_, agent)| agent.session_id.as_ref() == Some(&meta.id))
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -171,29 +177,38 @@ pub fn load_session(path: &Path) -> Result<SessionArchive, SessionError> {
 ///
 /// Gracefully handles:
 /// - Empty directory (returns empty vec)
-/// - Corrupt files (skips them)
+/// - Corrupt files (returns errors in second tuple element)
 /// - Missing directory (returns empty vec)
 ///
 /// # Arguments
 /// * `dir` - Directory containing session archives
 ///
 /// # Returns
-/// * `Ok(Vec<SessionArchive>)` - Full archives sorted by timestamp (newest first)
-/// * `Err(SessionError)` - I/O error reading directory
-pub fn list_sessions(dir: &Path) -> Result<Vec<SessionArchive>, SessionError> {
+/// * `Ok((Vec<SessionArchive>, Vec<SessionError>))` - Tuple of (successful archives, errors)
+///   - Archives sorted by timestamp (newest first)
+///   - Errors for corrupt/unreadable files
+/// * `Err(SessionError)` - I/O error reading directory itself
+pub fn list_sessions(dir: &Path) -> Result<(Vec<SessionArchive>, Vec<SessionError>), SessionError> {
     if !dir.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let entries = fs::read_dir(dir)
         .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
 
     let mut sessions = Vec::new();
+    let mut errors = Vec::new();
 
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(SessionError::Io {
+                    path: dir.display().to_string(),
+                    source: e,
+                });
+                continue;
+            }
         };
 
         let path = entry.path();
@@ -202,14 +217,15 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionArchive>, SessionError> {
             continue;
         }
 
-        if let Ok(archive) = load_session(&path) {
-            sessions.push(archive);
+        match load_session(&path) {
+            Ok(archive) => sessions.push(archive),
+            Err(e) => errors.push(e),
         }
     }
 
     sessions.sort_by(|a, b| b.meta.timestamp.cmp(&a.meta.timestamp));
 
-    Ok(sessions)
+    Ok((sessions, errors))
 }
 
 /// Helper for deserializing only the `meta` field from a session archive JSON.
@@ -221,20 +237,34 @@ struct MetaOnly {
 /// List session metas without deserializing full archives.
 /// Much faster than `list_sessions` — skips events/agents/task_graph.
 /// Returns `(path, meta)` tuples so full archive can be loaded later by path.
-pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, SessionError> {
+///
+/// # Returns
+/// * `Ok((Vec<(PathBuf, SessionMeta)>, Vec<SessionError>))` - Tuple of (successful metas, errors)
+///   - Metas sorted by timestamp (newest first)
+///   - Errors for corrupt/unreadable files
+/// * `Err(SessionError)` - I/O error reading directory itself
+#[allow(clippy::type_complexity)]
+pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Vec<SessionError>), SessionError> {
     if !dir.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let entries = fs::read_dir(dir)
         .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
 
     let mut metas = Vec::new();
+    let mut errors = Vec::new();
 
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(SessionError::Io {
+                    path: dir.display().to_string(),
+                    source: e,
+                });
+                continue;
+            }
         };
 
         let path = entry.path();
@@ -245,17 +275,24 @@ pub fn list_session_metas(dir: &Path) -> Result<Vec<(PathBuf, SessionMeta)>, Ses
 
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(SessionError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                });
+                continue;
+            }
         };
 
-        if let Ok(meta_only) = serde_json::from_str::<MetaOnly>(&content) {
-            metas.push((path, meta_only.meta));
+        match serde_json::from_str::<MetaOnly>(&content) {
+            Ok(meta_only) => metas.push((path, meta_only.meta)),
+            Err(e) => errors.push(SessionError::from(e)),
         }
     }
 
     metas.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
 
-    Ok(metas)
+    Ok((metas, errors))
 }
 
 /// Delete session archive file.
@@ -282,35 +319,32 @@ pub fn delete_session(path: &Path) -> Result<(), SessionError> {
 /// * `interval_secs` - Auto-save interval in seconds (typically 30)
 ///
 /// # Returns
-/// * `Some(Instant)` - New save timestamp if save occurred
-/// * `None` - No save needed (interval not elapsed)
+/// * `Ok(Some(Instant))` - New save timestamp if save occurred
+/// * `Ok(None)` - No save needed (interval not elapsed)
+/// * `Err(SessionError)` - Save operation failed
 pub fn auto_save_tick(
     path: &Path,
     archive: &SessionArchive,
     last_save: Instant,
     interval_secs: u64,
-) -> Option<Instant> {
+) -> Result<Option<Instant>, SessionError> {
     let now = Instant::now();
 
     if should_auto_save(last_save, now, interval_secs) {
         // Save and return new timestamp
-        if save_session(path, archive).is_ok() {
-            Some(now)
-        } else {
-            None
-        }
+        save_session(path, archive)?;
+        Ok(Some(now))
     } else {
-        None
+        Ok(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::AppState;
-    use crate::model::{Agent, AgentId, SessionStatus, TaskGraph};
+    use crate::model::{HookEvent, HookEventKind, SessionStatus, TaskGraph};
     use chrono::Utc;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::time::Duration;
 
     #[test]
@@ -330,11 +364,7 @@ mod tests {
             .with_status(SessionStatus::Completed)
             .with_duration(Duration::from_secs(300));
 
-        let task_graph = TaskGraph {
-            waves: vec![],
-            total_tasks: 0,
-            completed_tasks: 0,
-        };
+        let task_graph = TaskGraph::empty();
 
         let archive = SessionArchive::new(meta)
             .with_task_graph(task_graph)
@@ -371,30 +401,28 @@ mod tests {
 
     #[test]
     fn build_archive_includes_task_graph() {
-        let mut state = AppState::new();
-        state.domain.task_graph = Some(TaskGraph {
-            waves: vec![],
-            total_tasks: 0,
-            completed_tasks: 0,
-        });
-
+        let task_graph = TaskGraph::empty();
+        let events = VecDeque::new();
+        let agents = BTreeMap::new();
         let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
-        let archive = build_archive(&state.domain, &meta);
+
+        let archive = build_archive(Some(&task_graph), &events, &agents, &meta);
 
         assert!(archive.task_graph.is_some());
     }
 
     #[test]
     fn build_archive_includes_events_and_agents() {
-        let mut state = AppState::new();
+        let events = VecDeque::new();
+        let mut agents = BTreeMap::new();
         let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
 
         // Agent with matching session_id
         let mut agent = Agent::new("a01", Utc::now());
         agent.session_id = Some(meta.id.clone());
-        state.domain.agents.insert("a01".into(), agent);
+        agents.insert("a01".into(), agent);
 
-        let archive = build_archive(&state.domain, &meta);
+        let archive = build_archive(None, &events, &agents, &meta);
 
         assert_eq!(archive.agents.len(), 1);
         assert!(archive.events.is_empty());
@@ -422,5 +450,185 @@ mod tests {
         let later = start + Duration::from_secs(30);
 
         assert!(should_auto_save(start, later, 30));
+    }
+
+    #[test]
+    fn build_archive_filters_events_by_session_id() {
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let mut events = VecDeque::new();
+
+        // Event matching session_id
+        let mut e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
+        e1.session_id = Some(meta.id.clone());
+        events.push_back(e1);
+
+        // Event with different session_id
+        let mut e2 = HookEvent::new(Utc::now(), HookEventKind::notification("test".into()));
+        e2.session_id = Some("s2".into());
+        events.push_back(e2);
+
+        // Event with no session_id
+        let e3 = HookEvent::new(Utc::now(), HookEventKind::notification("test2".into()));
+        events.push_back(e3);
+
+        let archive = build_archive(None, &events, &BTreeMap::new(), &meta);
+
+        assert_eq!(archive.events.len(), 1);
+        assert_eq!(archive.events[0].session_id.as_ref(), Some(&meta.id));
+    }
+
+    #[test]
+    fn build_archive_filters_agents_by_session_id() {
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let mut agents = BTreeMap::new();
+
+        // Agent matching session_id
+        let mut a1 = Agent::new("a01", Utc::now());
+        a1.session_id = Some(meta.id.clone());
+        agents.insert("a01".into(), a1);
+
+        // Agent with different session_id
+        let mut a2 = Agent::new("a02", Utc::now());
+        a2.session_id = Some("s2".into());
+        agents.insert("a02".into(), a2);
+
+        // Agent with no session_id
+        let a3 = Agent::new("a03", Utc::now());
+        agents.insert("a03".into(), a3);
+
+        let archive = build_archive(None, &VecDeque::new(), &agents, &meta);
+
+        assert_eq!(archive.agents.len(), 1);
+        assert!(archive.agents.contains_key(&AgentId::new("a01")));
+        assert!(!archive.agents.contains_key(&AgentId::new("a02")));
+        assert!(!archive.agents.contains_key(&AgentId::new("a03")));
+    }
+
+    #[test]
+    fn build_archive_handles_empty_domain() {
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let events = VecDeque::new();
+        let agents = BTreeMap::new();
+
+        let archive = build_archive(None, &events, &agents, &meta);
+
+        assert!(archive.events.is_empty());
+        assert!(archive.agents.is_empty());
+        assert!(archive.task_graph.is_none());
+    }
+
+    #[test]
+    fn build_archive_includes_task_graph_when_present() {
+        use crate::model::{Task, TaskStatus, Wave};
+
+        // Create task graph with 5 tasks (2 completed)
+        let task_graph = TaskGraph::new(vec![
+            Wave::new(
+                1,
+                vec![
+                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
+                    Task::new("T2", "Task 2".to_string(), TaskStatus::Completed),
+                    Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
+                ],
+            ),
+            Wave::new(
+                2,
+                vec![
+                    Task::new("T4", "Task 4".to_string(), TaskStatus::Running),
+                    Task::new("T5", "Task 5".to_string(), TaskStatus::Pending),
+                ],
+            ),
+        ]);
+
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+
+        let archive = build_archive(
+            Some(&task_graph),
+            &VecDeque::new(),
+            &BTreeMap::new(),
+            &meta,
+        );
+
+        assert!(archive.task_graph.is_some());
+        assert_eq!(archive.task_graph.as_ref().unwrap().total_tasks(), 5);
+        assert_eq!(archive.task_graph.as_ref().unwrap().completed_tasks(), 2);
+    }
+
+    #[test]
+    fn list_sessions_returns_errors_for_corrupt_files() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // Create a valid session file
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let archive = SessionArchive::new(meta);
+        let valid_path = dir.join("s1.json");
+        save_session(&valid_path, &archive).unwrap();
+
+        // Create a corrupt session file
+        let corrupt_path = dir.join("s2.json");
+        fs::write(&corrupt_path, "not valid json").unwrap();
+
+        // List sessions
+        let (sessions, errors) = list_sessions(dir).unwrap();
+
+        // Should have 1 successful session and 1 error
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].meta.id.as_str(), "s1");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn list_session_metas_returns_errors_for_corrupt_files() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        // Create a valid session file
+        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let archive = SessionArchive::new(meta);
+        let valid_path = dir.join("s1.json");
+        save_session(&valid_path, &archive).unwrap();
+
+        // Create a corrupt session file
+        let corrupt_path = dir.join("s2.json");
+        fs::write(&corrupt_path, "not valid json").unwrap();
+
+        // List session metas
+        let (metas, errors) = list_session_metas(dir).unwrap();
+
+        // Should have 1 successful meta and 1 error
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].1.id.as_str(), "s1");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn list_sessions_empty_dir_returns_empty_vecs() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        let (sessions, errors) = list_sessions(dir).unwrap();
+        assert!(sessions.is_empty());
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn list_session_metas_empty_dir_returns_empty_vecs() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+
+        let (metas, errors) = list_session_metas(dir).unwrap();
+        assert!(metas.is_empty());
+        assert!(errors.is_empty());
     }
 }

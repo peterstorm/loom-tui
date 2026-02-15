@@ -245,6 +245,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
                     meta.event_count += 1;
                     meta.last_event_at = Some(enriched.timestamp);
+                    // Auto-confirm sessions that keep receiving events beyond the
+                    // phantom timeout. Headless sessions (remote exec, pushed plans)
+                    // never get UserPromptSubmit but are clearly real if they persist.
+                    if !meta.confirmed
+                        && (enriched.timestamp - meta.timestamp) > chrono::Duration::seconds(30)
+                    {
+                        meta.confirmed = true;
+                    }
                     // Backfill project_path from cwd if still default
                     if meta.project_path == state.meta.project_path || meta.project_path.is_empty() {
                         if let Some(cwd) = enriched.raw.get("cwd").and_then(|v| v.as_str()) {

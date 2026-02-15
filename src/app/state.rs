@@ -36,11 +36,14 @@ pub struct UiState {
     /// Index of selected agent in agent detail view
     pub selected_agent_index: Option<usize>,
 
-    /// Index of selected session in sessions view
+    /// Index of selected session in sessions view (list navigation)
     pub selected_session_index: Option<usize>,
 
-    /// Index of session currently being loaded from disk (shows loading indicator)
-    pub loading_session: Option<usize>,
+    /// Pinned session ID for SessionDetail view (immune to list reordering)
+    pub selected_session_id: Option<SessionId>,
+
+    /// Session ID currently being loaded from disk (shows loading indicator)
+    pub loading_session: Option<SessionId>,
 }
 
 /// Domain state: agents, events, sessions, task graph
@@ -213,6 +216,7 @@ impl Default for UiState {
             selected_task_index: None,
             selected_agent_index: None,
             selected_session_index: None,
+            selected_session_id: None,
             loading_session: None,
         }
     }

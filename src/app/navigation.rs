@@ -348,6 +348,10 @@ fn drill_down(state: &mut AppState) {
             if let Some(idx) = state.ui.selected_session_index {
                 let active_count = state.domain.confirmed_active_count();
                 if idx < active_count {
+                    // Pin session ID for stable detail view
+                    if let Some((sid, _)) = state.domain.confirmed_active_sessions().nth(idx) {
+                        state.ui.selected_session_id = Some(sid.clone());
+                    }
                     state.ui.view = ViewState::SessionDetail;
                     state.ui.scroll_offsets.session_detail_left = 0;
                     state.ui.scroll_offsets.session_detail_right = 0;
@@ -355,13 +359,16 @@ fn drill_down(state: &mut AppState) {
                 } else {
                     let archive_idx = idx - active_count;
                     if let Some(session) = state.domain.sessions.get(archive_idx) {
+                        let sid = session.meta.id.clone();
                         if session.data.is_some() {
+                            state.ui.selected_session_id = Some(sid);
                             state.ui.view = ViewState::SessionDetail;
                             state.ui.scroll_offsets.session_detail_left = 0;
                             state.ui.scroll_offsets.session_detail_right = 0;
                             state.ui.focus = PanelFocus::Left;
                         } else {
-                            state.ui.loading_session = Some(archive_idx);
+                            state.ui.selected_session_id = Some(sid.clone());
+                            state.ui.loading_session = Some(sid);
                         }
                     }
                 }
@@ -380,6 +387,21 @@ fn go_back(state: &mut AppState) {
             state.ui.view = ViewState::Dashboard;
         }
         ViewState::SessionDetail => {
+            // Re-sync list index to the session we were viewing
+            if let Some(ref sid) = state.ui.selected_session_id {
+                let active_count = state.domain.confirmed_active_count();
+                let active_pos = state.domain.confirmed_active_sessions()
+                    .position(|(id, _)| id == sid);
+                let new_idx = active_pos.or_else(|| {
+                    state.domain.sessions.iter()
+                        .position(|s| &s.meta.id == sid)
+                        .map(|i| i + active_count)
+                });
+                if let Some(idx) = new_idx {
+                    state.ui.selected_session_index = Some(idx);
+                }
+            }
+            state.ui.selected_session_id = None;
             state.ui.view = ViewState::Sessions;
         }
         ViewState::Dashboard => {}

@@ -127,37 +127,24 @@ pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, ParseError> 
 pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, ParseError> {
     let mut events = Vec::new();
 
-    for (line_num, line) in content.lines().enumerate() {
+    for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         // Parse as raw Value first, then deserialize struct, preserving raw for extra fields (cwd etc)
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(raw_value) => {
-                match serde_json::from_value::<HookEvent>(raw_value.clone()) {
-                    Ok(mut event) => {
-                        event.raw = raw_value;
-                        events.push(event);
-                    }
-                    Err(e) => {
-                        return Err(ParseError::Json(format!(
-                            "Line {}: {}",
-                            line_num + 1,
-                            e
-                        )));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(ParseError::Json(format!(
-                    "Line {}: {}",
-                    line_num + 1,
-                    e
-                )));
-            }
-        }
+        // Skip unparseable lines (concurrent writes can produce partial JSON)
+        let raw_value = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut event = match serde_json::from_value::<HookEvent>(raw_value.clone()) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        event.raw = raw_value;
+        events.push(event);
     }
 
     Ok(events)
@@ -512,14 +499,14 @@ not valid json
     }
 
     #[test]
-    fn test_parse_hook_events_invalid_line() {
+    fn test_parse_hook_events_skips_invalid_lines() {
         let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
 invalid
 {"timestamp":"2026-02-11T10:02:00Z","event":"session_end"}"#;
 
-        let result = parse_hook_events(jsonl);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Line 2"));
+        let result = parse_hook_events(jsonl).unwrap();
+        // Invalid line skipped, valid events preserved
+        assert_eq!(result.len(), 2);
     }
 
     #[test]

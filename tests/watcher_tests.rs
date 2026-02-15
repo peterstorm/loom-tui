@@ -290,13 +290,13 @@ fn test_parse_hook_events_empty() {
 }
 
 #[test]
-fn test_parse_hook_events_invalid_line() {
+fn test_parse_hook_events_skips_invalid_lines() {
     let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
 not valid json"#;
 
-    let result = parse_hook_events(jsonl);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Line 2"));
+    let result = parse_hook_events(jsonl).unwrap();
+    // Invalid line skipped, valid event preserved
+    assert_eq!(result.len(), 1);
 }
 
 #[test]

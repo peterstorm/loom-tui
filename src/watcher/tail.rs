@@ -68,9 +68,27 @@ impl TailState {
         let mut new_content = String::new();
         let bytes_read = file.read_to_string(&mut new_content)?;
 
-        // Update offset
-        if bytes_read > 0 {
-            self.set_offset(path.to_path_buf(), read_offset + bytes_read as u64);
+        if bytes_read == 0 {
+            return Ok(new_content);
+        }
+
+        // Don't advance past an unterminated last line — it's likely a partial
+        // write from a concurrent appender. Hold back so the next read re-reads
+        // the complete line.
+        let advance = if new_content.ends_with('\n') {
+            bytes_read
+        } else if let Some(last_nl) = new_content.rfind('\n') {
+            // Trim content to last complete line
+            new_content.truncate(last_nl + 1);
+            last_nl + 1
+        } else {
+            // Entire read is a single unterminated line — don't advance at all
+            new_content.clear();
+            0
+        };
+
+        if advance > 0 {
+            self.set_offset(path.to_path_buf(), read_offset + advance as u64);
         }
 
         Ok(new_content)

@@ -137,9 +137,9 @@ fn run_event_loop(
         }
 
         // Spawn background session load if requested and not already in flight
-        if let Some(idx) = state.ui.loading_session {
+        if let Some(ref sid) = state.ui.loading_session {
             if !load_in_flight {
-                if let Some(session) = state.domain.sessions.get(idx) {
+                if let Some(session) = state.domain.sessions.iter().find(|s| &s.meta.id == sid) {
                     let path = session.path.clone();
                     let tx = load_tx.clone();
                     load_in_flight = true;

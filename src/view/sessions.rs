@@ -21,9 +21,6 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
         .chain(state.domain.sessions.iter().map(|a| &a.meta))
         .collect();
 
-    // Track which archived sessions are loading
-    let active_count = state.domain.confirmed_active_count();
-
     // Empty state: no sessions at all
     if all_sessions.is_empty() {
         render_empty_state(frame, area);
@@ -75,8 +72,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
             };
 
             // Show loading indicator for session being loaded
-            let is_loading = idx >= active_count
-                && state.ui.loading_session == Some(idx - active_count);
+            let is_loading = state.ui.loading_session.as_ref() == Some(&session.id);
 
             let status_str = if is_loading {
                 "Loading…".to_string()

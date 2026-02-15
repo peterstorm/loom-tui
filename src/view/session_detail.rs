@@ -102,16 +102,24 @@ impl<'a> EventsRef<'a> {
     }
 }
 
-/// Resolve the session data for the currently selected session index.
-/// Returns None if no valid session is selected.
+/// Resolve the session data for the currently selected session.
+/// Uses pinned `selected_session_id` (immune to list reordering) when available,
+/// falls back to `selected_session_index` for backwards compatibility.
 pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>> {
-    let idx = state.ui.selected_session_index?;
-    let active_count = state.domain.confirmed_active_count();
+    let sid = state.ui.selected_session_id.as_ref().or_else(|| {
+        // Fallback: derive session ID from index (used in Sessions list view)
+        let idx = state.ui.selected_session_index?;
+        let active_count = state.domain.confirmed_active_count();
+        if idx < active_count {
+            state.domain.confirmed_active_sessions().nth(idx).map(|(id, _)| id)
+        } else {
+            let archive_idx = idx - active_count;
+            state.domain.sessions.get(archive_idx).map(|s| &s.meta.id)
+        }
+    })?;
 
-    if idx < active_count {
-        // Active (confirmed) session — filter agents and events by session_id
-        let meta = state.domain.confirmed_active_sessions().nth(idx).map(|(_, m)| m)?;
-        let sid = &meta.id;
+    // Try active sessions first
+    if let Some(meta) = state.domain.active_sessions.get(sid).filter(|m| m.confirmed) {
         let filtered_agents: BTreeMap<AgentId, &Agent> = state.domain.agents.iter()
             .filter(|(_, a)| a.session_id.as_ref() == Some(sid))
             .map(|(k, v)| (k.clone(), v))
@@ -120,24 +128,23 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
             .filter(|e| e.session_id.as_ref() == Some(sid))
             .cloned()
             .collect();
-        Some(SessionViewData {
+        return Some(SessionViewData {
             meta,
             agents: AgentsRef::Filtered(filtered_agents),
             events: EventsRef::Owned(filtered_events),
             task_graph: state.domain.task_graph.as_ref(),
-        })
-    } else {
-        // Archived session — requires loaded data
-        let archive_idx = idx - active_count;
-        let session = state.domain.sessions.get(archive_idx)?;
-        let archive = session.data.as_ref()?;
-        Some(SessionViewData {
-            meta: &session.meta,
-            agents: AgentsRef::Borrowed(&archive.agents),
-            events: EventsRef::Vec(&archive.events),
-            task_graph: archive.task_graph.as_ref(),
-        })
+        });
     }
+
+    // Try archived sessions
+    let session = state.domain.sessions.iter().find(|s| &s.meta.id == sid)?;
+    let archive = session.data.as_ref()?;
+    Some(SessionViewData {
+        meta: &session.meta,
+        agents: AgentsRef::Borrowed(&archive.agents),
+        events: EventsRef::Vec(&archive.events),
+        task_graph: archive.task_graph.as_ref(),
+    })
 }
 
 // ============================================================================

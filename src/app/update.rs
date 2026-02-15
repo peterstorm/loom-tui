@@ -364,8 +364,8 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 .collect();
         }
 
-        AppEvent::LoadSessionRequested(idx) => {
-            state.ui.loading_session = Some(idx);
+        AppEvent::LoadSessionRequested(sid) => {
+            state.ui.loading_session = Some(sid);
         }
 
         AppEvent::InstallHookRequested => {
@@ -694,7 +694,7 @@ mod tests {
             meta.clone(),
             std::path::PathBuf::new(),
         ));
-        state.ui.loading_session = Some(0);
+        state.ui.loading_session = Some(SessionId::new("s1"));
 
         let archive = SessionArchive::new(meta.clone())
             .with_task_graph(graph)
@@ -719,7 +719,7 @@ mod tests {
             meta.clone(),
             std::path::PathBuf::new(),
         ));
-        state.ui.loading_session = Some(0);
+        state.ui.loading_session = Some(SessionId::new("s1"));
 
         let archive = SessionArchive::new(meta);
         update(&mut state, AppEvent::SessionLoaded(archive));

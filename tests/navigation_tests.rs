@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use loom_tui::app::{handle_key, AppState, PanelFocus, ViewState};
-use loom_tui::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
+use loom_tui::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionId, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
 use std::path::PathBuf;
 use chrono::Utc;
 
@@ -359,7 +359,7 @@ fn enter_on_sessions_unloaded_sets_loading() {
     state.ui.selected_session_index = Some(0);
     handle_key(&mut state, key(KeyCode::Enter));
     assert!(matches!(state.ui.view, ViewState::Sessions));
-    assert_eq!(state.ui.loading_session, Some(0));
+    assert_eq!(state.ui.loading_session, Some(SessionId::new("s1")));
 }
 
 #[test]

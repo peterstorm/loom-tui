@@ -2,7 +2,7 @@ use chrono::Utc;
 use loom_tui::app::{update, AppState, ViewState};
 use loom_tui::event::AppEvent;
 use loom_tui::model::{
-    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionMeta,
+    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta,
     SessionStatus, Task, TaskGraph, TaskStatus, ToolCall, Wave,
 };
 use std::collections::BTreeMap;
@@ -300,7 +300,7 @@ fn session_loaded_populates_data_and_navigates() {
 
     // Pre-populate with meta-only archived session
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
-    state.ui.loading_session = Some(0);
+    state.ui.loading_session = Some(SessionId::new("session-123"));
 
     let archive = SessionArchive::new(meta);
     update(&mut state, AppEvent::SessionLoaded(archive));
@@ -373,7 +373,7 @@ fn session_loaded_clears_loading_flag() {
     let mut state = AppState::new();
     let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
-    state.ui.loading_session = Some(0);
+    state.ui.loading_session = Some(SessionId::new("s1"));
 
     let archive = SessionArchive::new(meta);
     update(&mut state, AppEvent::SessionLoaded(archive));
@@ -437,8 +437,8 @@ fn load_session_requested_sets_loading_flag() {
         PathBuf::from("/sessions/s1.json"),
     ));
 
-    update(&mut state, AppEvent::LoadSessionRequested(0));
-    assert_eq!(state.ui.loading_session, Some(0));
+    update(&mut state, AppEvent::LoadSessionRequested(SessionId::new("s1")));
+    assert_eq!(state.ui.loading_session, Some(SessionId::new("s1")));
 }
 
 #[test]
@@ -570,7 +570,7 @@ fn property_update_never_panics() {
         )),
         AppEvent::SessionListRefreshed(vec![]),
         AppEvent::SessionMetasLoaded(vec![]),
-        AppEvent::LoadSessionRequested(0),
+        AppEvent::LoadSessionRequested(SessionId::new("test")),
     ];
 
     for event in events {

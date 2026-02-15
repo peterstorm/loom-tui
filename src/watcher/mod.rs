@@ -20,6 +20,8 @@ pub type WatcherResult<T> = Result<T, WatcherError>;
 /// Commands sent to the tail worker thread
 enum TailCommand {
     ReadFile(PathBuf),
+    /// Sentinel: initial file replay done, safe to run stale cleanup
+    ReplayDone,
 }
 
 /// Start a dedicated worker thread that owns TailState and processes file read requests.
@@ -35,6 +37,9 @@ fn start_tail_worker(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<TailCommand> {
 
         while let Ok(cmd) = cmd_rx.recv() {
             match cmd {
+                TailCommand::ReplayDone => {
+                    let _ = tx.send(AppEvent::ReplayComplete);
+                }
                 TailCommand::ReadFile(path) => {
                     let new_content = match tail_state.read_new_lines(&path) {
                         Ok(content) => content,
@@ -308,6 +313,9 @@ fn load_existing_files(
         && tail_worker.send(TailCommand::ReadFile(paths.events.clone())).is_err() {
             return;
         }
+
+    // Signal that initial replay is done (processed after ReadFile in FIFO order)
+    let _ = tail_worker.send(TailCommand::ReplayDone);
 
     // Load archived session metas (lightweight — skips events/agents/task_graph)
     match session::list_session_metas(&paths.archive_dir) {

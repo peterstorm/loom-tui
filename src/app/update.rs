@@ -201,6 +201,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                         state.domain.sessions.insert(0, archived);
                     }
                 }
+                HookEventKind::UserPromptSubmit => {
+                    // A real user typed a prompt — confirm this session as non-phantom
+                    if let Some(ref sid) = event.session_id {
+                        if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
+                            meta.confirmed = true;
+                        }
+                    }
+                }
                 HookEventKind::Stop { .. } => {
                     // Stop events fire when a session/agent stops. Mark attributed agent
                     // as finished, and also mark all active agents in the session.
@@ -272,34 +280,50 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             handle_key(state, key);
         }
 
+        AppEvent::ReplayComplete => {
+            state.meta.replay_complete = true;
+        }
+
         AppEvent::Tick(now) => {
-            // Expire stale sessions (no event received in 5 minutes)
-            let cutoff = now - chrono::Duration::minutes(5);
-            let stale_ids: Vec<SessionId> = state
-                .domain
-                .active_sessions
-                .iter()
-                .filter(|(_, meta)| {
-                    meta.last_event_at
-                        .map(|t| t < cutoff)
-                        .unwrap_or(meta.timestamp < cutoff)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in stale_ids {
-                if let Some(mut meta) = state.domain.active_sessions.remove(&id) {
-                    meta.status = SessionStatus::Cancelled;
-                    let dur = (now - meta.timestamp).to_std().unwrap_or_default();
-                    meta.duration = Some(dur);
-                    let archive = session::build_archive(
-                        state.domain.task_graph.as_ref(),
-                        &state.domain.events,
-                        &state.domain.agents,
-                        &meta,
-                    );
-                    let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
-                        .with_data(archive);
-                    state.domain.sessions.insert(0, archived);
+            // Skip stale cleanup until initial event replay is done.
+            // During replay, historical timestamps would cause all sessions to expire
+            // because Tick uses real-time `now` but events have old timestamps.
+            if state.meta.replay_complete {
+                // Expire stale sessions:
+                // - Confirmed sessions: 5 minute timeout (real user sessions)
+                // - Unconfirmed sessions: 30 second timeout (phantom subagent sessions)
+                let confirmed_cutoff = now - chrono::Duration::minutes(5);
+                let unconfirmed_cutoff = now - chrono::Duration::seconds(30);
+                let stale_ids: Vec<(SessionId, bool)> = state
+                    .domain
+                    .active_sessions
+                    .iter()
+                    .filter(|(_, meta)| {
+                        let cutoff = if meta.confirmed { confirmed_cutoff } else { unconfirmed_cutoff };
+                        meta.last_event_at
+                            .map(|t| t < cutoff)
+                            .unwrap_or(meta.timestamp < cutoff)
+                    })
+                    .map(|(id, meta)| (id.clone(), meta.confirmed))
+                    .collect();
+                for (id, was_confirmed) in stale_ids {
+                    if let Some(mut meta) = state.domain.active_sessions.remove(&id) {
+                        // Only archive confirmed sessions; drop phantom sessions silently
+                        if was_confirmed {
+                            meta.status = SessionStatus::Cancelled;
+                            let dur = (now - meta.timestamp).to_std().unwrap_or_default();
+                            meta.duration = Some(dur);
+                            let archive = session::build_archive(
+                                state.domain.task_graph.as_ref(),
+                                &state.domain.events,
+                                &state.domain.agents,
+                                &meta,
+                            );
+                            let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
+                                .with_data(archive);
+                            state.domain.sessions.insert(0, archived);
+                        }
+                    }
                 }
             }
         }
@@ -1153,12 +1177,14 @@ mod tests {
     #[test]
     fn stale_session_expired_after_5_minutes() {
         let mut state = AppState::new();
+        state.meta.replay_complete = true;
         let now = Utc::now();
 
-        // Create session that's 6 minutes old
+        // Create confirmed session that's 6 minutes old
         let old_time = now - chrono::Duration::minutes(6);
         let mut meta = SessionMeta::new("s1", old_time, "/proj".to_string());
         meta.last_event_at = Some(old_time);
+        meta.confirmed = true;
         state.domain.active_sessions.insert(SessionId::new("s1"), meta);
 
         // Tick should expire the stale session
@@ -1172,12 +1198,14 @@ mod tests {
     #[test]
     fn active_session_with_recent_events_not_expired() {
         let mut state = AppState::new();
+        state.meta.replay_complete = true;
         let now = Utc::now();
 
-        // Create session with recent event (2 minutes ago)
+        // Create confirmed session with recent event (2 minutes ago)
         let recent_time = now - chrono::Duration::minutes(2);
         let mut meta = SessionMeta::new("s1", now - chrono::Duration::minutes(10), "/proj".to_string());
         meta.last_event_at = Some(recent_time);
+        meta.confirmed = true;
         state.domain.active_sessions.insert(SessionId::new("s1"), meta);
 
         // Tick should NOT expire the session
@@ -1190,11 +1218,13 @@ mod tests {
     #[test]
     fn session_expiration_falls_back_to_timestamp_when_no_last_event() {
         let mut state = AppState::new();
+        state.meta.replay_complete = true;
         let now = Utc::now();
 
-        // Create session with old timestamp, no last_event_at
+        // Create confirmed session with old timestamp, no last_event_at
         let old_time = now - chrono::Duration::minutes(6);
-        let meta = SessionMeta::new("s1", old_time, "/proj".to_string());
+        let mut meta = SessionMeta::new("s1", old_time, "/proj".to_string());
+        meta.confirmed = true;
         // last_event_at is None — should fall back to timestamp
         state.domain.active_sessions.insert(SessionId::new("s1"), meta);
 
@@ -1209,6 +1239,7 @@ mod tests {
     #[test]
     fn expired_session_added_to_archived_list() {
         let mut state = AppState::new();
+        state.meta.replay_complete = true;
         let now = Utc::now();
 
         // Pre-populate archived sessions
@@ -1218,10 +1249,11 @@ mod tests {
         );
         state.domain.sessions.push(old_archived);
 
-        // Create stale session
+        // Create confirmed stale session
         let stale_time = now - chrono::Duration::minutes(6);
         let mut meta = SessionMeta::new("s_stale", stale_time, "/proj".to_string());
         meta.last_event_at = Some(stale_time);
+        meta.confirmed = true;
         state.domain.active_sessions.insert(SessionId::new("s_stale"), meta);
 
         // Tick expires stale session
@@ -1622,5 +1654,157 @@ mod tests {
         let mut state = AppState::new();
         // Should not panic or error
         update(&mut state, AppEvent::InstallHookRequested);
+    }
+
+    // ============================================================================
+    // Session Confirmation (Phantom Session Filtering)
+    // ============================================================================
+
+    #[test]
+    fn session_starts_unconfirmed() {
+        let mut state = AppState::new();
+        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(e));
+
+        assert!(!state.domain.active_sessions[&SessionId::new("s1")].confirmed);
+    }
+
+    #[test]
+    fn user_prompt_submit_confirms_session() {
+        let mut state = AppState::new();
+        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(e));
+
+        let prompt = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit)
+            .with_session("s1");
+        update(&mut state, AppEvent::HookEventReceived(prompt));
+
+        assert!(state.domain.active_sessions[&SessionId::new("s1")].confirmed);
+    }
+
+    #[test]
+    fn user_prompt_submit_without_session_is_noop() {
+        let mut state = AppState::new();
+        let prompt = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit);
+        update(&mut state, AppEvent::HookEventReceived(prompt));
+        // No panic, no sessions
+        assert!(state.domain.active_sessions.is_empty());
+    }
+
+    #[test]
+    fn confirmed_active_sessions_filters_unconfirmed() {
+        let mut state = AppState::new();
+        // s1: confirmed (real user session)
+        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1");
+        let p1 = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit)
+            .with_session("s1");
+        // s2: unconfirmed (subagent phantom)
+        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s2");
+
+        update(&mut state, AppEvent::HookEventReceived(e1));
+        update(&mut state, AppEvent::HookEventReceived(p1));
+        update(&mut state, AppEvent::HookEventReceived(e2));
+
+        assert_eq!(state.domain.active_sessions.len(), 2);
+        assert_eq!(state.domain.confirmed_active_count(), 1);
+        let confirmed: Vec<_> = state.domain.confirmed_active_sessions().collect();
+        assert_eq!(confirmed.len(), 1);
+        assert_eq!(confirmed[0].0, &SessionId::new("s1"));
+    }
+
+    #[test]
+    fn unconfirmed_session_expires_after_30_seconds() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+        let now = Utc::now();
+
+        // Unconfirmed session created 35 seconds ago
+        let old_time = now - chrono::Duration::seconds(35);
+        let meta = SessionMeta::new("phantom", old_time, "/proj".to_string());
+        state.domain.active_sessions.insert(SessionId::new("phantom"), meta);
+
+        update(&mut state, AppEvent::Tick(now));
+
+        // Should be removed and NOT archived
+        assert!(state.domain.active_sessions.is_empty());
+        assert!(state.domain.sessions.is_empty());
+    }
+
+    #[test]
+    fn unconfirmed_session_not_expired_within_30_seconds() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+        let now = Utc::now();
+
+        // Unconfirmed session created 20 seconds ago
+        let recent_time = now - chrono::Duration::seconds(20);
+        let meta = SessionMeta::new("phantom", recent_time, "/proj".to_string());
+        state.domain.active_sessions.insert(SessionId::new("phantom"), meta);
+
+        update(&mut state, AppEvent::Tick(now));
+
+        // Should still be active
+        assert_eq!(state.domain.active_sessions.len(), 1);
+    }
+
+    #[test]
+    fn confirmed_session_not_expired_at_30_seconds() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+        let now = Utc::now();
+
+        // Confirmed session created 2 minutes ago
+        let old_time = now - chrono::Duration::minutes(2);
+        let mut meta = SessionMeta::new("real", old_time, "/proj".to_string());
+        meta.confirmed = true;
+        meta.last_event_at = Some(old_time);
+        state.domain.active_sessions.insert(SessionId::new("real"), meta);
+
+        update(&mut state, AppEvent::Tick(now));
+
+        // Confirmed sessions use 5min timeout, not 30s
+        assert_eq!(state.domain.active_sessions.len(), 1);
+    }
+
+    #[test]
+    fn tick_skips_stale_cleanup_before_replay_complete() {
+        let mut state = AppState::new();
+        // replay_complete defaults to false
+        let now = Utc::now();
+
+        // Create unconfirmed session that would normally expire
+        let old_time = now - chrono::Duration::minutes(10);
+        let meta = SessionMeta::new("s1", old_time, "/proj".to_string());
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
+
+        // Tick should NOT expire during replay
+        update(&mut state, AppEvent::Tick(now));
+        assert_eq!(state.domain.active_sessions.len(), 1);
+
+        // After ReplayComplete, Tick should expire it
+        update(&mut state, AppEvent::ReplayComplete);
+        update(&mut state, AppEvent::Tick(now));
+        assert!(state.domain.active_sessions.is_empty());
+    }
+
+    #[test]
+    fn session_end_archives_unconfirmed_session() {
+        // SessionEnd still archives even unconfirmed sessions (explicit end = real session)
+        let mut state = AppState::new();
+        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
+            .with_session("s1");
+        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
+            .with_session("s1");
+
+        update(&mut state, AppEvent::HookEventReceived(e));
+        update(&mut state, AppEvent::HookEventReceived(end));
+
+        // SessionEnd always archives (it's a real end event)
+        assert!(state.domain.active_sessions.is_empty());
+        assert_eq!(state.domain.sessions.len(), 1);
     }
 }

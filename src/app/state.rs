@@ -83,6 +83,9 @@ pub struct AppMeta {
 
     /// Signal to quit the application
     pub should_quit: bool,
+
+    /// Initial event replay complete — stale cleanup deferred until true
+    pub replay_complete: bool,
 }
 
 /// Cache state (private): sorted keys, dirty flags, agent tool counts
@@ -183,6 +186,19 @@ pub struct ScrollState {
     pub session_detail_right: usize,
 }
 
+impl DomainState {
+    /// Iterator over active sessions confirmed by a UserPromptSubmit event.
+    /// Filters out phantom subagent sessions from display and navigation.
+    pub fn confirmed_active_sessions(&self) -> impl Iterator<Item = (&SessionId, &SessionMeta)> {
+        self.active_sessions.iter().filter(|(_, m)| m.confirmed)
+    }
+
+    /// Count of confirmed active sessions.
+    pub fn confirmed_active_count(&self) -> usize {
+        self.active_sessions.values().filter(|m| m.confirmed).count()
+    }
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self {
@@ -223,6 +239,7 @@ impl Default for AppMeta {
             started_at: Instant::now(),
             project_path: String::new(),
             should_quit: false,
+            replay_complete: false,
         }
     }
 }

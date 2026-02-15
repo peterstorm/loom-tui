@@ -106,11 +106,11 @@ impl<'a> EventsRef<'a> {
 /// Returns None if no valid session is selected.
 pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>> {
     let idx = state.ui.selected_session_index?;
-    let active_count = state.domain.active_sessions.len();
+    let active_count = state.domain.confirmed_active_count();
 
     if idx < active_count {
-        // Active session — filter agents and events by session_id
-        let meta = state.domain.active_sessions.values().nth(idx)?;
+        // Active (confirmed) session — filter agents and events by session_id
+        let meta = state.domain.confirmed_active_sessions().nth(idx).map(|(_, m)| m)?;
         let sid = &meta.id;
         let filtered_agents: BTreeMap<AgentId, &Agent> = state.domain.agents.iter()
             .filter(|(_, a)| a.session_id.as_ref() == Some(sid))
@@ -616,8 +616,9 @@ fn render_events_list(
                     .as_ref()
                     .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
                     .and_then(|_| {
-                        // Check first few lines for file path/extension
-                        clean.lines()
+                        // Strip offset prefix before scanning for extension
+                        let (_, text_for_ext) = crate::view::components::event_stream::extract_line_offset(&clean);
+                        text_for_ext.lines()
                             .take(5)
                             .find_map(crate::view::components::syntax::detect_extension)
                     });
@@ -705,7 +706,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let mut meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        meta.confirmed = true;
         state.domain.active_sessions.insert(SessionId::new("s1"), meta);
         state.ui.selected_session_index = Some(0);
         state.ui.view = crate::app::state::ViewState::SessionDetail;
@@ -836,7 +838,9 @@ mod tests {
     #[test]
     fn get_selected_session_data_active_session() {
         let mut state = AppState::new();
-        state.domain.active_sessions.insert(SessionId::new("s1"), SessionMeta::new("s1", Utc::now(), "/proj".to_string()));
+        let mut meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        meta.confirmed = true;
+        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
         state.ui.selected_session_index = Some(0);
         let mut a = Agent::new("a01", Utc::now());
         a.session_id = Some(SessionId::new("s1"));
@@ -850,7 +854,9 @@ mod tests {
     #[test]
     fn get_selected_session_data_archived_session() {
         let mut state = AppState::new();
-        state.domain.active_sessions.insert(SessionId::new("active"), SessionMeta::new("active", Utc::now(), "/proj".to_string()));
+        let mut active_meta = SessionMeta::new("active", Utc::now(), "/proj".to_string());
+        active_meta.confirmed = true;
+        state.domain.active_sessions.insert(SessionId::new("active"), active_meta);
 
         let mut archived_agents = BTreeMap::new();
         archived_agents.insert(AgentId::new("a99"), Agent::new("a99", Utc::now()));

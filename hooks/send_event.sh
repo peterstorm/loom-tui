@@ -67,6 +67,11 @@ case "$HOOK_NAME" in
     ;;
   PostToolUse|post-tool-use)
     TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
+    # Extract Read tool offset for line-number display in TUI
+    LINE_OFFSET=""
+    if [ "$TOOL_NAME" = "Read" ]; then
+      LINE_OFFSET=$(echo "$HOOK_JSON" | jq -r '.tool_input.offset // empty' 2>/dev/null || echo "")
+    fi
     # Extract clean human-readable result from tool_response
     RESULT=$(echo "$HOOK_JSON" | jq -r '
       .tool_response // .tool_output // .output // {} |
@@ -80,6 +85,11 @@ case "$HOOK_NAME" in
         end
       else tostring
       end' 2>/dev/null | head -c 32000)
+    # Prepend @offset:N metadata for TUI gutter line numbering
+    if [ -n "$LINE_OFFSET" ] && [ "$LINE_OFFSET" != "null" ]; then
+      RESULT="@offset:${LINE_OFFSET}
+${RESULT}"
+    fi
     DURATION=$(echo "$HOOK_JSON" | jq -r '.duration_ms // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \

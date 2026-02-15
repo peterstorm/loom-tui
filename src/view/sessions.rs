@@ -15,13 +15,14 @@ use super::components::format::format_duration;
 /// Global header is rendered by the view dispatcher.
 pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
-    // Combine active sessions + archived sessions for display
-    let all_sessions: Vec<&SessionMeta> = state.domain.active_sessions.values()
+    // Combine confirmed active sessions + archived sessions for display
+    let all_sessions: Vec<&SessionMeta> = state.domain.confirmed_active_sessions()
+        .map(|(_, m)| m)
         .chain(state.domain.sessions.iter().map(|a| &a.meta))
         .collect();
 
     // Track which archived sessions are loading
-    let active_count = state.domain.active_sessions.len();
+    let active_count = state.domain.confirmed_active_count();
 
     // Empty state: no sessions at all
     if all_sessions.is_empty() {

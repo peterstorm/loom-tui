@@ -34,6 +34,9 @@ pub struct SessionMeta {
     /// Last time an event was received for this session (for stale session cleanup)
     #[serde(skip)]
     pub last_event_at: Option<DateTime<Utc>>,
+    /// Whether a real user prompt was received (filters out subagent phantom sessions)
+    #[serde(skip)]
+    pub confirmed: bool,
 }
 
 impl PartialEq for SessionMeta {
@@ -51,7 +54,7 @@ impl PartialEq for SessionMeta {
             && self.wave_count == other.wave_count
             && self.failed_tasks == other.failed_tasks
             && self.transcript_path == other.transcript_path
-        // last_event_at intentionally excluded (runtime-only, not serialized)
+        // last_event_at, confirmed intentionally excluded (runtime-only, not serialized)
     }
 }
 
@@ -72,6 +75,7 @@ impl SessionMeta {
             failed_tasks: Vec::new(),
             transcript_path: None,
             last_event_at: Some(timestamp),
+            confirmed: false,
         }
     }
 

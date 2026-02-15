@@ -36,7 +36,7 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('2') => switch_to_agent_detail(state),
         KeyCode::Char('3') => {
             state.ui.view = ViewState::Sessions;
-            let has_sessions = !state.domain.active_sessions.is_empty() || !state.domain.sessions.is_empty();
+            let has_sessions = state.domain.confirmed_active_count() > 0 || !state.domain.sessions.is_empty();
             if state.ui.selected_session_index.is_none() && has_sessions {
                 state.ui.selected_session_index = Some(0);
             }
@@ -138,7 +138,7 @@ fn item_count(state: &AppState) -> Option<usize> {
     match (&state.ui.view, &state.ui.focus) {
         (ViewState::Dashboard, PanelFocus::Left) => Some(task_count(state)),
         (ViewState::AgentDetail, PanelFocus::Left) => Some(state.domain.agents.len()),
-        (ViewState::Sessions, _) => Some(state.domain.active_sessions.len() + state.domain.sessions.len()),
+        (ViewState::Sessions, _) => Some(state.domain.confirmed_active_count() + state.domain.sessions.len()),
         _ => None,
     }
 }
@@ -346,7 +346,7 @@ fn drill_down(state: &mut AppState) {
         ViewState::AgentDetail => {}
         ViewState::Sessions => {
             if let Some(idx) = state.ui.selected_session_index {
-                let active_count = state.domain.active_sessions.len();
+                let active_count = state.domain.confirmed_active_count();
                 if idx < active_count {
                     state.ui.view = ViewState::SessionDetail;
                     state.ui.scroll_offsets.session_detail_left = 0;

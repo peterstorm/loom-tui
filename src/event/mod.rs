@@ -51,4 +51,7 @@ pub enum AppEvent {
 
     /// Request to install hook (side-effect handled in event loop)
     InstallHookRequested,
+
+    /// Initial event file replay is complete — safe to run stale session cleanup
+    ReplayComplete,
 }

@@ -195,6 +195,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         if let Some(detail_text) = detail {
             let clean = clean_detail(&detail_text);
             if !clean.is_empty() {
+                let (start_line, offset_clean) = extract_line_offset(&clean);
                 let ext_hint = tool_name
                     .as_ref()
                     .filter(|t| {
@@ -205,12 +206,12 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
                     })
                     .and_then(|_| {
                         // Check first few lines for file path/extension
-                        clean
+                        offset_clean
                             .lines()
                             .take(5)
                             .find_map(super::syntax::detect_extension)
                     });
-                lines.extend(markdown_to_lines(&clean, ext_hint.as_deref()));
+                lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
             }
         }
     }
@@ -237,16 +238,31 @@ pub fn clean_detail(s: &str) -> String {
         .to_string()
 }
 
+/// Extract `@offset:N\n` prefix from text. Returns (start_line, rest).
+/// The hook script prepends this for Read tool results with an offset.
+pub fn extract_line_offset(text: &str) -> (usize, &str) {
+    if let Some(rest) = text.strip_prefix("@offset:") {
+        if let Some(nl_pos) = rest.find('\n') {
+            if let Ok(offset) = rest[..nl_pos].parse::<usize>() {
+                return (offset, &rest[nl_pos + 1..]);
+            }
+        }
+    }
+    (1, text)
+}
+
 /// Public entry point for rendering detail text with markdown + syntax highlighting.
 /// Used by both the dashboard event stream and session detail view.
 pub fn render_detail_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
-    markdown_to_lines(text, ext_hint)
+    let (start_line, clean_text) = extract_line_offset(text);
+    markdown_to_lines(clean_text, ext_hint, start_line)
 }
 
 /// Convert markdown-ish text to styled ratatui Lines.
 /// Handles: code blocks (syntax highlighted), inline code, bold, headers, diff lines, plain text.
 /// When `ext_hint` is provided, diff lines and untagged code blocks get syntax highlighting.
-fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
+/// `start_line` sets the first gutter number for code blocks.
+fn markdown_to_lines(text: &str, ext_hint: Option<&str>, start_line: usize) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = text.split('\n').collect();
     let mut result = Vec::new();
     let mut i = 0;
@@ -286,7 +302,7 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
                     .map(super::syntax::lang_to_extension)
                     .or_else(|| ext_hint.map(|e| e.to_string()))
                     .unwrap_or_else(|| "txt".to_string());
-                result.extend(super::syntax::highlight_code_block(&code_lines, &ext));
+                result.extend(super::syntax::highlight_code_block(&code_lines, &ext, start_line));
             }
             continue;
         }
@@ -302,7 +318,7 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
             }
 
             if let Some(ext) = ext_hint {
-                result.extend(super::syntax::highlight_diff_block(&diff_lines, ext));
+                result.extend(super::syntax::highlight_diff_block(&diff_lines, ext, start_line));
             } else {
                 // Fallback: flat coloring (no extension context)
                 for dl in diff_lines {
@@ -657,7 +673,7 @@ mod tests {
     #[test]
     fn markdown_renders_code_blocks() {
         let md = "before\n```rust\nfn main() {}\n```\nafter";
-        let lines = markdown_to_lines(md, None);
+        let lines = markdown_to_lines(md, None, 1);
         // before, indented code line, after = 3 lines (fences stripped)
         assert_eq!(lines.len(), 3);
         let code_text: String = lines[1].spans.iter().map(|s| s.content.to_string()).collect();
@@ -666,7 +682,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_inline_code() {
-        let lines = markdown_to_lines("use `foo` here", None);
+        let lines = markdown_to_lines("use `foo` here", None, 1);
         let spans = &lines[0].spans;
         assert!(spans.len() >= 3); // "use " + "foo" + " here"
         assert_eq!(spans[1].content.as_ref(), "foo");
@@ -675,7 +691,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_bold() {
-        let lines = markdown_to_lines("this is **bold** text", None);
+        let lines = markdown_to_lines("this is **bold** text", None, 1);
         let spans = &lines[0].spans;
         let bold_span = spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
         assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
@@ -683,7 +699,7 @@ mod tests {
 
     #[test]
     fn markdown_renders_headers() {
-        let lines = markdown_to_lines("# Title\n## Sub\ntext", None);
+        let lines = markdown_to_lines("# Title\n## Sub\ntext", None, 1);
         assert_eq!(lines.len(), 3);
         let title_text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(title_text, "Title");
@@ -692,14 +708,14 @@ mod tests {
 
     #[test]
     fn markdown_renders_diff_lines() {
-        let lines = markdown_to_lines("- removed\n+ added", None);
+        let lines = markdown_to_lines("- removed\n+ added", None, 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(Theme::ERROR));
         assert_eq!(lines[1].spans[0].style.fg, Some(Theme::SUCCESS));
     }
 
     #[test]
     fn markdown_renders_list_items() {
-        let lines = markdown_to_lines("* item one\n* item two", None);
+        let lines = markdown_to_lines("* item one\n* item two", None, 1);
         assert_eq!(lines.len(), 2);
         let first: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert!(first.starts_with("• "));
@@ -707,10 +723,38 @@ mod tests {
 
     #[test]
     fn markdown_plain_text_unchanged() {
-        let lines = markdown_to_lines("just plain text", None);
+        let lines = markdown_to_lines("just plain text", None, 1);
         assert_eq!(lines.len(), 1);
         let text: String = lines[0].spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(text, "just plain text");
+    }
+
+    #[test]
+    fn extract_line_offset_parses_prefix() {
+        let (offset, rest) = extract_line_offset("@offset:42\nfile contents here");
+        assert_eq!(offset, 42);
+        assert_eq!(rest, "file contents here");
+    }
+
+    #[test]
+    fn extract_line_offset_no_prefix() {
+        let (offset, rest) = extract_line_offset("just normal text");
+        assert_eq!(offset, 1);
+        assert_eq!(rest, "just normal text");
+    }
+
+    #[test]
+    fn extract_line_offset_invalid_number() {
+        let (offset, rest) = extract_line_offset("@offset:abc\ntext");
+        assert_eq!(offset, 1);
+        assert_eq!(rest, "@offset:abc\ntext");
+    }
+
+    #[test]
+    fn extract_line_offset_no_newline() {
+        let (offset, rest) = extract_line_offset("@offset:42");
+        assert_eq!(offset, 1);
+        assert_eq!(rest, "@offset:42");
     }
 
     #[test]

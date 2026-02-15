@@ -16,7 +16,8 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 /// Highlight a code block with syntax coloring and line numbers.
-pub fn highlight_code_block(lines: &[&str], extension: &str) -> Vec<Line<'static>> {
+/// `start_line` sets the first gutter number (e.g. 42 when Read offset=42).
+pub fn highlight_code_block(lines: &[&str], extension: &str, start_line: usize) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
     let theme = best_theme();
     let normalized = lang_to_extension(extension);
@@ -26,13 +27,13 @@ pub fn highlight_code_block(lines: &[&str], extension: &str) -> Vec<Line<'static
     let mut h = HighlightLines::new(syntax, theme);
 
     let count = lines.len().min(MAX_HIGHLIGHT_LINES);
-    let gutter_w = digit_width(count);
+    let gutter_w = digit_width(count + start_line - 1);
 
     lines[..count]
         .iter()
         .enumerate()
         .map(|(i, code)| {
-            let mut spans = vec![gutter_span(i + 1, gutter_w)];
+            let mut spans = vec![gutter_span(i + start_line, gutter_w)];
             spans.extend(highlight_line_spans(&mut h, code, ss));
             Line::from(spans)
         })
@@ -40,7 +41,8 @@ pub fn highlight_code_block(lines: &[&str], extension: &str) -> Vec<Line<'static
 }
 
 /// Highlight diff lines (+/-) with syntax coloring, prefix colors, and line numbers.
-pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static>> {
+/// `start_line` sets the first gutter number.
+pub fn highlight_diff_block(lines: &[&str], extension: &str, start_line: usize) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
     let theme = best_theme();
     let normalized = lang_to_extension(extension);
@@ -50,7 +52,7 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static
     let mut h = HighlightLines::new(syntax, theme);
 
     let count = lines.len().min(MAX_HIGHLIGHT_LINES);
-    let gutter_w = digit_width(count);
+    let gutter_w = digit_width(count + start_line - 1);
 
     lines[..count]
         .iter()
@@ -59,7 +61,7 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str) -> Vec<Line<'static
             let (prefix, code, prefix_color) = parse_diff_prefix(line);
             let is_removal = prefix == "- ";
             let mut spans = vec![
-                gutter_span(i + 1, gutter_w),
+                gutter_span(i + start_line, gutter_w),
                 Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
             ];
             let mut code_spans = highlight_line_spans(&mut h, code, ss);
@@ -243,14 +245,14 @@ mod tests {
     #[test]
     fn highlight_code_block_returns_correct_line_count() {
         let code = vec!["fn main() {}", "    println!(\"hi\");", "}"];
-        let lines = highlight_code_block(&code, "rs");
+        let lines = highlight_code_block(&code, "rs", 1);
         assert_eq!(lines.len(), 3);
     }
 
     #[test]
     fn highlight_code_block_has_gutter() {
         let code = vec!["let x = 1;"];
-        let lines = highlight_code_block(&code, "rs");
+        let lines = highlight_code_block(&code, "rs", 1);
         let first_span = &lines[0].spans[0];
         assert!(first_span.content.contains("1"));
         assert!(first_span.content.contains("│"));
@@ -259,14 +261,14 @@ mod tests {
     #[test]
     fn highlight_code_block_caps_at_max() {
         let code: Vec<&str> = (0..300).map(|_| "let x = 1;").collect();
-        let lines = highlight_code_block(&code, "rs");
+        let lines = highlight_code_block(&code, "rs", 1);
         assert_eq!(lines.len(), MAX_HIGHLIGHT_LINES);
     }
 
     #[test]
     fn highlight_diff_block_preserves_prefix_colors() {
         let diff = vec!["+ added line", "- removed line"];
-        let lines = highlight_diff_block(&diff, "rs");
+        let lines = highlight_diff_block(&diff, "rs", 1);
         assert_eq!(lines.len(), 2);
         // spans[0] = gutter, spans[1] = prefix
         assert_eq!(lines[0].spans[1].style.fg, Some(Theme::SUCCESS));
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn highlight_diff_block_has_gutter() {
         let diff = vec!["+ let x = 1;"];
-        let lines = highlight_diff_block(&diff, "rs");
+        let lines = highlight_diff_block(&diff, "rs", 1);
         let gutter = &lines[0].spans[0];
         assert!(gutter.content.contains("1"));
         assert!(gutter.content.contains("│"));
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn highlight_produces_non_white_colors() {
         let code = vec!["fn main() {}", "    let x = 42;"];
-        let lines = highlight_code_block(&code, "rs");
+        let lines = highlight_code_block(&code, "rs", 1);
         // Code spans start after gutter (index 0)
         let has_color = lines.iter().any(|line| {
             line.spans.iter().skip(1).any(|span| {
@@ -306,7 +308,7 @@ mod tests {
     fn highlight_code_block_normalizes_ts_extension() {
         // Raw "ts" extension (from detect_extension) should produce syntax colors, not plain text
         let code = vec!["const x: number = 42;", "function foo(s: string) {}"];
-        let lines = highlight_code_block(&code, "ts");
+        let lines = highlight_code_block(&code, "ts", 1);
         assert_eq!(lines.len(), 2);
         let has_color = lines.iter().any(|line| {
             line.spans.iter().skip(1).any(|span| {
@@ -319,10 +321,34 @@ mod tests {
     #[test]
     fn sql_highlighting_works() {
         let code = vec!["SELECT * FROM users", "WHERE id = 1;"];
-        let lines = highlight_code_block(&code, "sql");
+        let lines = highlight_code_block(&code, "sql", 1);
         assert_eq!(lines.len(), 2);
         // Verify we got highlighting (not just plain text)
         assert!(lines[0].spans.len() > 1, "SQL should be syntax highlighted");
+    }
+
+    #[test]
+    fn highlight_code_block_with_offset() {
+        let code = vec!["let x = 1;", "let y = 2;", "let z = 3;"];
+        let lines = highlight_code_block(&code, "rs", 42);
+        assert_eq!(lines.len(), 3);
+        // Gutter should show 42, 43, 44
+        let gutter0: String = lines[0].spans[0].content.to_string();
+        let gutter1: String = lines[1].spans[0].content.to_string();
+        let gutter2: String = lines[2].spans[0].content.to_string();
+        assert!(gutter0.contains("42"), "first gutter should contain 42, got: {}", gutter0);
+        assert!(gutter1.contains("43"), "second gutter should contain 43, got: {}", gutter1);
+        assert!(gutter2.contains("44"), "third gutter should contain 44, got: {}", gutter2);
+    }
+
+    #[test]
+    fn highlight_diff_block_with_offset() {
+        let diff = vec!["+ added", "- removed"];
+        let lines = highlight_diff_block(&diff, "rs", 10);
+        let gutter0: String = lines[0].spans[0].content.to_string();
+        let gutter1: String = lines[1].spans[0].content.to_string();
+        assert!(gutter0.contains("10"), "first gutter should contain 10, got: {}", gutter0);
+        assert!(gutter1.contains("11"), "second gutter should contain 11, got: {}", gutter1);
     }
 
     #[test]

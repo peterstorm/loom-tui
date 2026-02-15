@@ -103,17 +103,22 @@ fn run_event_loop(
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Send key event to update
                 update(state, AppEvent::Key(key));
 
-                // Handle hook installation side effect
+                // Handle hook installation side effect (imperative shell)
                 if matches!(key.code, crossterm::event::KeyCode::Char('i'))
                     && matches!(state.meta.hook_status, HookStatus::Missing) {
+                    // Send InstallHookRequested event to update (functional core)
+                    update(state, AppEvent::InstallHookRequested);
+
+                    // Perform I/O side-effect in shell
                     match install_hook(project_root) {
                         Ok(()) => {
                             state.meta.hook_status = HookStatus::Installed;
                         }
                         Err(e) => {
-                            state.meta.hook_status = HookStatus::InstallFailed(e);
+                            state.meta.hook_status = HookStatus::InstallFailed(e.to_string());
                         }
                     }
                 }
@@ -141,17 +146,13 @@ fn run_event_loop(
                     std::thread::spawn(move || {
                         match session::load_session(&path) {
                             Ok(archive) => {
-                                if tx.send(AppEvent::SessionLoaded(archive)).is_err() {
-                                    eprintln!("Failed to send SessionLoaded event: channel closed");
-                                }
+                                let _ = tx.send(AppEvent::SessionLoaded(archive));
                             }
                             Err(e) => {
-                                if tx.send(AppEvent::Error {
+                                let _ = tx.send(AppEvent::Error {
                                     source: path.display().to_string(),
                                     error: e.into(),
-                                }).is_err() {
-                                    eprintln!("Failed to send Error event: channel closed");
-                                }
+                                });
                             }
                         }
                     });

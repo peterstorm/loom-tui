@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
 
 use chrono::Utc;
 use ratatui::{
@@ -12,7 +11,8 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, PanelFocus};
-use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionId, SessionMeta, SessionStatus, TaskGraph, Theme};
+use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionMeta, SessionStatus, TaskGraph, Theme};
+use super::components::format::format_duration;
 
 // ============================================================================
 // Data access: unifies active session vs archived session
@@ -629,6 +629,12 @@ fn render_events_list(
         }
     }
 
+    // Clamp scroll_offset to u16::MAX to prevent silent truncation overflow
+    // Additionally clamp to a reasonable maximum to avoid ratatui internal panics
+    let scroll = scroll_offset
+        .min(u16::MAX as usize)
+        .min(10000) as u16;
+
     let p = Paragraph::new(lines)
         .block(
             Block::default()
@@ -641,7 +647,7 @@ fn render_events_list(
                 })),
         )
         .wrap(Wrap { trim: false })
-        .scroll((scroll_offset as u16, 0));
+        .scroll((scroll, 0));
 
     frame.render_widget(p, area);
 }
@@ -670,30 +676,13 @@ fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
     frame.render_widget(footer, area);
 }
 
-fn format_duration(duration: Option<Duration>) -> String {
-    match duration {
-        Some(d) => {
-            let secs = d.as_secs();
-            let mins = secs / 60;
-            let hours = mins / 60;
-            if hours > 0 {
-                format!("{}h {}m", hours, mins % 60)
-            } else if mins > 0 {
-                format!("{}m {}s", mins, secs % 60)
-            } else {
-                format!("{}s", secs)
-            }
-        }
-        None => "—".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::state::AppState;
     use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta, SessionStatus};
     use chrono::Utc;
+    use std::time::Duration;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::collections::BTreeMap;

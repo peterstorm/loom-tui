@@ -13,7 +13,7 @@ pub struct Paths {
     pub transcripts: PathBuf,
 
     /// Path to the hook events JSONL file
-    /// Example: $TMPDIR/loom-tui/events.jsonl (defaults to /tmp when TMPDIR unset)
+    /// Example: /tmp/loom-tui/events.jsonl (always uses /tmp, not $TMPDIR)
     pub events: PathBuf,
 
     /// Directory containing active agent marker files (*.active)
@@ -37,8 +37,9 @@ impl Paths {
     ///
     /// # Environment
     ///
-    /// * `TMPDIR` - If set, used for temp directory paths. Defaults to "/tmp" if unset.
     /// * `HOME` - Used to resolve the archive directory (~/.local/share/loom-tui/sessions/).
+    ///
+    /// Note: Temp directory paths always use "/tmp" (not $TMPDIR) to ensure TUI and hook scripts agree on path.
     ///
     /// # Examples
     ///

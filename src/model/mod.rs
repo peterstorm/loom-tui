@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod hook_event;
 pub mod ids;
+pub mod serde_utils;
 pub mod session;
 pub mod task;
 pub mod theme;

@@ -38,6 +38,10 @@ impl TailState {
     /// # Imperative Shell
     /// Performs file I/O. Updates internal offset state.
     ///
+    /// # Truncation Detection
+    /// If file size < stored offset, file was truncated/rotated.
+    /// Resets offset to 0 and re-reads entire file.
+    ///
     /// # Returns
     /// - `Ok(String)` - New content since last read (may be empty if file unchanged)
     /// - `Err(io::Error)` - File I/O error
@@ -45,16 +49,28 @@ impl TailState {
         let mut file = File::open(path)?;
         let current_offset = self.get_offset(path);
 
-        // Seek to last read position
-        file.seek(SeekFrom::Start(current_offset))?;
+        // Get file size to detect truncation
+        let file_len = file.metadata()?.len();
 
-        // Read from current position to end
+        // Truncation detected: file shrank below our offset
+        let read_offset = if file_len < current_offset {
+            // Reset offset and re-read from start
+            self.set_offset(path.to_path_buf(), 0);
+            0
+        } else {
+            current_offset
+        };
+
+        // Seek to determined position
+        file.seek(SeekFrom::Start(read_offset))?;
+
+        // Read from position to end
         let mut new_content = String::new();
         let bytes_read = file.read_to_string(&mut new_content)?;
 
         // Update offset
         if bytes_read > 0 {
-            self.set_offset(path.to_path_buf(), current_offset + bytes_read as u64);
+            self.set_offset(path.to_path_buf(), read_offset + bytes_read as u64);
         }
 
         Ok(new_content)
@@ -239,5 +255,92 @@ mod tests {
         state.reset(file.path());
         let content = state.read_new_lines(file.path()).unwrap();
         assert_eq!(content, "Line 1\nLine 2\n");
+    }
+
+    #[test]
+    fn test_truncation_detection_resets_offset() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "Line 1").unwrap();
+        writeln!(file, "Line 2").unwrap();
+        writeln!(file, "Line 3").unwrap();
+
+        let mut state = TailState::new();
+
+        // First read - consumes all content
+        let content1 = state.read_new_lines(file.path()).unwrap();
+        assert_eq!(content1, "Line 1\nLine 2\nLine 3\n");
+        let offset_after_first = state.get_offset(file.path());
+        assert!(offset_after_first > 0);
+
+        // Truncate file to shorter content
+        let path = file.path().to_path_buf();
+        drop(file); // Close original file
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "New line").unwrap();
+        drop(file);
+
+        // Next read should detect truncation, reset offset, re-read from start
+        let content2 = state.read_new_lines(&path).unwrap();
+        assert_eq!(content2, "New line\n");
+
+        // Offset should be set to length of new content, not old offset
+        let new_offset = state.get_offset(&path);
+        assert!(new_offset < offset_after_first);
+        assert_eq!(new_offset, "New line\n".len() as u64);
+    }
+
+    #[test]
+    fn test_truncation_with_replacement_content() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "Original line 1").unwrap();
+        writeln!(file, "Original line 2").unwrap();
+
+        let mut state = TailState::new();
+
+        // Read original content
+        state.read_new_lines(file.path()).unwrap();
+        let original_offset = state.get_offset(file.path());
+
+        // Replace file with different, shorter content
+        let path = file.path().to_path_buf();
+        drop(file);
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "Short").unwrap();
+        drop(file);
+
+        // Should detect truncation via size comparison
+        let content = state.read_new_lines(&path).unwrap();
+        assert_eq!(content, "Short\n");
+
+        let new_offset = state.get_offset(&path);
+        assert!(new_offset < original_offset, "Offset should decrease after truncation");
+    }
+
+    #[test]
+    fn test_normal_append_after_truncation_detection() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "Line 1").unwrap();
+
+        let mut state = TailState::new();
+
+        // Initial read
+        state.read_new_lines(file.path()).unwrap();
+
+        // Truncate
+        let path = file.path().to_path_buf();
+        drop(file);
+        let mut file = File::create(&path).unwrap();
+        writeln!(file, "New").unwrap();
+
+        // Read after truncation
+        state.read_new_lines(&path).unwrap();
+
+        // Append normally
+        writeln!(file, "Appended").unwrap();
+        drop(file);
+
+        // Should read only appended content
+        let content = state.read_new_lines(&path).unwrap();
+        assert_eq!(content, "Appended\n");
     }
 }

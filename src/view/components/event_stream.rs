@@ -23,6 +23,12 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
         "Events"
     };
 
+    // Clamp scroll_offset to u16::MAX to prevent silent truncation overflow
+    // Additionally clamp to a reasonable maximum to avoid ratatui internal panics
+    let scroll = state.ui.scroll_offsets.event_stream
+        .min(u16::MAX as usize)
+        .min(10000) as u16;
+
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
@@ -35,7 +41,7 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((state.ui.scroll_offsets.event_stream as u16, 0));
+        .scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -57,6 +63,12 @@ pub fn render_agent_event_stream(
         "Activity"
     };
 
+    // Clamp scroll_offset to u16::MAX to prevent silent truncation overflow
+    // Additionally clamp to a reasonable maximum to avoid ratatui internal panics
+    let scroll = scroll_offset
+        .min(u16::MAX as usize)
+        .min(10000) as u16;
+
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
@@ -69,7 +81,7 @@ pub fn render_agent_event_stream(
                 .title(title),
         )
         .wrap(Wrap { trim: false })
-        .scroll((scroll_offset as u16, 0));
+        .scroll((scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -335,12 +347,12 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'static>> {
         }
 
         // List items — render bullet, parse inline markdown for rest
-        if line.starts_with("* ") {
+        if let Some(rest) = line.strip_prefix("* ") {
             let mut spans = vec![Span::styled(
                 "• ".to_string(),
                 Style::default().fg(Theme::MUTED_TEXT),
             )];
-            spans.extend(parse_inline_markdown(&line[2..]));
+            spans.extend(parse_inline_markdown(rest));
             result.push(Line::from(spans));
             i += 1;
             continue;
@@ -479,20 +491,17 @@ fn event_matches_search(kind: &HookEventKind, query: &str, agent_id: Option<&cra
     }
 
     // Check type-specific fields
-    match kind {
-        HookEventKind::SubagentStart { agent_type, task_description } => {
-            if let Some(t) = agent_type {
-                if t.to_lowercase().contains(query) {
-                    return true;
-                }
-            }
-            if let Some(desc) = task_description {
-                if desc.to_lowercase().contains(query) {
-                    return true;
-                }
+    if let HookEventKind::SubagentStart { agent_type, task_description } = kind {
+        if let Some(t) = agent_type {
+            if t.to_lowercase().contains(query) {
+                return true;
             }
         }
-        _ => {}
+        if let Some(desc) = task_description {
+            if desc.to_lowercase().contains(query) {
+                return true;
+            }
+        }
     }
 
     false

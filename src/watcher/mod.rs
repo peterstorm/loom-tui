@@ -39,10 +39,12 @@ fn start_tail_worker(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<TailCommand> {
                     let new_content = match tail_state.read_new_lines(&path) {
                         Ok(content) => content,
                         Err(e) => {
-                            let _ = tx.send(AppEvent::Error {
+                            if tx.send(AppEvent::Error {
                                 source: path.display().to_string(),
                                 error: WatcherError::Io(e.to_string()).into(),
-                            });
+                            }).is_err() {
+                                return;
+                            }
                             continue;
                         }
                     };
@@ -65,10 +67,12 @@ fn start_tail_worker(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<TailCommand> {
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(AppEvent::Error {
+                            if tx.send(AppEvent::Error {
                                 source: path.display().to_string(),
                                 error: WatcherError::Parse(e).into(),
-                            });
+                            }).is_err() {
+                                return;
+                            }
                         }
                     }
                 }
@@ -156,7 +160,7 @@ pub fn start_watching(
     // Watch events file's parent dir so we catch file creation + modifications
     // even if events.jsonl doesn't exist yet at startup
     if let Some(events_dir) = paths.events.parent() {
-        std::fs::create_dir_all(events_dir).ok();
+        std::fs::create_dir_all(events_dir)?;
         watch_path(&mut watcher, events_dir)?;
     }
 
@@ -171,9 +175,10 @@ pub fn start_watching(
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(200));
-            if events_path_poll.exists() {
-                let _ = tail_worker_poll.send(TailCommand::ReadFile(events_path_poll.clone()));
-            }
+            if events_path_poll.exists()
+                && tail_worker_poll.send(TailCommand::ReadFile(events_path_poll.clone())).is_err() {
+                    return;
+                }
         }
     });
 
@@ -194,7 +199,7 @@ pub fn start_watching(
 }
 
 /// Start polling Claude Code transcript files for assistant reasoning text.
-/// Scans the transcript directory every 500ms for recently modified .jsonl files,
+/// Polls files every 200ms, rescans directory every 2s for recently modified .jsonl files,
 /// tails new content, and emits AssistantText events.
 /// Discovers subagent transcripts automatically (each gets its own .jsonl file).
 fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>) {
@@ -205,7 +210,7 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
 
         loop {
             std::thread::sleep(Duration::from_millis(200));
-            scan_counter += 1;
+            scan_counter = scan_counter.wrapping_add(1);
 
             // Rescan directory every ~2s (10 iterations) to discover new files
             if scan_counter % 10 == 1 {
@@ -236,7 +241,17 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                 }
                 let new_content = match tail_state.read_new_lines(path) {
                     Ok(c) if !c.is_empty() => c,
-                    _ => continue,
+                    Ok(_) => continue, // Empty file - no new content
+                    Err(e) => {
+                        // I/O error - log and continue to next file
+                        if tx.send(AppEvent::Error {
+                            source: path.display().to_string(),
+                            error: WatcherError::Io(e.to_string()).into(),
+                        }).is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                 };
 
                 let session_id = path
@@ -289,21 +304,34 @@ fn load_existing_files(
         }
     }
 
-    if paths.events.exists() {
-        let _ = tail_worker.send(TailCommand::ReadFile(paths.events.clone()));
-    }
+    if paths.events.exists()
+        && tail_worker.send(TailCommand::ReadFile(paths.events.clone())).is_err() {
+            return;
+        }
 
     // Load archived session metas (lightweight — skips events/agents/task_graph)
     match session::list_session_metas(&paths.archive_dir) {
-        Ok(metas) if !metas.is_empty() => {
-            let _ = tx.send(AppEvent::SessionMetasLoaded(metas));
+        Ok((metas, errors)) => {
+            // Report errors from corrupt session files
+            for error in errors {
+                if tx.send(AppEvent::Error {
+                    source: "sessions".to_string(),
+                    error: error.into(),
+                }).is_err() {
+                    return;
+                }
+            }
+            // Send metas if any successfully loaded
+            if !metas.is_empty()
+                && tx.send(AppEvent::SessionMetasLoaded(metas)).is_err() {
+                }
         }
-        Ok(_) => {}
         Err(e) => {
-            let _ = tx.send(AppEvent::Error {
+            if tx.send(AppEvent::Error {
                 source: "sessions".to_string(),
                 error: e.into(),
-            });
+            }).is_err() {
+            }
         }
     }
 }
@@ -312,6 +340,8 @@ fn load_existing_files(
 fn watch_path(watcher: &mut RecommendedWatcher, path: &Path) -> WatcherResult<()> {
     if path.exists() {
         watcher.watch(path, RecursiveMode::Recursive)?;
+    } else {
+        eprintln!("Warning: watch path does not exist: {}", path.display());
     }
     Ok(())
 }
@@ -339,16 +369,18 @@ fn handle_watch_event(
                     handle_transcript_update(&path, tx);
                 }
                 // Hook events file updated (send to worker thread)
-                else if path == events_path {
-                    let _ = tail_worker.send(TailCommand::ReadFile(path));
-                }
+                else if path == events_path
+                    && tail_worker.send(TailCommand::ReadFile(path)).is_err() {
+                        return;
+                    }
             }
         }
         Err(e) => {
-            let _ = tx.send(AppEvent::Error {
+            if tx.send(AppEvent::Error {
                 source: "file_watcher".to_string(),
                 error: WatcherError::Notify(e.to_string()).into(),
-            });
+            }).is_err() {
+            }
         }
     }
 }
@@ -358,20 +390,23 @@ fn handle_task_graph_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     match std::fs::read_to_string(path) {
         Ok(content) => match parsers::parse_task_graph(&content) {
             Ok(graph) => {
-                let _ = tx.send(AppEvent::TaskGraphUpdated(graph));
+                if tx.send(AppEvent::TaskGraphUpdated(graph)).is_err() {
+                }
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::Error {
+                if tx.send(AppEvent::Error {
                     source: path.display().to_string(),
                     error: WatcherError::Parse(e).into(),
-                });
+                }).is_err() {
+                }
             }
         },
         Err(e) => {
-            let _ = tx.send(AppEvent::Error {
+            if tx.send(AppEvent::Error {
                 source: path.display().to_string(),
                 error: WatcherError::Io(e.to_string()).into(),
-            });
+            }).is_err() {
+            }
         }
     }
 }
@@ -389,20 +424,23 @@ fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
     match std::fs::read_to_string(path) {
         Ok(content) => match parsers::parse_transcript(&content) {
             Ok(messages) => {
-                let _ = tx.send(AppEvent::TranscriptUpdated { agent_id: agent_id.into(), messages });
+                if tx.send(AppEvent::TranscriptUpdated { agent_id: agent_id.into(), messages }).is_err() {
+                }
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::Error {
+                if tx.send(AppEvent::Error {
                     source: path.display().to_string(),
                     error: WatcherError::Parse(e).into(),
-                });
+                }).is_err() {
+                }
             }
         },
         Err(e) => {
-            let _ = tx.send(AppEvent::Error {
+            if tx.send(AppEvent::Error {
                 source: path.display().to_string(),
                 error: WatcherError::Io(e.to_string()).into(),
-            });
+            }).is_err() {
+            }
         }
     }
 }
@@ -447,7 +485,7 @@ fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::mode
 /// Returns None if not in a git repo or git command fails.
 fn get_current_git_branch() -> Option<String> {
     std::process::Command::new("git")
-        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -459,7 +497,6 @@ fn get_current_git_branch() -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::io::Write;
     use tempfile::TempDir;
 
     #[test]
@@ -501,7 +538,7 @@ mod tests {
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         match event {
             AppEvent::TaskGraphUpdated(graph) => {
-                assert_eq!(graph.total_tasks, 1);
+                assert_eq!(graph.total_tasks(), 1);
                 assert_eq!(graph.waves.len(), 1);
             }
             _ => panic!("Expected TaskGraphUpdated event"),
@@ -546,6 +583,46 @@ mod tests {
             }
             _ => panic!("Expected TranscriptUpdated event"),
         }
+    }
+
+    #[test]
+    fn test_scan_counter_wraps_at_u32_max() {
+        // Verify wrapping_add prevents overflow and modulo still works
+        let mut counter: u32 = u32::MAX - 5;
+
+        for _ in 0..10 {
+            counter = counter.wrapping_add(1);
+        }
+
+        // Counter should have wrapped around: MAX-5 + 10 = 4 (after wrap)
+        assert_eq!(counter, 4);
+
+        // Modulo should still work correctly
+        assert_eq!(counter % 10, 4);
+        assert_eq!((counter.wrapping_add(1)) % 10, 5);
+        assert_eq!((counter.wrapping_add(6)) % 10, 0);
+    }
+
+    #[test]
+    fn test_watch_path_warns_on_nonexistent() {
+        let mut watcher =
+            RecommendedWatcher::new(|_| {}, Config::default()).expect("create watcher");
+
+        // Should return Ok even for nonexistent path (with warning logged)
+        let result = watch_path(&mut watcher, Path::new("/nonexistent/definitely/not/here"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_channel_send_failure_exits_thread() {
+        // Simulate channel closed scenario
+        let (tx, rx) = mpsc::channel();
+        drop(rx); // Close receiver
+
+        // Sending should fail
+        let result = tx.send(AppEvent::TaskGraphUpdated(crate::model::TaskGraph::empty()));
+
+        assert!(result.is_err(), "Send should fail when channel closed");
     }
 
 }

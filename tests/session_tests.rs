@@ -77,7 +77,7 @@ fn list_sessions_in_empty_directory() {
     let sessions_dir = tmpdir.path().join("sessions");
     std::fs::create_dir(&sessions_dir).unwrap();
 
-    let sessions = list_sessions(&sessions_dir).unwrap();
+    let (sessions, _errors) = list_sessions(&sessions_dir).unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -86,7 +86,7 @@ fn list_sessions_missing_directory() {
     let tmpdir = TempDir::new().unwrap();
     let nonexistent = tmpdir.path().join("nonexistent");
 
-    let sessions = list_sessions(&nonexistent).unwrap();
+    let (sessions, _errors) = list_sessions(&nonexistent).unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -105,7 +105,7 @@ fn list_sessions_returns_multiple_archives() {
     save_session(&tmpdir.path().join("s2.json"), &archive2).unwrap();
 
     // List sessions
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 2);
 }
 
@@ -127,7 +127,7 @@ fn list_sessions_sorted_by_timestamp_newest_first() {
     save_session(&tmpdir.path().join("s3.json"), &SessionArchive::new(meta3)).unwrap();
 
     // List should be sorted newest first
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 3);
     assert_eq!(sessions[0].meta.id.as_str(), "s3");
     assert_eq!(sessions[1].meta.id.as_str(), "s2");
@@ -146,7 +146,7 @@ fn list_sessions_skips_corrupt_files() {
     std::fs::write(tmpdir.path().join("corrupt.json"), "invalid json").unwrap();
 
     // List should return only valid session
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].meta.id.as_str(), "s1");
 }
@@ -163,7 +163,7 @@ fn list_sessions_skips_non_json_files() {
     std::fs::write(tmpdir.path().join("readme.txt"), "not a session").unwrap();
 
     // List should return only JSON files
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].meta.id.as_str(), "s1");
 }
@@ -205,7 +205,7 @@ fn auto_save_tick_saves_when_interval_elapsed() {
     let last_save = Instant::now() - Duration::from_secs(31);
 
     // Auto-save should trigger
-    let result = auto_save_tick(&path, &archive, last_save, 30);
+    let result = auto_save_tick(&path, &archive, last_save, 30).unwrap();
     assert!(result.is_some());
     assert!(path.exists());
 }
@@ -222,7 +222,7 @@ fn auto_save_tick_does_not_save_before_interval() {
     let last_save = Instant::now() - Duration::from_secs(5);
 
     // Auto-save should not trigger
-    let result = auto_save_tick(&path, &archive, last_save, 30);
+    let result = auto_save_tick(&path, &archive, last_save, 30).unwrap();
     assert!(result.is_none());
     assert!(!path.exists());
 }
@@ -230,16 +230,17 @@ fn auto_save_tick_does_not_save_before_interval() {
 #[test]
 fn build_archive_from_app_state() {
     let mut state = AppState::new();
-    state.domain.task_graph = Some(TaskGraph {
-        waves: vec![],
-        total_tasks: 0,
-        completed_tasks: 0,
-    });
+    state.domain.task_graph = Some(TaskGraph::empty());
 
     let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
         .with_status(SessionStatus::Active);
 
-    let archive = build_archive(&state.domain, &meta);
+    let archive = build_archive(
+        state.domain.task_graph.as_ref(),
+        &state.domain.events,
+        &state.domain.agents,
+        &meta,
+    );
 
     assert_eq!(archive.meta, meta);
     assert!(archive.task_graph.is_some());
@@ -253,7 +254,12 @@ fn full_workflow_save_list_load_delete() {
     let state = AppState::new();
     let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string())
         .with_status(SessionStatus::Completed);
-    let archive = build_archive(&state.domain, &meta);
+    let archive = build_archive(
+        state.domain.task_graph.as_ref(),
+        &state.domain.events,
+        &state.domain.agents,
+        &meta,
+    );
 
     // Generate filename and save
     let filename = generate_filename(&meta);
@@ -261,7 +267,7 @@ fn full_workflow_save_list_load_delete() {
     save_session(&path, &archive).unwrap();
 
     // List sessions
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].meta.id.as_str(), "s1");
 
@@ -271,7 +277,7 @@ fn full_workflow_save_list_load_delete() {
 
     // Delete session
     delete_session(&path).unwrap();
-    let sessions = list_sessions(tmpdir.path()).unwrap();
+    let (sessions, _errors) = list_sessions(tmpdir.path()).unwrap();
     assert!(sessions.is_empty());
 }
 
@@ -289,7 +295,7 @@ fn list_session_metas_returns_correct_meta_and_path() {
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta1)).unwrap();
     save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(meta2)).unwrap();
 
-    let metas = list_session_metas(tmpdir.path()).unwrap();
+    let (metas, _errors) = list_session_metas(tmpdir.path()).unwrap();
     assert_eq!(metas.len(), 2);
 
     // Each entry has correct path and meta
@@ -316,7 +322,7 @@ fn list_session_metas_sorted_newest_first() {
     save_session(&tmpdir.path().join("s2.json"), &SessionArchive::new(m2)).unwrap();
     save_session(&tmpdir.path().join("s3.json"), &SessionArchive::new(m3)).unwrap();
 
-    let metas = list_session_metas(tmpdir.path()).unwrap();
+    let (metas, _errors) = list_session_metas(tmpdir.path()).unwrap();
     assert_eq!(metas.len(), 3);
     assert_eq!(metas[0].1.id.as_str(), "s3"); // newest
     assert_eq!(metas[1].1.id.as_str(), "s2");
@@ -326,14 +332,14 @@ fn list_session_metas_sorted_newest_first() {
 #[test]
 fn list_session_metas_empty_dir() {
     let tmpdir = TempDir::new().unwrap();
-    let metas = list_session_metas(tmpdir.path()).unwrap();
+    let (metas, _errors) = list_session_metas(tmpdir.path()).unwrap();
     assert!(metas.is_empty());
 }
 
 #[test]
 fn list_session_metas_missing_dir() {
     let tmpdir = TempDir::new().unwrap();
-    let metas = list_session_metas(&tmpdir.path().join("nonexistent")).unwrap();
+    let (metas, _errors) = list_session_metas(&tmpdir.path().join("nonexistent")).unwrap();
     assert!(metas.is_empty());
 }
 
@@ -345,7 +351,24 @@ fn list_session_metas_skips_corrupt_files() {
     save_session(&tmpdir.path().join("s1.json"), &SessionArchive::new(meta)).unwrap();
     std::fs::write(tmpdir.path().join("corrupt.json"), "not json").unwrap();
 
-    let metas = list_session_metas(tmpdir.path()).unwrap();
+    let (metas, _errors) = list_session_metas(tmpdir.path()).unwrap();
     assert_eq!(metas.len(), 1);
     assert_eq!(metas[0].1.id.as_str(), "s1");
+}
+
+#[test]
+fn auto_save_tick_returns_error_on_save_failure() {
+    // Attempt to save to a read-only location to trigger error
+    // Note: This test behavior may vary by platform
+    let path = std::path::Path::new("/dev/null/impossible/path.json");
+
+    let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+    let archive = SessionArchive::new(meta);
+
+    // Simulate last save 31 seconds ago (interval elapsed)
+    let last_save = Instant::now() - Duration::from_secs(31);
+
+    // Auto-save should return error
+    let result = auto_save_tick(path, &archive, last_save, 30);
+    assert!(result.is_err());
 }

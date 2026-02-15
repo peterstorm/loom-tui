@@ -2,8 +2,8 @@ use chrono::Utc;
 use loom_tui::app::{update, AppState, ViewState};
 use loom_tui::event::AppEvent;
 use loom_tui::model::{
-    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta,
-    SessionStatus, Task, TaskGraph, TaskId, TaskStatus, ToolCall, Wave,
+    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionMeta,
+    SessionStatus, Task, TaskGraph, TaskStatus, ToolCall, Wave,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,59 +11,47 @@ use std::path::PathBuf;
 #[test]
 fn task_graph_updated_sets_graph() {
     let mut state = AppState::new();
-    let graph = TaskGraph {
-        waves: vec![
-            Wave {
-                number: 1,
-                tasks: vec![Task {
-                    id: "T1".into(),
-                    description: "Task 1".into(),
-                    agent_id: Some("a01".into()),
-                    status: TaskStatus::Running,
-                    review_status: loom_tui::model::ReviewStatus::Pending,
-                    files_modified: vec![],
-                    tests_passed: None,
-                }],
-            },
-            Wave {
-                number: 2,
-                tasks: vec![],
-            },
-        ],
-        total_tasks: 1,
-        completed_tasks: 0,
-    };
+    let graph = TaskGraph::new(vec![
+        Wave {
+            number: 1,
+            tasks: vec![Task {
+                id: "T1".into(),
+                description: "Task 1".into(),
+                agent_id: Some("a01".into()),
+                status: TaskStatus::Running,
+                review_status: loom_tui::model::ReviewStatus::Pending,
+                files_modified: vec![],
+                tests_passed: None,
+            }],
+        },
+        Wave {
+            number: 2,
+            tasks: vec![],
+        },
+    ]);
 
     update(&mut state, AppEvent::TaskGraphUpdated(graph.clone()));
 
     assert!(state.domain.task_graph.is_some());
     let stored_graph = state.domain.task_graph.unwrap();
     assert_eq!(stored_graph.waves.len(), 2);
-    assert_eq!(stored_graph.total_tasks, 1);
+    assert_eq!(stored_graph.total_tasks(), 1);
     assert_eq!(stored_graph.waves[0].tasks[0].id.as_str(), "T1");
 }
 
 #[test]
 fn task_graph_updated_replaces_existing() {
     let mut state = AppState::new();
-    state.domain.task_graph = Some(TaskGraph {
-        waves: vec![],
-        total_tasks: 0,
-        completed_tasks: 0,
-    });
+    state.domain.task_graph = Some(TaskGraph::empty());
 
-    let new_graph = TaskGraph {
-        waves: vec![Wave {
-            number: 1,
-            tasks: vec![],
-        }],
-        total_tasks: 5,
-        completed_tasks: 2,
-    };
+    let new_graph = TaskGraph::new(vec![Wave {
+        number: 1,
+        tasks: vec![],
+    }]);
 
     update(&mut state, AppEvent::TaskGraphUpdated(new_graph));
 
-    assert_eq!(state.domain.task_graph.unwrap().total_tasks, 5);
+    assert_eq!(state.domain.task_graph.unwrap().total_tasks(), 0);
 }
 
 #[test]
@@ -183,43 +171,49 @@ fn hook_event_evicts_oldest_at_capacity() {
 #[test]
 fn agent_started_creates_new_agent() {
     let mut state = AppState::new();
-    update(&mut state, AppEvent::AgentStarted("a01".into()));
+    let timestamp = Utc::now();
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: "a01".into(),
+        timestamp,
+    });
 
     assert_eq!(state.domain.agents.len(), 1);
     let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
     assert_eq!(agent.id.as_str(), "a01");
     assert!(agent.finished_at.is_none());
     assert!(agent.messages.is_empty());
+    assert_eq!(agent.started_at, timestamp);
 }
 
 #[test]
-fn agent_started_uses_current_timestamp() {
-    let before = Utc::now();
+fn agent_started_uses_provided_timestamp() {
+    let timestamp = Utc::now() - chrono::Duration::minutes(5);
     let mut state = AppState::new();
-    update(&mut state, AppEvent::AgentStarted("a01".into()));
-    let after = Utc::now();
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: "a01".into(),
+        timestamp,
+    });
 
     let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert!(agent.started_at >= before);
-    assert!(agent.started_at <= after);
+    assert_eq!(agent.started_at, timestamp);
 }
 
 #[test]
-fn agent_stopped_sets_finished_timestamp() {
+fn agent_stopped_uses_provided_timestamp() {
     let mut state = AppState::new();
+    let start_time = Utc::now();
     state
         .domain.agents
-        .insert("a01".into(), Agent::new("a01", Utc::now()));
+        .insert("a01".into(), Agent::new("a01", start_time));
 
-    let before = Utc::now();
-    update(&mut state, AppEvent::AgentStopped("a01".into()));
-    let after = Utc::now();
+    let stop_time = start_time + chrono::Duration::seconds(30);
+    update(&mut state, AppEvent::AgentStopped {
+        agent_id: "a01".into(),
+        timestamp: stop_time,
+    });
 
     let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert!(agent.finished_at.is_some());
-    let finished = agent.finished_at.unwrap();
-    assert!(finished >= before);
-    assert!(finished <= after);
+    assert_eq!(agent.finished_at, Some(stop_time));
 }
 
 #[test]
@@ -323,11 +317,7 @@ fn session_loaded_populates_data_and_navigates() {
 fn session_loaded_sets_task_graph_in_archive() {
     let mut state = AppState::new();
     let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
-    let graph = TaskGraph {
-        waves: vec![],
-        total_tasks: 10,
-        completed_tasks: 5,
-    };
+    let graph = TaskGraph::empty();
 
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
 
@@ -336,7 +326,7 @@ fn session_loaded_sets_task_graph_in_archive() {
 
     let data = state.domain.sessions[0].data.as_ref().unwrap();
     assert!(data.task_graph.is_some());
-    assert_eq!(data.task_graph.as_ref().unwrap().total_tasks, 10);
+    assert_eq!(data.task_graph.as_ref().unwrap().total_tasks(), 0);
 }
 
 #[test]
@@ -456,7 +446,11 @@ fn multiple_updates_compose_correctly() {
     let mut state = AppState::new();
 
     // Start agent
-    update(&mut state, AppEvent::AgentStarted("a01".into()));
+    let start_time = Utc::now();
+    update(&mut state, AppEvent::AgentStarted {
+        agent_id: "a01".into(),
+        timestamp: start_time,
+    });
     assert_eq!(state.domain.agents.len(), 1);
 
     // Update transcript
@@ -476,7 +470,11 @@ fn multiple_updates_compose_correctly() {
     assert_eq!(state.domain.events.len(), 1);
 
     // Stop agent
-    update(&mut state, AppEvent::AgentStopped("a01".into()));
+    let stop_time = start_time + chrono::Duration::seconds(10);
+    update(&mut state, AppEvent::AgentStopped {
+        agent_id: "a01".into(),
+        timestamp: stop_time,
+    });
     assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_some());
 
     // All state should be preserved
@@ -545,9 +543,16 @@ fn property_update_never_panics() {
     let mut state = AppState::new();
 
     // Throw a variety of events at it
+    let timestamp = Utc::now();
     let events: Vec<AppEvent> = vec![
-        AppEvent::AgentStarted("a01".into()),
-        AppEvent::AgentStopped("nonexistent".into()),
+        AppEvent::AgentStarted {
+            agent_id: "a01".into(),
+            timestamp,
+        },
+        AppEvent::AgentStopped {
+            agent_id: "nonexistent".into(),
+            timestamp,
+        },
         AppEvent::TranscriptUpdated {
             agent_id: "nonexistent".into(),
             messages: vec![],

@@ -8,7 +8,8 @@ use ratatui::{
 };
 
 use crate::app::state::AppState;
-use crate::model::{theme::Theme, SessionId, SessionMeta, SessionStatus};
+use crate::model::{theme::Theme, SessionMeta, SessionStatus};
+use super::components::format::format_duration;
 
 /// Render the sessions archive view into the given content area.
 /// Global header is rendered by the view dispatcher.
@@ -160,26 +161,6 @@ fn render_empty_state(frame: &mut Frame, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Format duration as human-readable string.
-fn format_duration(duration: Option<std::time::Duration>) -> String {
-    match duration {
-        Some(d) => {
-            let secs = d.as_secs();
-            let mins = secs / 60;
-            let hours = mins / 60;
-
-            if hours > 0 {
-                format!("{}h {}m", hours, mins % 60)
-            } else if mins > 0 {
-                format!("{}m {}s", mins, secs % 60)
-            } else {
-                format!("{}s", secs)
-            }
-        }
-        None => "—".to_string(),
-    }
-}
-
 /// Format session status as string.
 fn format_status(status: &SessionStatus) -> String {
     match status {
@@ -195,7 +176,7 @@ fn format_status(status: &SessionStatus) -> String {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::{ArchivedSession, SessionId, SessionMeta};
+    use crate::model::{ArchivedSession, SessionMeta};
     use chrono::Utc;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -264,14 +245,6 @@ mod tests {
 
         assert!(buffer_str.contains("s1"), "Session s1 should be displayed");
         assert!(buffer_str.contains("s2"), "Session s2 should be displayed");
-    }
-
-    #[test]
-    fn test_format_duration() {
-        assert_eq!(format_duration(None), "—");
-        assert_eq!(format_duration(Some(Duration::from_secs(30))), "30s");
-        assert_eq!(format_duration(Some(Duration::from_secs(90))), "1m 30s");
-        assert_eq!(format_duration(Some(Duration::from_secs(3665))), "1h 1m");
     }
 
     #[test]

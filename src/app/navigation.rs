@@ -103,7 +103,7 @@ fn switch_to_agent_detail(state: &mut AppState) {
 
 /// Total flat task count across all waves.
 fn task_count(state: &AppState) -> usize {
-    state.domain.task_graph.as_ref().map(|g| g.total_tasks).unwrap_or(0)
+    state.domain.task_graph.as_ref().map(|g| g.total_tasks()).unwrap_or(0)
 }
 
 fn toggle_focus(state: &mut AppState) {
@@ -121,263 +121,205 @@ fn toggle_focus_left(state: &mut AppState) {
     state.ui.focus = PanelFocus::Left;
 }
 
+/// Returns mutable reference to the active scroll offset for current view+focus.
+fn active_scroll_offset_mut(state: &mut AppState) -> &mut usize {
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => &mut state.ui.scroll_offsets.task_list,
+        (ViewState::Dashboard, PanelFocus::Right) => &mut state.ui.scroll_offsets.event_stream,
+        (ViewState::AgentDetail, _) => &mut state.ui.scroll_offsets.agent_events,
+        (ViewState::Sessions, _) => &mut state.ui.scroll_offsets.task_list, // unused, Sessions uses selected_session_index
+        (ViewState::SessionDetail, PanelFocus::Left) => &mut state.ui.scroll_offsets.session_detail_left,
+        (ViewState::SessionDetail, PanelFocus::Right) => &mut state.ui.scroll_offsets.session_detail_right,
+    }
+}
+
+/// Returns item count for current view+focus (for bounds checking).
+fn item_count(state: &AppState) -> Option<usize> {
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => Some(task_count(state)),
+        (ViewState::AgentDetail, PanelFocus::Left) => Some(state.domain.agents.len()),
+        (ViewState::Sessions, _) => Some(state.domain.active_sessions.len() + state.domain.sessions.len()),
+        _ => None,
+    }
+}
+
+/// Returns true if scrolling in current view+focus should disable auto_scroll.
+fn disables_auto_scroll(state: &AppState) -> bool {
+    matches!(
+        (&state.ui.view, &state.ui.focus),
+        (ViewState::Dashboard, PanelFocus::Right) | (ViewState::AgentDetail, PanelFocus::Right)
+    )
+}
+
 fn scroll_down(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = state.ui.scroll_offsets.task_list.saturating_add(1);
-                let max = task_count(state).saturating_sub(1);
-                let current = state.ui.selected_task_index.unwrap_or(0);
-                state.ui.selected_task_index = Some(current.saturating_add(1).min(max));
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream =
-                    state.ui.scroll_offsets.event_stream.saturating_add(1);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                let agent_count = state.domain.agents.len();
-                if agent_count > 0 {
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(1);
+            let max = task_count(state).saturating_sub(1);
+            let current = state.ui.selected_task_index.unwrap_or(0);
+            state.ui.selected_task_index = Some(current.saturating_add(1).min(max));
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
                     let current = state.ui.selected_agent_index.unwrap_or(0);
-                    let new_idx = (current + 1).min(agent_count - 1);
+                    let new_idx = (current + 1).min(count - 1);
                     if new_idx != current {
                         state.ui.scroll_offsets.agent_events = 0;
                     }
                     state.ui.selected_agent_index = Some(new_idx);
                 }
             }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.agent_events =
-                    state.ui.scroll_offsets.agent_events.saturating_add(1);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::Sessions => {
-            let session_count = state.domain.active_sessions.len() + state.domain.sessions.len();
-            if session_count > 0 {
-                let current = state.ui.selected_session_index.unwrap_or(0);
-                state.ui.selected_session_index = Some((current + 1).min(session_count - 1));
+        }
+        (ViewState::Sessions, _) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    let current = state.ui.selected_session_index.unwrap_or(0);
+                    state.ui.selected_session_index = Some((current + 1).min(count - 1));
+                }
             }
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left =
-                    state.ui.scroll_offsets.session_detail_left.saturating_add(1);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right =
-                    state.ui.scroll_offsets.session_detail_right.saturating_add(1);
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(1);
+        }
+    }
+    if disables_auto_scroll(state) {
+        state.ui.auto_scroll = false;
     }
 }
 
 fn scroll_up(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = state.ui.scroll_offsets.task_list.saturating_sub(1);
-                let current = state.ui.selected_task_index.unwrap_or(0);
-                state.ui.selected_task_index = Some(current.saturating_sub(1));
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(1);
+            let current = state.ui.selected_task_index.unwrap_or(0);
+            state.ui.selected_task_index = Some(current.saturating_sub(1));
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            let current = state.ui.selected_agent_index.unwrap_or(0);
+            let new_idx = current.saturating_sub(1);
+            if new_idx != current {
+                state.ui.scroll_offsets.agent_events = 0;
             }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream =
-                    state.ui.scroll_offsets.event_stream.saturating_sub(1);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                let current = state.ui.selected_agent_index.unwrap_or(0);
-                let new_idx = current.saturating_sub(1);
-                if new_idx != current {
-                    state.ui.scroll_offsets.agent_events = 0;
-                }
-                state.ui.selected_agent_index = Some(new_idx);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.agent_events =
-                    state.ui.scroll_offsets.agent_events.saturating_sub(1);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::Sessions => {
+            state.ui.selected_agent_index = Some(new_idx);
+        }
+        (ViewState::Sessions, _) => {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(1));
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left =
-                    state.ui.scroll_offsets.session_detail_left.saturating_sub(1);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right =
-                    state.ui.scroll_offsets.session_detail_right.saturating_sub(1);
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(1);
+        }
+    }
+    if disables_auto_scroll(state) {
+        state.ui.auto_scroll = false;
     }
 }
 
 fn scroll_page_down(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = state.ui.scroll_offsets.task_list.saturating_add(PAGE_JUMP);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream = state.ui.scroll_offsets.event_stream.saturating_add(PAGE_JUMP);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                let agent_count = state.domain.agents.len();
-                if agent_count > 0 {
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(PAGE_JUMP);
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
                     let current = state.ui.selected_agent_index.unwrap_or(0);
-                    let new_idx = (current + PAGE_JUMP).min(agent_count - 1);
+                    let new_idx = (current + PAGE_JUMP).min(count - 1);
                     if new_idx != current {
                         state.ui.scroll_offsets.agent_events = 0;
                     }
                     state.ui.selected_agent_index = Some(new_idx);
                 }
             }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.agent_events = state.ui.scroll_offsets.agent_events.saturating_add(PAGE_JUMP);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::Sessions => {
-            let session_count = state.domain.active_sessions.len() + state.domain.sessions.len();
-            if session_count > 0 {
-                let current = state.ui.selected_session_index.unwrap_or(0);
-                state.ui.selected_session_index = Some((current + PAGE_JUMP).min(session_count - 1));
+        }
+        (ViewState::Sessions, _) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    let current = state.ui.selected_session_index.unwrap_or(0);
+                    state.ui.selected_session_index = Some((current + PAGE_JUMP).min(count - 1));
+                }
             }
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left = state.ui.scroll_offsets.session_detail_left.saturating_add(PAGE_JUMP);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right = state.ui.scroll_offsets.session_detail_right.saturating_add(PAGE_JUMP);
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(PAGE_JUMP);
+        }
+    }
+    if disables_auto_scroll(state) {
+        state.ui.auto_scroll = false;
     }
 }
 
 fn scroll_page_up(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = state.ui.scroll_offsets.task_list.saturating_sub(PAGE_JUMP);
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(PAGE_JUMP);
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            let current = state.ui.selected_agent_index.unwrap_or(0);
+            let new_idx = current.saturating_sub(PAGE_JUMP);
+            if new_idx != current {
+                state.ui.scroll_offsets.agent_events = 0;
             }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream = state.ui.scroll_offsets.event_stream.saturating_sub(PAGE_JUMP);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                let current = state.ui.selected_agent_index.unwrap_or(0);
-                let new_idx = current.saturating_sub(PAGE_JUMP);
-                if new_idx != current {
-                    state.ui.scroll_offsets.agent_events = 0;
-                }
-                state.ui.selected_agent_index = Some(new_idx);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.agent_events = state.ui.scroll_offsets.agent_events.saturating_sub(PAGE_JUMP);
-                state.ui.auto_scroll = false;
-            }
-        },
-        ViewState::Sessions => {
+            state.ui.selected_agent_index = Some(new_idx);
+        }
+        (ViewState::Sessions, _) => {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(PAGE_JUMP));
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left = state.ui.scroll_offsets.session_detail_left.saturating_sub(PAGE_JUMP);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right = state.ui.scroll_offsets.session_detail_right.saturating_sub(PAGE_JUMP);
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(PAGE_JUMP);
+        }
+    }
+    if disables_auto_scroll(state) {
+        state.ui.auto_scroll = false;
     }
 }
 
 fn jump_to_top(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = 0;
-                state.ui.selected_task_index = Some(0);
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream = 0;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                if !state.domain.agents.is_empty() {
-                    state.ui.selected_agent_index = Some(0);
-                    state.ui.scroll_offsets.agent_events = 0;
-                }
-            }
-            PanelFocus::Right => {
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = 0;
+            state.ui.selected_task_index = Some(0);
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            if !state.domain.agents.is_empty() {
+                state.ui.selected_agent_index = Some(0);
                 state.ui.scroll_offsets.agent_events = 0;
             }
-        },
-        ViewState::Sessions => {
+        }
+        (ViewState::Sessions, _) => {
             state.ui.selected_session_index = Some(0);
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left = 0;
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right = 0;
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = 0;
+        }
     }
 }
 
 fn jump_to_bottom(state: &mut AppState) {
-    match state.ui.view {
-        ViewState::Dashboard => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.task_list = usize::MAX / 2;
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.event_stream = usize::MAX / 2;
-            }
-        },
-        ViewState::AgentDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                let count = state.domain.agents.len();
+    match (&state.ui.view, &state.ui.focus) {
+        (ViewState::Dashboard, PanelFocus::Left) => {
+            *active_scroll_offset_mut(state) = usize::MAX / 2;
+        }
+        (ViewState::AgentDetail, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
                 if count > 0 {
                     state.ui.selected_agent_index = Some(count - 1);
                     state.ui.scroll_offsets.agent_events = 0;
                 }
             }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.agent_events = usize::MAX / 2;
-            }
-        },
-        ViewState::Sessions => {
-            let count = state.domain.active_sessions.len() + state.domain.sessions.len();
-            if count > 0 {
-                state.ui.selected_session_index = Some(count - 1);
+        }
+        (ViewState::Sessions, _) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    state.ui.selected_session_index = Some(count - 1);
+                }
             }
         }
-        ViewState::SessionDetail => match state.ui.focus {
-            PanelFocus::Left => {
-                state.ui.scroll_offsets.session_detail_left = usize::MAX / 2;
-            }
-            PanelFocus::Right => {
-                state.ui.scroll_offsets.session_detail_right = usize::MAX / 2;
-            }
-        },
+        _ => {
+            *active_scroll_offset_mut(state) = usize::MAX / 2;
+        }
     }
 }
 
@@ -494,7 +436,7 @@ fn toggle_task_view_mode(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Agent, AgentId, ArchivedSession, SessionId, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
+    use crate::model::{Agent, AgentId, ArchivedSession, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
     use std::path::PathBuf;
     use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

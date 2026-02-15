@@ -3,6 +3,7 @@ pub mod banner;
 pub mod event_stream;
 pub mod filter_bar;
 pub mod footer;
+pub mod format;
 pub mod header;
 pub mod help_overlay;
 pub mod kanban;

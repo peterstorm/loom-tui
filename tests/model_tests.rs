@@ -80,7 +80,7 @@ fn parse_active_task_graph_fixture() {
 
     // Verify parsing
     assert_eq!(graph.waves.len(), 2);
-    assert_eq!(graph.total_tasks, 5);
+    assert_eq!(graph.total_tasks(), 5);
 
     // Verify first task
     let t1 = &graph.waves[0].tasks[0];
@@ -275,8 +275,8 @@ fn parse_session_archive_fixture() {
     // Verify task graph
     let graph = archive.task_graph.expect("Should have task graph");
     assert_eq!(graph.waves.len(), 2);
-    assert_eq!(graph.total_tasks, 3);
-    assert_eq!(graph.completed_tasks, 2);
+    assert_eq!(graph.total_tasks(), 3);
+    assert_eq!(graph.completed_tasks(), 2);
 
     // Verify events
     assert_eq!(archive.events.len(), 3);
@@ -481,8 +481,8 @@ fn theme_tool_colors() {
 fn task_graph_empty_constructor() {
     let graph = TaskGraph::empty();
     assert_eq!(graph.waves.len(), 0);
-    assert_eq!(graph.total_tasks, 0);
-    assert_eq!(graph.completed_tasks, 0);
+    assert_eq!(graph.total_tasks(), 0);
+    assert_eq!(graph.completed_tasks(), 0);
 }
 
 #[test]

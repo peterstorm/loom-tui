@@ -8,14 +8,43 @@ use ratatui::{
 };
 
 use crate::app::{AppState, PanelFocus};
-use crate::model::Theme;
+use crate::model::{Agent, Theme};
 use super::format::format_elapsed;
 
-/// Render agent list panel for agent detail view.
-/// Shows all agents with selection highlight.
+/// Render agent list panel for agent detail view (uses global state).
 pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
-    let items = build_agent_items(state);
+    let sorted_keys = state.sorted_agent_keys();
+    let agents: Vec<&Agent> = sorted_keys
+        .iter()
+        .filter_map(|k| state.domain.agents.get(k))
+        .collect();
+    let tool_counts: Vec<usize> = sorted_keys
+        .iter()
+        .map(|k| state.agent_tool_count(k))
+        .collect();
     let is_focused = matches!(state.ui.focus, PanelFocus::Left);
+
+    render_agent_list_generic(
+        frame,
+        area,
+        &agents,
+        state.ui.selected_agent_index,
+        Some(&tool_counts),
+        is_focused,
+    );
+}
+
+/// Render agent list panel from a generic agent slice.
+/// Reusable across agent detail and session detail views.
+pub fn render_agent_list_generic(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[&Agent],
+    selected: Option<usize>,
+    tool_counts: Option<&[usize]>,
+    is_focused: bool,
+) {
+    let items = build_agent_items_generic(agents, selected, tool_counts);
 
     let list = List::new(items)
         .block(
@@ -33,9 +62,13 @@ pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(list, area);
 }
 
-/// Pure function: build list items from agents map.
-fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
-    if state.domain.agents.is_empty() {
+/// Pure function: build list items from an agent slice.
+fn build_agent_items_generic(
+    agents: &[&Agent],
+    selected: Option<usize>,
+    tool_counts: Option<&[usize]>,
+) -> Vec<ListItem<'static>> {
+    if agents.is_empty() {
         return vec![ListItem::new(Line::from(Span::styled(
             "No agents",
             Style::default().fg(Theme::MUTED_TEXT),
@@ -43,23 +76,20 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
     }
 
     let now = Utc::now();
-    let selected = state.ui.selected_agent_index;
-    let sorted_keys = state.sorted_agent_keys();
 
-    // Count display names to detect duplicates — append short ID when ambiguous
-    let name_counts: std::collections::HashMap<String, usize> = sorted_keys
+    // Count display names to detect duplicates
+    let name_counts: std::collections::HashMap<String, usize> = agents
         .iter()
-        .map(|k| state.domain.agents[k].display_name().to_string())
+        .map(|a| a.display_name().to_string())
         .fold(std::collections::HashMap::new(), |mut acc, name| {
             *acc.entry(name).or_insert(0) += 1;
             acc
         });
 
-    sorted_keys
+    agents
         .iter()
         .enumerate()
-        .map(|(idx, key)| {
-            let agent = &state.domain.agents[key];
+        .map(|(idx, agent)| {
             let is_active = agent.finished_at.is_none();
             let (icon, icon_color) = if is_active {
                 ("◐", Theme::ACCENT_WARM)
@@ -69,8 +99,7 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
 
             let base_name = agent.display_name().to_string();
             let name = if name_counts.get(&base_name).copied().unwrap_or(0) > 1 {
-                // Disambiguate with short agent ID suffix
-                let short_id = &key.as_str()[..key.as_str().len().min(7)];
+                let short_id = &agent.id.as_str()[..agent.id.as_str().len().min(7)];
                 format!("{} ({})", base_name, short_id)
             } else {
                 base_name
@@ -86,8 +115,9 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
                 String::new()
             };
 
-            // Use cached tool count (O(1) lookup instead of O(n) scan)
-            let tool_count = state.agent_tool_count(key);
+            let tool_count = tool_counts
+                .and_then(|tc| tc.get(idx).copied())
+                .unwrap_or(0);
 
             let is_selected = selected == Some(idx);
             let bg = if is_selected {
@@ -119,34 +149,75 @@ fn build_agent_items(state: &AppState) -> Vec<ListItem<'static>> {
                 ));
             }
 
+            let ctx_tokens = agent.token_usage.context_window();
+            if ctx_tokens > 0 {
+                spans.push(Span::styled(
+                    format!("  ~{}tok", format_token_count(ctx_tokens)),
+                    Style::default().fg(Theme::MUTED_TEXT).bg(bg),
+                ));
+            }
+
             ListItem::new(Line::from(spans))
         })
         .collect()
 }
 
+/// Format a token count for compact display: 42k, 1.2M, etc.
+fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if m >= 10.0 {
+            format!("{}M", m as u64)
+        } else {
+            format!("{:.1}M", m)
+        }
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        if k >= 10.0 {
+            format!("{}k", k as u64)
+        } else {
+            format!("{:.1}k", k)
+        }
+    } else {
+        format!("{}", n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Agent;
 
     #[test]
     fn build_agent_items_empty() {
-        let state = AppState::new();
-        let items = build_agent_items(&state);
+        let items = build_agent_items_generic(&[], None, None);
         assert_eq!(items.len(), 1); // "No agents"
     }
 
     #[test]
     fn build_agent_items_with_agents() {
-        let mut state = AppState::new();
         let mut a1 = Agent::new("a01", Utc::now());
         a1.agent_type = Some("Explore".into());
-        state.domain.agents.insert("a01".into(), a1);
-        state.domain.agents.insert("a02".into(), Agent::new("a02", Utc::now()));
-        state.recompute_sorted_keys();
-        state.ui.selected_agent_index = Some(0);
+        let a2 = Agent::new("a02", Utc::now());
+        let agents: Vec<&Agent> = vec![&a1, &a2];
 
-        let items = build_agent_items(&state);
+        let items = build_agent_items_generic(&agents, Some(0), None);
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn format_token_count_small() {
+        assert_eq!(format_token_count(500), "500");
+    }
+
+    #[test]
+    fn format_token_count_thousands() {
+        assert_eq!(format_token_count(1_200), "1.2k");
+        assert_eq!(format_token_count(42_000), "42k");
+    }
+
+    #[test]
+    fn format_token_count_millions() {
+        assert_eq!(format_token_count(1_200_000), "1.2M");
+        assert_eq!(format_token_count(15_000_000), "15M");
     }
 }

@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::state::{AppState, PanelFocus};
 use crate::model::Theme;
-use crate::view::components::{render_agent_event_stream, render_agent_list};
+use crate::view::components::{render_agent_event_stream, render_agent_list, render_prompt_popup};
 
 /// Pure rendering function: render agent detail view.
 /// Left panel: selectable agent list. Right panel: filtered events for selected agent.
@@ -58,6 +58,24 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     render_footer(frame, chunks[2], state);
+
+    // Prompt popup overlay (rendered last, on top)
+    if state.ui.prompt_popup.is_open() {
+        if let Some(agent) = selected_agent {
+            let text = agent.task_description.as_deref().unwrap_or("No prompt available");
+            render_prompt_popup(
+                frame,
+                area,
+                &agent.display_name(),
+                agent.model.as_deref(),
+                text,
+                &agent.messages,
+                &agent.skills,
+                &agent.token_usage,
+                state.ui.prompt_popup.scroll(),
+            );
+        }
+    }
 }
 
 /// Render header showing selected agent info.
@@ -145,6 +163,8 @@ fn render_footer(frame: &mut Frame, area: Rect, _state: &AppState) {
         Span::raw(":switch | "),
         Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":select/scroll | "),
+        Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(":prompt | "),
         Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":auto-scroll | "),
         Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),

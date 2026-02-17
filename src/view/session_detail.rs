@@ -3,16 +3,17 @@ use std::collections::{BTreeMap, VecDeque};
 use chrono::Utc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    prelude::Stylize,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::state::{AppState, PanelFocus};
-use crate::model::{Agent, AgentId, HookEvent, HookEventKind, SessionMeta, SessionStatus, TaskGraph, Theme};
+use crate::model::{Agent, AgentId, HookEvent, SessionMeta, SessionStatus, TaskGraph, Theme};
+use super::components::agent_list::render_agent_list_generic;
 use super::components::format::format_duration;
+use super::components::prompt_popup::render_prompt_popup;
 
 // ============================================================================
 // Data access: unifies active session vs archived session
@@ -148,92 +149,20 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
 }
 
 // ============================================================================
-// Pure stat functions
+// Helper: sorted agent list from session data
 // ============================================================================
 
-/// Tool usage statistics computed from PostToolUse events.
-#[derive(Debug, Clone)]
-pub struct ToolStat {
-    pub tool_name: String,
-    pub count: usize,
-    pub avg_duration_ms: Option<u64>,
-}
-
-/// Agent summary for display in the session detail agent table.
-#[derive(Debug, Clone)]
-pub struct AgentSummary {
-    pub id: String,
-    pub agent_type: String,
-    pub finished: bool,
-    pub duration_secs: Option<i64>,
-    pub tool_count: usize,
-}
-
-/// Compute tool usage stats from events. Groups PostToolUse by tool_name.
-pub fn compute_tool_stats(events: &EventsRef<'_>) -> Vec<ToolStat> {
-    let mut counts: BTreeMap<String, (usize, Vec<u64>)> = BTreeMap::new();
-
-    for event in events.iter() {
-        if let HookEventKind::PostToolUse {
-            ref tool_name,
-            duration_ms,
-            ..
-        } = event.kind
-        {
-            let entry = counts.entry(tool_name.to_string()).or_insert((0, Vec::new()));
-            entry.0 += 1;
-            if let Some(ms) = duration_ms {
-                entry.1.push(ms);
-            }
-        }
-    }
-
-    let mut stats: Vec<ToolStat> = counts
-        .into_iter()
-        .map(|(name, (count, durations))| {
-            let avg = if durations.is_empty() {
-                None
-            } else {
-                Some(durations.iter().sum::<u64>() / durations.len() as u64)
-            };
-            ToolStat {
-                tool_name: name,
-                count,
-                avg_duration_ms: avg,
-            }
-        })
-        .collect();
-
-    // Sort by count descending
-    stats.sort_by(|a, b| b.count.cmp(&a.count));
-    stats
-}
-
-/// Compute agent summaries from agent map.
-pub fn compute_agent_summary(agents: &AgentsRef<'_>) -> Vec<AgentSummary> {
+/// Get sorted agent references from session data (active first, then by started_at desc).
+fn sorted_session_agents<'a>(data: &'a SessionViewData<'a>) -> Vec<&'a Agent> {
+    let mut agents = data.agents.values();
+    agents.sort_by(|a, b| {
+        let a_active = a.finished_at.is_none();
+        let b_active = b.finished_at.is_none();
+        b_active
+            .cmp(&a_active)
+            .then(b.started_at.cmp(&a.started_at))
+    });
     agents
-        .values()
-        .into_iter()
-        .map(|agent| {
-            let tool_count = agent
-                .messages
-                .iter()
-                .filter(|m| matches!(m.kind, crate::model::MessageKind::Tool(_)))
-                .count();
-
-            let duration_secs = agent.finished_at.map(|f| {
-                (f - agent.started_at).num_seconds()
-            });
-
-            AgentSummary {
-                id: agent.id.to_string(),
-                agent_type: agent.display_name().to_string(),
-                finished: agent.finished_at.is_some(),
-                duration_secs,
-                tool_count,
-            }
-        })
-        .collect()
 }
 
 // ============================================================================
@@ -267,17 +196,42 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
 
     render_session_header(frame, chunks[0], &data);
 
-    // Split main: [left 35% | right 65%]
+    // Split main: [left 30% | right 70%]
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(chunks[1]);
 
     let is_left_focused = matches!(state.ui.focus, PanelFocus::Left);
-    render_left_panel(frame, main_chunks[0], &data, state.ui.scroll_offsets.session_detail_left, is_left_focused);
-    render_right_panel(frame, main_chunks[1], &data, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
+    let sorted_agents = sorted_session_agents(&data);
+
+    // Left: session info + interactive agent list
+    render_left_panel(frame, main_chunks[0], &data, &sorted_agents, state, is_left_focused);
+
+    // Right: per-agent filtered events
+    let selected_agent = state.ui.selected_session_agent_index
+        .and_then(|idx| sorted_agents.get(idx).copied());
+    render_right_panel(frame, main_chunks[1], &data, selected_agent, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
 
     render_session_detail_footer(frame, chunks[2]);
+
+    // Prompt popup overlay (rendered last, on top)
+    if state.ui.prompt_popup.is_open() {
+        if let Some(agent) = selected_agent {
+            let text = agent.task_description.as_deref().unwrap_or("No prompt available");
+            render_prompt_popup(
+                frame,
+                area,
+                &agent.display_name(),
+                agent.model.as_deref(),
+                text,
+                &agent.messages,
+                &agent.skills,
+                &agent.token_usage,
+                state.ui.prompt_popup.scroll(),
+            );
+        }
+    }
 }
 
 fn render_loading_session(frame: &mut Frame, area: Rect) {
@@ -348,17 +302,25 @@ fn render_left_panel(
     frame: &mut Frame,
     area: Rect,
     data: &SessionViewData<'_>,
-    scroll_offset: usize,
+    sorted_agents: &[&Agent],
+    state: &AppState,
     is_focused: bool,
 ) {
-    // Split vertically: [info block ~6 lines] [agent table rest]
+    // Split vertically: [info block ~6 lines] [agent list rest]
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(0)])
         .split(area);
 
     render_session_info(frame, chunks[0], data, is_focused);
-    render_agent_table(frame, chunks[1], data, scroll_offset, is_focused);
+    render_agent_list_generic(
+        frame,
+        chunks[1],
+        sorted_agents,
+        state.ui.selected_session_agent_index,
+        None,
+        is_focused,
+    );
 }
 
 fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>, is_focused: bool) {
@@ -411,154 +373,33 @@ fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>
     frame.render_widget(p, area);
 }
 
-fn render_agent_table(
-    frame: &mut Frame,
-    area: Rect,
-    data: &SessionViewData<'_>,
-    scroll_offset: usize,
-    is_focused: bool,
-) {
-    let summaries = compute_agent_summary(&data.agents);
-
-    if summaries.is_empty() {
-        let p = Paragraph::new("No agents")
-            .style(Style::default().fg(Theme::MUTED_TEXT))
-            .block(
-                Block::default()
-                    .title(" Agents ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if is_focused {
-                        Theme::ACTIVE_BORDER
-                    } else {
-                        Theme::PANEL_BORDER
-                    })),
-            );
-        frame.render_widget(p, area);
-        return;
-    }
-
-    let header = Row::new(vec!["Type", "Status", "Dur", "Tools"])
-        .style(Style::default().fg(Theme::INFO).add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = summaries
-        .iter()
-        .skip(scroll_offset)
-        .map(|s| {
-            let status = if s.finished { "Done" } else { "Active" };
-            let dur = s.duration_secs.map(|d| format!("{}s", d)).unwrap_or_else(|| "—".into());
-            Row::new(vec![
-                s.agent_type.clone(),
-                status.to_string(),
-                dur,
-                s.tool_count.to_string(),
-            ])
-            .fg(if s.finished { Theme::TASK_COMPLETED } else { Theme::TASK_RUNNING })
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Min(10),
-        Constraint::Length(6),
-        Constraint::Length(6),
-        Constraint::Length(5),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" Agents ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if is_focused {
-                    Theme::ACTIVE_BORDER
-                } else {
-                    Theme::PANEL_BORDER
-                })),
-        );
-
-    frame.render_widget(table, area);
-}
-
 fn render_right_panel(
     frame: &mut Frame,
     area: Rect,
     data: &SessionViewData<'_>,
+    selected_agent: Option<&Agent>,
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    // Split: [tool stats ~10 lines] [events rest]
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(0)])
-        .split(area);
-
-    render_tool_stats(frame, chunks[0], data, is_focused);
-    render_events_list(frame, chunks[1], data, scroll_offset, is_focused);
-}
-
-fn render_tool_stats(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>, is_focused: bool) {
-    let stats = compute_tool_stats(&data.events);
-
-    if stats.is_empty() {
-        let p = Paragraph::new("No tool usage")
-            .style(Style::default().fg(Theme::MUTED_TEXT))
-            .block(
-                Block::default()
-                    .title(" Tool Usage ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if is_focused {
-                        Theme::ACTIVE_BORDER
-                    } else {
-                        Theme::PANEL_BORDER
-                    })),
-            );
-        frame.render_widget(p, area);
-        return;
-    }
-
-    let header = Row::new(vec!["Tool", "Count", "Avg (ms)"])
-        .style(Style::default().fg(Theme::INFO).add_modifier(Modifier::BOLD));
-
-    let rows: Vec<Row> = stats
-        .iter()
-        .take(8) // max 8 rows
-        .map(|s| {
-            let avg = s.avg_duration_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "—".into());
-            Row::new(vec![s.tool_name.clone(), s.count.to_string(), avg])
-                .fg(Theme::tool_color(&s.tool_name))
-        })
-        .collect();
-
-    let widths = [
-        Constraint::Min(12),
-        Constraint::Length(6),
-        Constraint::Length(10),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" Tool Usage ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if is_focused {
-                    Theme::ACTIVE_BORDER
-                } else {
-                    Theme::PANEL_BORDER
-                })),
-        );
-
-    frame.render_widget(table, area);
+    // Filter events by selected agent's ID if one is selected
+    let agent_filter = selected_agent.map(|a| &a.id);
+    render_events_list(frame, area, data, agent_filter, scroll_offset, is_focused);
 }
 
 fn render_events_list(
     frame: &mut Frame,
     area: Rect,
     data: &SessionViewData<'_>,
+    agent_filter: Option<&AgentId>,
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    let events: Vec<&HookEvent> = data.events.iter_rev().collect();
+    let events: Vec<&HookEvent> = data.events.iter_rev()
+        .filter(|e| match agent_filter {
+            Some(aid) => e.agent_id.as_ref() == Some(aid) || e.agent_id.is_none(),
+            None => true,
+        })
+        .collect();
 
     if events.is_empty() {
         let p = Paragraph::new("No events")
@@ -671,7 +512,9 @@ fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
         Span::styled("h/l", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":focus | "),
         Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(":scroll | "),
+        Span::raw(":select/scroll | "),
+        Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(":prompt | "),
         Span::styled("?", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":help | "),
         Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
@@ -721,6 +564,7 @@ mod tests {
         let mut a = Agent::new("a01", Utc::now());
         a.session_id = Some(SessionId::new("s1"));
         state.domain.agents.insert("a01".into(), a);
+        state.ui.selected_session_agent_index = Some(0);
 
         terminal
             .draw(|frame| render_session_detail(frame, &state, frame.area()))
@@ -777,63 +621,27 @@ mod tests {
     }
 
     #[test]
-    fn compute_tool_stats_empty() {
-        let events = EventsRef::Vec(&vec![]);
-        let stats = compute_tool_stats(&events);
-        assert!(stats.is_empty());
-    }
-
-    #[test]
-    fn compute_tool_stats_groups_by_tool() {
-        let events = vec![
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(100))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(200))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash", "ok".to_string(), Some(500))),
-            HookEvent::new(Utc::now(), HookEventKind::SessionStart), // non-tool event
-        ];
-        let events_ref = EventsRef::Vec(&events);
-        let stats = compute_tool_stats(&events_ref);
-
-        assert_eq!(stats.len(), 2);
-        // Sorted by count desc: Read=2, Bash=1
-        assert_eq!(stats[0].tool_name, "Read");
-        assert_eq!(stats[0].count, 2);
-        assert_eq!(stats[0].avg_duration_ms, Some(150));
-        assert_eq!(stats[1].tool_name, "Bash");
-        assert_eq!(stats[1].count, 1);
-        assert_eq!(stats[1].avg_duration_ms, Some(500));
-    }
-
-    #[test]
-    fn compute_agent_summary_empty() {
-        let agents = BTreeMap::new();
-        let agents_ref = AgentsRef::Borrowed(&agents);
-        let summaries = compute_agent_summary(&agents_ref);
-        assert!(summaries.is_empty());
-    }
-
-    #[test]
-    fn compute_agent_summary_counts_tools() {
+    fn sorted_session_agents_active_first() {
         let now = Utc::now();
+        let a1 = Agent::new("a01", now).finish(now + chrono::Duration::seconds(10));
+        let a2 = Agent::new("a02", now - chrono::Duration::seconds(5));
+
         let mut agents = BTreeMap::new();
-        let agent = Agent::new("a01", now)
-            .with_agent_type("Explore".into())
-            .add_message(crate::model::AgentMessage::tool(
-                now,
-                crate::model::ToolCall::new("Read", "file.rs".to_string()),
-            ))
-            .add_message(crate::model::AgentMessage::reasoning(now, "thinking".into()))
-            .finish(now + chrono::Duration::seconds(10));
+        agents.insert(AgentId::new("a01"), a1);
+        agents.insert(AgentId::new("a02"), a2);
 
-        agents.insert("a01".into(), agent);
+        let meta = SessionMeta::new("s1", now, "/proj".to_string());
+        let data = SessionViewData {
+            meta: &meta,
+            agents: AgentsRef::Borrowed(&agents),
+            events: EventsRef::Vec(&vec![]),
+            task_graph: None,
+        };
 
-        let agents_ref = AgentsRef::Borrowed(&agents);
-        let summaries = compute_agent_summary(&agents_ref);
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].agent_type, "Explore");
-        assert!(summaries[0].finished);
-        assert_eq!(summaries[0].tool_count, 1);
-        assert_eq!(summaries[0].duration_secs, Some(10));
+        let sorted = sorted_session_agents(&data);
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].id.as_str(), "a02"); // active first
+        assert_eq!(sorted[1].id.as_str(), "a01"); // finished
     }
 
     #[test]

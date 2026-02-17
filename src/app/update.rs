@@ -1,6 +1,7 @@
 use crate::app::{handle_key, AppState, ViewState};
+use crate::app::state::PendingTaskPrompt;
 use crate::event::AppEvent;
-use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall};
+use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall, ToolName};
 use crate::session;
 use std::time::Duration;
 
@@ -43,10 +44,18 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     ref task_description,
                 } => {
                     if let Some(ref id) = event.agent_id {
-                        let resolved_type = agent_type
-                            .clone()
-                            .or_else(|| task_description.clone());
-                        let desc = task_description.clone();
+                        let resolved_type = agent_type.clone();
+
+                        // Correlate with buffered PreToolUse(Task) prompt (FIFO per session).
+                        // Fall back to task_description from hook payload (for backward compat).
+                        let correlated = event.session_id.as_ref().and_then(|sid| {
+                            let pos = state.domain.pending_task_prompts.iter()
+                                .position(|p| p.session_id == *sid);
+                            pos.and_then(|i| state.domain.pending_task_prompts.remove(i))
+                        });
+                        let correlated_model = correlated.as_ref().and_then(|p| p.model.clone());
+                        let desc = correlated.map(|p| p.prompt).or_else(|| task_description.clone());
+
                         let is_new = !state.domain.agents.contains_key(id);
                         state
                             .domain
@@ -59,14 +68,17 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 if resolved_type.is_some() {
                                     a.agent_type = resolved_type.clone();
                                 }
-                                // Update task_description on restart (may have changed)
                                 if desc.is_some() {
                                     a.task_description = desc.clone();
+                                }
+                                if correlated_model.is_some() {
+                                    a.model = correlated_model.clone();
                                 }
                             })
                             .or_insert_with(|| {
                                 let mut a = Agent::new(id.clone(), event.timestamp);
                                 a.agent_type = resolved_type;
+                                a.model = correlated_model;
                                 a.task_description = desc;
                                 a.session_id = event.session_id.clone();
                                 a
@@ -107,6 +119,8 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 HookEventKind::PreToolUse {
                     tool_name,
                     input_summary,
+                    ref task_prompt,
+                    ref task_model,
                 } => {
                     if let Some(ref id) = agent_id {
                         state.domain.agents.entry(id.clone()).and_modify(|agent| {
@@ -115,6 +129,20 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 ToolCall::new(tool_name.clone(), input_summary.clone()),
                             ));
                         });
+                    }
+
+                    // Buffer full prompt + model from Task tool calls for SubagentStart correlation
+                    if *tool_name == ToolName::new("Task") {
+                        if let Some(prompt) = task_prompt {
+                            if let Some(ref sid) = event.session_id {
+                                state.domain.pending_task_prompts.push_back(PendingTaskPrompt {
+                                    session_id: sid.clone(),
+                                    prompt: prompt.clone(),
+                                    model: task_model.clone(),
+                                    timestamp: event.timestamp,
+                                });
+                            }
+                        }
                     }
                 }
                 HookEventKind::PostToolUse {
@@ -293,6 +321,10 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         }
 
         AppEvent::Tick(now) => {
+            // Evict stale pending task prompts (uncorrelated after 60s)
+            let prompt_cutoff = now - chrono::Duration::seconds(60);
+            state.domain.pending_task_prompts.retain(|p| p.timestamp > prompt_cutoff);
+
             // Skip stale cleanup until initial event replay is done.
             // During replay, historical timestamps would cause all sessions to expire
             // because Tick uses real-time `now` but events have old timestamps.
@@ -379,6 +411,18 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         AppEvent::InstallHookRequested => {
             // Side-effect (install_hook) handled in main event loop
             // Update just marks intent — no I/O in functional core
+        }
+
+        AppEvent::AgentMetadataUpdated { agent_id, metadata } => {
+            // SET semantics (not delta) — watcher sends absolute totals from full file parse.
+            // Safe to call repeatedly; idempotent for model/skills, overwrites token_usage.
+            state.domain.agents.entry(agent_id).and_modify(|agent| {
+                if let Some(ref m) = metadata.model {
+                    agent.model = Some(m.clone());
+                }
+                agent.token_usage = metadata.token_usage.clone();
+                agent.skills = metadata.skills.clone();
+            });
         }
     }
 
@@ -1814,5 +1858,111 @@ mod tests {
         // SessionEnd always archives (it's a real end event)
         assert!(state.domain.active_sessions.is_empty());
         assert_eq!(state.domain.sessions.len(), 1);
+    }
+
+    // ============================================================================
+    // AgentMetadataUpdated Tests
+    // ============================================================================
+
+    #[test]
+    fn metadata_sets_model_on_agent_without_model() {
+        let mut state = AppState::new();
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+
+        let metadata = crate::watcher::TranscriptMetadata {
+            model: Some("sonnet-4.5".to_string()),
+            ..Default::default()
+        };
+        update(&mut state, AppEvent::AgentMetadataUpdated {
+            agent_id: "a01".into(),
+            metadata,
+        });
+
+        assert_eq!(state.domain.agents[&AgentId::new("a01")].model.as_deref(), Some("sonnet-4.5"));
+    }
+
+    #[test]
+    fn metadata_overwrites_model() {
+        let mut state = AppState::new();
+        let mut agent = Agent::new("a01", Utc::now());
+        agent.model = Some("opus-4".to_string());
+        state.domain.agents.insert(AgentId::new("a01"), agent);
+
+        let metadata = crate::watcher::TranscriptMetadata {
+            model: Some("sonnet-4.5".to_string()),
+            ..Default::default()
+        };
+        update(&mut state, AppEvent::AgentMetadataUpdated {
+            agent_id: "a01".into(),
+            metadata,
+        });
+
+        // SET semantics: model from transcript always wins
+        assert_eq!(state.domain.agents[&AgentId::new("a01")].model.as_deref(), Some("sonnet-4.5"));
+    }
+
+    #[test]
+    fn metadata_sets_absolute_token_usage() {
+        let mut state = AppState::new();
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+
+        let m1 = crate::watcher::TranscriptMetadata {
+            token_usage: crate::model::TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let m2 = crate::watcher::TranscriptMetadata {
+            token_usage: crate::model::TokenUsage {
+                input_tokens: 200,
+                output_tokens: 75,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m1 });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m2 });
+
+        // SET semantics: last value wins (not accumulated)
+        let agent = &state.domain.agents[&AgentId::new("a01")];
+        assert_eq!(agent.token_usage.input_tokens, 200);
+        assert_eq!(agent.token_usage.output_tokens, 75);
+    }
+
+    #[test]
+    fn metadata_replaces_skills() {
+        let mut state = AppState::new();
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+
+        let m1 = crate::watcher::TranscriptMetadata {
+            skills: vec!["commit".to_string(), "review-pr".to_string()],
+            ..Default::default()
+        };
+        let m2 = crate::watcher::TranscriptMetadata {
+            skills: vec!["commit".to_string(), "loom".to_string()],
+            ..Default::default()
+        };
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m1 });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m2 });
+
+        // SET semantics: full file parse includes all skills, so last send is complete
+        let skills = &state.domain.agents[&AgentId::new("a01")].skills;
+        assert_eq!(skills, &vec!["commit".to_string(), "loom".to_string()]);
+    }
+
+    #[test]
+    fn metadata_skips_unknown_agent() {
+        let mut state = AppState::new();
+        let metadata = crate::watcher::TranscriptMetadata {
+            model: Some("sonnet-4.5".to_string()),
+            ..Default::default()
+        };
+        update(&mut state, AppEvent::AgentMetadataUpdated {
+            agent_id: "nonexistent".into(),
+            metadata,
+        });
+        assert!(state.domain.agents.is_empty());
     }
 }

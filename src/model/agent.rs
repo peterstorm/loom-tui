@@ -5,6 +5,46 @@ use std::time::Duration;
 use super::ids::{AgentId, SessionId, TaskId, ToolName};
 use super::serde_utils::duration_opt_millis;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+impl TokenUsage {
+    /// Input + output tokens (excludes cache — represents actual computation).
+    pub fn api_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+
+    /// All tokens including cache operations.
+    pub fn total(&self) -> u64 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+    }
+
+    /// Context window size: input + cache tokens (matches Claude Code's reported total_tokens).
+    /// Output tokens excluded because JSONL captures them at stream start (always ~1).
+    pub fn context_window(&self) -> u64 {
+        self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+    }
+
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Agent {
     pub id: AgentId,
@@ -12,6 +52,9 @@ pub struct Agent {
     pub task_id: Option<TaskId>,
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// Model the agent was spawned with (sonnet/opus/haiku, None = inherited)
+    #[serde(default)]
+    pub model: Option<String>,
     /// The prompt/task description the agent was spawned with
     #[serde(default)]
     pub task_description: Option<String>,
@@ -22,6 +65,10 @@ pub struct Agent {
     pub messages: Vec<AgentMessage>,
     #[serde(default)]
     pub session_id: Option<SessionId>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub token_usage: TokenUsage,
 }
 
 impl Default for Agent {
@@ -30,11 +77,14 @@ impl Default for Agent {
             id: AgentId::new("unknown"),
             task_id: None,
             agent_type: None,
+            model: None,
             task_description: None,
             started_at: Utc::now(),
             finished_at: None,
             messages: Vec::new(),
             session_id: None,
+            skills: Vec::new(),
+            token_usage: TokenUsage::default(),
         }
     }
 }
@@ -45,11 +95,14 @@ impl Agent {
             id: id.into(),
             task_id: None,
             agent_type: None,
+            model: None,
             task_description: None,
             started_at,
             finished_at: None,
             messages: Vec::new(),
             session_id: None,
+            skills: Vec::new(),
+            token_usage: TokenUsage::default(),
         }
     }
 
@@ -65,6 +118,11 @@ impl Agent {
 
     pub fn with_agent_type(mut self, agent_type: String) -> Self {
         self.agent_type = Some(agent_type);
+        self
+    }
+
+    pub fn with_model(mut self, model: String) -> Self {
+        self.model = Some(model);
         self
     }
 

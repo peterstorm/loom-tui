@@ -1,9 +1,9 @@
 use crate::error::ParseError;
-use crate::model::{AgentMessage, HookEvent, HookEventKind, Task, TaskGraph, Wave};
+use crate::model::{AgentMessage, HookEvent, HookEventKind, Task, TaskGraph, TokenUsage, Wave};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Safely truncate a string to a maximum character count (not bytes).
@@ -360,6 +360,180 @@ pub fn parse_claude_transcript_incremental(
     }
 
     events
+}
+
+/// Metadata extracted from a Claude Code subagent transcript.
+#[derive(Debug, Clone, Default)]
+pub struct TranscriptMetadata {
+    pub model: Option<String>,
+    pub token_usage: TokenUsage,
+    pub skills: Vec<String>,
+}
+
+/// Parse Claude Code transcript JSONL to extract model, token usage, and skills.
+///
+/// # Functional Core
+/// Pure function — no I/O, just string parsing.
+///
+/// Deduplicates assistant entries by `message.id` (streaming writes produce
+/// multiple JSONL lines per API call). Stores the LAST unique message's usage
+/// as `token_usage` — its `context_window()` approximates Claude Code's
+/// reported `total_tokens`.
+///
+/// For each JSONL line:
+/// - `type:"assistant"` → extract `.message.model` (keep first), deduplicate usage by message ID
+/// - `type:"user"` → scan content text blocks for `<command-name>X</command-name>` tags
+pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
+    let mut meta = TranscriptMetadata::default();
+    // Track per-message-ID usage; last write per ID wins (streaming dedup).
+    // Preserve insertion order so we can pick the last unique message.
+    let mut msg_order: Vec<String> = Vec::new();
+    let mut msg_usage: HashMap<String, TokenUsage> = HashMap::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let entry: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match entry_type {
+            "assistant" => {
+                // Extract model (keep first non-None)
+                if meta.model.is_none() {
+                    if let Some(model_id) = entry
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|v| v.as_str())
+                    {
+                        meta.model = Some(shorten_model_id(model_id));
+                    }
+                }
+
+                // Deduplicate usage by message.id
+                if let Some(usage) = entry.get("message").and_then(|m| m.get("usage")) {
+                    let msg_id = entry
+                        .get("message")
+                        .and_then(|m| m.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let tu = TokenUsage {
+                        input_tokens: usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        output_tokens: usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        cache_creation_input_tokens: usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                        cache_read_input_tokens: usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0),
+                    };
+
+                    if !msg_usage.contains_key(&msg_id) {
+                        msg_order.push(msg_id.clone());
+                    }
+                    msg_usage.insert(msg_id, tu);
+                }
+            }
+            "human" | "user" => {
+                // Scan content text blocks for <command-name>X</command-name>
+                let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
+                    Some(Value::Array(blocks)) => blocks,
+                    _ => continue,
+                };
+
+                for block in content_blocks {
+                    if block.get("type").and_then(|v| v.as_str()) != Some("text") {
+                        continue;
+                    }
+                    let text = match block.get("text").and_then(|v| v.as_str()) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    extract_command_names(text, &mut meta.skills);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Use the last unique message's usage as token_usage (context window).
+    if let Some(last_id) = msg_order.last() {
+        if let Some(tu) = msg_usage.remove(last_id) {
+            meta.token_usage = tu;
+        }
+    }
+
+    meta.skills.sort();
+    meta.skills.dedup();
+    meta
+}
+
+/// Extract `<command-name>X</command-name>` tags from text via string search.
+fn extract_command_names(text: &str, skills: &mut Vec<String>) {
+    const OPEN: &str = "<command-name>";
+    const CLOSE: &str = "</command-name>";
+
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find(OPEN) {
+        let name_start = search_from + start + OPEN.len();
+        if let Some(end) = text[name_start..].find(CLOSE) {
+            let name = &text[name_start..name_start + end];
+            if !name.is_empty() && !skills.contains(&name.to_string()) {
+                skills.push(name.to_string());
+            }
+            search_from = name_start + end + CLOSE.len();
+        } else {
+            break;
+        }
+    }
+}
+
+/// Shorten a full Claude model ID to a human-friendly display name.
+fn shorten_model_id(full: &str) -> String {
+    // Known prefixes → short names (order matters: more specific first)
+    if full.starts_with("claude-sonnet-4-5") {
+        return "sonnet-4.5".to_string();
+    }
+    if full.starts_with("claude-opus-4") {
+        return "opus-4".to_string();
+    }
+    if full.starts_with("claude-haiku-4-5") {
+        return "haiku-4.5".to_string();
+    }
+    if full.starts_with("claude-haiku-3-5") || full.starts_with("claude-3-5-haiku") {
+        return "haiku-3.5".to_string();
+    }
+    if full.starts_with("claude-sonnet-4") || full.starts_with("claude-4-sonnet") {
+        return "sonnet-4".to_string();
+    }
+    if full.starts_with("claude-3-5-sonnet") {
+        return "sonnet-3.5".to_string();
+    }
+    if full.starts_with("claude-3-opus") {
+        return "opus-3".to_string();
+    }
+
+    // Fallback: last segment before date suffix, or full string
+    full.split('-')
+        .take_while(|s| s.parse::<u32>().is_err() || s.len() <= 2)
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 #[cfg(test)]
@@ -732,7 +906,7 @@ invalid
         assert_eq!(events[0].agent_id.as_ref(), Some(&AgentId::new("a01")));
         assert_eq!(events[0].session_id.as_ref(), Some(&SessionId::new("s1")));
         match &events[0].kind {
-            HookEventKind::PreToolUse { tool_name, input_summary } => {
+            HookEventKind::PreToolUse { tool_name, input_summary, .. } => {
                 assert_eq!(tool_name.as_str(), "Read");
                 assert_eq!(input_summary, "/tmp/foo.rs");
             }
@@ -811,5 +985,208 @@ invalid
         let emoji = "🎉🎊🎈🎁🎂";
         let result = truncate_str(emoji, 2);
         assert_eq!(result, "🎉🎊...");
+    }
+
+    // ============================================================================
+    // parse_transcript_metadata tests
+    // ============================================================================
+
+    #[test]
+    fn transcript_metadata_empty_content() {
+        let meta = parse_transcript_metadata("");
+        assert!(meta.model.is_none());
+        assert!(meta.token_usage.is_empty());
+        assert!(meta.skills.is_empty());
+    }
+
+    #[test]
+    fn transcript_metadata_single_assistant_turn() {
+        let jsonl = r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5},"content":[{"type":"text","text":"hello"}]}}"#;
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.model.as_deref(), Some("sonnet-4.5"));
+        assert_eq!(meta.token_usage.input_tokens, 100);
+        assert_eq!(meta.token_usage.output_tokens, 50);
+        assert_eq!(meta.token_usage.cache_creation_input_tokens, 10);
+        assert_eq!(meta.token_usage.cache_read_input_tokens, 5);
+        assert_eq!(meta.token_usage.context_window(), 115); // 100 + 10 + 5
+    }
+
+    #[test]
+    fn transcript_metadata_multi_turn_uses_last_message() {
+        // Two distinct messages (different IDs) — last message's usage wins
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus-4-20250514","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_02","model":"claude-opus-4-20250514","usage":{"input_tokens":200,"output_tokens":75,"cache_creation_input_tokens":500,"cache_read_input_tokens":100},"content":[]}}"#,
+        );
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.model.as_deref(), Some("opus-4"));
+        // Last unique message's usage
+        assert_eq!(meta.token_usage.input_tokens, 200);
+        assert_eq!(meta.token_usage.output_tokens, 75);
+        assert_eq!(meta.token_usage.cache_creation_input_tokens, 500);
+        assert_eq!(meta.token_usage.cache_read_input_tokens, 100);
+        assert_eq!(meta.token_usage.context_window(), 800); // 200 + 500 + 100
+    }
+
+    #[test]
+    fn transcript_metadata_deduplicates_streaming_entries() {
+        // Same message ID appears 3 times (streaming writes) — only counted once
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus-4-20250514","usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":500,"cache_read_input_tokens":10000},"content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus-4-20250514","usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":500,"cache_read_input_tokens":10000},"content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-opus-4-20250514","usage":{"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":500,"cache_read_input_tokens":10000},"content":[]}}"#,
+        );
+        let meta = parse_transcript_metadata(jsonl);
+        // Should be last entry's values, not 3x sum
+        assert_eq!(meta.token_usage.input_tokens, 100);
+        assert_eq!(meta.token_usage.context_window(), 10600); // 100 + 500 + 10000
+    }
+
+    #[test]
+    fn transcript_metadata_model_keeps_first() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_02","model":"claude-opus-4-20250514","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+        );
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.model.as_deref(), Some("sonnet-4.5"));
+    }
+
+    #[test]
+    fn transcript_metadata_skill_extraction() {
+        let jsonl = r#"{"type":"human","message":{"content":[{"type":"text","text":"<command-name>code-implementer</command-name> loaded"}]}}"#;
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.skills, vec!["code-implementer"]);
+    }
+
+    #[test]
+    fn transcript_metadata_skill_dedup() {
+        let jsonl = concat!(
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<command-name>commit</command-name>"}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"<command-name>commit</command-name>"}]}}"#,
+        );
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.skills, vec!["commit"]);
+    }
+
+    #[test]
+    fn transcript_metadata_multiple_skills_in_one_block() {
+        let jsonl = r#"{"type":"human","message":{"content":[{"type":"text","text":"<command-name>alpha</command-name> and <command-name>beta</command-name>"}]}}"#;
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.skills, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn transcript_metadata_mixed_content() {
+        let jsonl = concat!(
+            r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":50,"output_tokens":25,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"human","message":{"content":[{"type":"text","text":"<command-name>review-pr</command-name>"}]}}"#,
+            "\n",
+            r#"{"type":"result","data":{}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_02","model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":100,"output_tokens":75,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}"#,
+        );
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.model.as_deref(), Some("sonnet-4.5"));
+        // Last unique message's usage (msg_02)
+        assert_eq!(meta.token_usage.input_tokens, 100);
+        assert_eq!(meta.token_usage.output_tokens, 75);
+        assert_eq!(meta.skills, vec!["review-pr"]);
+    }
+
+    #[test]
+    fn transcript_metadata_malformed_lines_skipped() {
+        let jsonl = "not json\n{\"type\":\"assistant\",\"message\":{\"id\":\"msg_01\",\"model\":\"claude-opus-4-20250514\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0},\"content\":[]}}";
+        let meta = parse_transcript_metadata(jsonl);
+        assert_eq!(meta.model.as_deref(), Some("opus-4"));
+        assert_eq!(meta.token_usage.input_tokens, 10);
+    }
+
+    // ============================================================================
+    // shorten_model_id tests
+    // ============================================================================
+
+    #[test]
+    fn shorten_model_sonnet_4_5() {
+        assert_eq!(shorten_model_id("claude-sonnet-4-5-20250929"), "sonnet-4.5");
+    }
+
+    #[test]
+    fn shorten_model_opus_4() {
+        assert_eq!(shorten_model_id("claude-opus-4-20250514"), "opus-4");
+    }
+
+    #[test]
+    fn shorten_model_haiku_4_5() {
+        assert_eq!(shorten_model_id("claude-haiku-4-5-20251001"), "haiku-4.5");
+    }
+
+    #[test]
+    fn shorten_model_haiku_3_5() {
+        assert_eq!(shorten_model_id("claude-3-5-haiku-20241022"), "haiku-3.5");
+        assert_eq!(shorten_model_id("claude-haiku-3-5-20241022"), "haiku-3.5");
+    }
+
+    #[test]
+    fn shorten_model_sonnet_4() {
+        assert_eq!(shorten_model_id("claude-sonnet-4-20250514"), "sonnet-4");
+        assert_eq!(shorten_model_id("claude-4-sonnet-20250514"), "sonnet-4");
+    }
+
+    #[test]
+    fn shorten_model_sonnet_3_5() {
+        assert_eq!(shorten_model_id("claude-3-5-sonnet-20250620"), "sonnet-3.5");
+    }
+
+    #[test]
+    fn shorten_model_opus_3() {
+        assert_eq!(shorten_model_id("claude-3-opus-20240229"), "opus-3");
+    }
+
+    #[test]
+    fn shorten_model_unknown_fallback() {
+        let result = shorten_model_id("some-unknown-model-20260101");
+        assert!(!result.is_empty());
+    }
+
+    // ============================================================================
+    // extract_command_names tests
+    // ============================================================================
+
+    #[test]
+    fn extract_command_names_none() {
+        let mut skills = Vec::new();
+        extract_command_names("no tags here", &mut skills);
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn extract_command_names_one() {
+        let mut skills = Vec::new();
+        extract_command_names("<command-name>commit</command-name>", &mut skills);
+        assert_eq!(skills, vec!["commit"]);
+    }
+
+    #[test]
+    fn extract_command_names_multiple() {
+        let mut skills = Vec::new();
+        extract_command_names(
+            "<command-name>a</command-name> text <command-name>b</command-name>",
+            &mut skills,
+        );
+        assert_eq!(skills, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_command_names_unclosed_tag() {
+        let mut skills = Vec::new();
+        extract_command_names("<command-name>broken", &mut skills);
+        assert!(skills.is_empty());
     }
 }

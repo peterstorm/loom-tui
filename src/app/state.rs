@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
+
 use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, SessionId, SessionMeta, TaskGraph};
 
 /// UI state: view mode, focus, scrolling, selections, display flags
@@ -44,6 +46,42 @@ pub struct UiState {
 
     /// Session ID currently being loaded from disk (shows loading indicator)
     pub loading_session: Option<SessionId>,
+
+    /// Prompt popup state (Closed or Open with scroll offset)
+    pub prompt_popup: PromptPopupState,
+
+    /// Index of selected agent within session detail view's agent list
+    pub selected_session_agent_index: Option<usize>,
+}
+
+/// Prompt popup overlay state — encapsulates visibility and scroll offset
+/// so they cannot desynchronize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptPopupState {
+    Closed,
+    Open { scroll: usize },
+}
+
+impl PromptPopupState {
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
+    pub fn scroll(&self) -> usize {
+        match self {
+            Self::Open { scroll } => *scroll,
+            Self::Closed => 0,
+        }
+    }
+}
+
+/// Buffered prompt from PreToolUse(Task), awaiting SubagentStart correlation.
+#[derive(Debug, Clone)]
+pub struct PendingTaskPrompt {
+    pub session_id: SessionId,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Domain state: agents, events, sessions, task graph
@@ -67,6 +105,10 @@ pub struct DomainState {
     /// Maps session_id → agent_ids for subagent event attribution.
     /// Multiple agents can share the same parent session_id when spawned in bulk.
     pub transcript_agent_map: BTreeMap<SessionId, Vec<AgentId>>,
+
+    /// Buffered prompts from PreToolUse(Task) awaiting SubagentStart correlation.
+    /// FIFO per session — oldest prompt matched first.
+    pub pending_task_prompts: VecDeque<PendingTaskPrompt>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
@@ -218,6 +260,8 @@ impl Default for UiState {
             selected_session_index: None,
             selected_session_id: None,
             loading_session: None,
+            prompt_popup: PromptPopupState::Closed,
+            selected_session_agent_index: None,
         }
     }
 }
@@ -231,6 +275,7 @@ impl Default for DomainState {
             active_sessions: BTreeMap::new(),
             task_graph: None,
             transcript_agent_map: BTreeMap::new(),
+            pending_task_prompts: VecDeque::with_capacity(32),
         }
     }
 }

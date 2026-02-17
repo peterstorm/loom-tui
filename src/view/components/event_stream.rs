@@ -539,6 +539,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
         HookEventKind::PreToolUse {
             tool_name,
             input_summary,
+            ..
         } => {
             let detail = if input_summary.is_empty() {
                 None

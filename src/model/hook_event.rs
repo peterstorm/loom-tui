@@ -59,6 +59,12 @@ pub enum HookEventKind {
     PreToolUse {
         tool_name: ToolName,
         input_summary: String,
+        /// Full prompt text for Task tool calls (used to correlate with SubagentStart)
+        #[serde(default)]
+        task_prompt: Option<String>,
+        /// Model specified for Task tool calls (sonnet/opus/haiku)
+        #[serde(default)]
+        task_model: Option<String>,
     },
     PostToolUse {
         tool_name: ToolName,
@@ -113,6 +119,8 @@ impl HookEventKind {
         Self::PreToolUse {
             tool_name: tool_name.into(),
             input_summary,
+            task_prompt: None,
+            task_model: None,
         }
     }
 

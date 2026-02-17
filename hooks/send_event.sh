@@ -38,14 +38,14 @@ case "$HOOK_NAME" in
       .tool_input // {} |
       if $tn == "Edit" then
         (.file_path // "") + "\n" +
-        ((.old_string // "" | split("\n") | .[0:200] | map("- " + .) | join("\n")) // "") +
-        (if ((.old_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end) + "\n" +
-        ((.new_string // "" | split("\n") | .[0:200] | map("+ " + .) | join("\n")) // "") +
-        (if ((.new_string // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
+        ((.old_string // "" | split("\n") | .[0:8] | map("- " + .) | join("\n")) // "") +
+        (if ((.old_string // "" | split("\n") | length) > 8) then "\n  ..." else "" end) + "\n" +
+        ((.new_string // "" | split("\n") | .[0:8] | map("+ " + .) | join("\n")) // "") +
+        (if ((.new_string // "" | split("\n") | length) > 8) then "\n  ..." else "" end)
       elif $tn == "Write" then
         (.file_path // "") + " (new file)\n" +
-        ((.content // "" | split("\n") | .[0:200] | map("+ " + .) | join("\n")) // "") +
-        (if ((.content // "" | split("\n") | length) > 30) then "\n  ..." else "" end)
+        ((.content // "" | split("\n") | .[0:8] | map("+ " + .) | join("\n")) // "") +
+        (if ((.content // "" | split("\n") | length) > 8) then "\n  ..." else "" end)
       elif .file_path then .file_path
       elif .command then (.description // .command)
       elif .pattern then .pattern
@@ -55,23 +55,27 @@ case "$HOOK_NAME" in
       elif .skill then .skill
       elif .subject then .subject
       else tostring
-      end' 2>/dev/null | head -c 32000)
+      end' 2>/dev/null | head -c 500)
+    # For Task tool, capture full prompt + model for agent correlation in TUI
+    TASK_PROMPT=""
+    TASK_MODEL=""
+    if [ "$TOOL_NAME" = "Task" ]; then
+      TASK_PROMPT=$(echo "$HOOK_JSON" | jq -r '.tool_input.prompt // empty' 2>/dev/null | head -c 32000)
+      TASK_MODEL=$(echo "$HOOK_JSON" | jq -r '.tool_input.model // empty' 2>/dev/null)
+    fi
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
       --arg aid "$AGENT_ID" \
       --arg tn "$TOOL_NAME" \
       --arg inp "$INPUT" \
-      '{timestamp: $ts, event: "pre_tool_use", tool_name: $tn, input_summary: $inp, session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      --arg tp "$TASK_PROMPT" \
+      --arg tm "$TASK_MODEL" \
+      '{timestamp: $ts, event: "pre_tool_use", tool_name: $tn, input_summary: $inp, task_prompt: (if $tp == "" then null else $tp end), task_model: (if $tm == "" then null else $tm end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
       >> "$EVENT_FILE"
     ;;
   PostToolUse|post-tool-use)
     TOOL_NAME=$(echo "$HOOK_JSON" | jq -r '.tool_name // "unknown"' 2>/dev/null || echo "unknown")
-    # Extract Read tool offset for line-number display in TUI
-    LINE_OFFSET=""
-    if [ "$TOOL_NAME" = "Read" ]; then
-      LINE_OFFSET=$(echo "$HOOK_JSON" | jq -r '.tool_input.offset // empty' 2>/dev/null || echo "")
-    fi
     # Extract clean human-readable result from tool_response
     RESULT=$(echo "$HOOK_JSON" | jq -r '
       .tool_response // .tool_output // .output // {} |
@@ -79,17 +83,12 @@ case "$HOOK_NAME" in
       elif type == "object" then
         if .filePath then "ok: " + (.filePath | split("/") | last)
         elif .stdout then (.stdout | split("\n") | map(select(. != "")) | last // "ok")
-        elif .content then (.content | if length > 500 then .[0:500] + "..." else . end)
+        elif .content then (.content | if length > 100 then .[0:100] + "..." else . end)
         elif .error then "error: " + .error
         else "ok"
         end
       else tostring
-      end' 2>/dev/null | head -c 32000)
-    # Prepend @offset:N metadata for TUI gutter line numbering
-    if [ -n "$LINE_OFFSET" ] && [ "$LINE_OFFSET" != "null" ]; then
-      RESULT="@offset:${LINE_OFFSET}
-${RESULT}"
-    fi
+      end' 2>/dev/null | head -c 150)
     DURATION=$(echo "$HOOK_JSON" | jq -r '.duration_ms // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \
@@ -103,14 +102,12 @@ ${RESULT}"
     ;;
   SubagentStart|subagent-start)
     AGENT_TYPE=$(echo "$HOOK_JSON" | jq -r '.agent_type // empty' 2>/dev/null || echo "")
-    TASK_DESC=$(echo "$HOOK_JSON" | jq -r '.task_description // .prompt // empty' 2>/dev/null || echo "")
     jq -cn \
       --arg ts "$TIMESTAMP" \
       --arg sid "$SESSION_ID" \
       --arg aid "$AGENT_ID" \
       --arg at "$AGENT_TYPE" \
-      --arg td "$TASK_DESC" \
-      '{timestamp: $ts, event: "subagent_start", agent_type: (if $at == "" then null else $at end), task_description: (if $td == "" then null else $td end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
+      '{timestamp: $ts, event: "subagent_start", agent_type: (if $at == "" then null else $at end), session_id: (if $sid == "" then null else $sid end), agent_id: (if $aid == "" then null else $aid end)}' \
       >> "$EVENT_FILE"
     ;;
   SubagentStop|subagent-stop)

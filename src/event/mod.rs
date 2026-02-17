@@ -5,6 +5,7 @@ use crossterm::event::KeyEvent;
 
 use crate::error::LoomError;
 use crate::model::{AgentId, AgentMessage, HookEvent, SessionArchive, SessionId, SessionMeta, TaskGraph};
+use crate::watcher::TranscriptMetadata;
 
 /// All events that can occur in the application.
 /// Sourced from file watchers, keyboard input, timers, and internal operations.
@@ -54,4 +55,10 @@ pub enum AppEvent {
 
     /// Initial event file replay is complete — safe to run stale session cleanup
     ReplayComplete,
+
+    /// Agent metadata extracted from subagent transcript (model, tokens, skills)
+    AgentMetadataUpdated {
+        agent_id: AgentId,
+        metadata: TranscriptMetadata,
+    },
 }

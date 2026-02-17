@@ -1,6 +1,7 @@
 use loom_tui::model::{AgentId, HookEventKind, MessageKind, SessionId, TaskStatus};
 use loom_tui::watcher::{
-    extract_active_agent_ids, parse_hook_events, parse_task_graph, parse_transcript, TailState,
+    extract_active_agent_ids, parse_hook_events, parse_task_graph, parse_transcript,
+    parse_transcript_metadata, TailState,
 };
 use std::fs;
 use std::io::Write;
@@ -233,7 +234,7 @@ fn test_parse_hook_events_all_kinds() {
     }
 
     match &events[2].kind {
-        HookEventKind::PreToolUse { tool_name, input_summary } => {
+        HookEventKind::PreToolUse { tool_name, input_summary, .. } => {
             assert_eq!(tool_name.as_str(), "Read");
             assert_eq!(input_summary, "file.rs");
         }
@@ -517,4 +518,119 @@ fn test_tail_state_concurrent_appends() {
     // Read all new content
     let content2 = state.read_new_lines(&file).unwrap();
     assert_eq!(content2.lines().count(), 9); // Lines 2-10
+}
+
+// ============================================================================
+// Transcript Metadata Tests (Real Claude Code Format)
+// ============================================================================
+
+#[test]
+fn test_parse_transcript_metadata_real_format() {
+    // Mirrors real Claude Code subagent transcript structure with message IDs
+    let jsonl = concat!(
+        r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<command-name>code-implementer</command-name> loaded\nImplement the feature"}]},"sessionId":"s1","agentId":"abc123","timestamp":"2026-02-14T20:42:04Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_01","model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"I'll implement this now."}],"usage":{"input_tokens":3,"output_tokens":20,"cache_creation_input_tokens":6412,"cache_read_input_tokens":9168}},"timestamp":"2026-02-14T20:42:05Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_02","model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"src/main.rs"}}],"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":500}},"timestamp":"2026-02-14T20:42:10Z"}"#,
+        "\n",
+        r#"{"type":"tool_result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"fn main() {}"}]},"timestamp":"2026-02-14T20:42:11Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_03","model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"Done!"}],"usage":{"input_tokens":200,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":1000}},"timestamp":"2026-02-14T20:42:15Z"}"#,
+    );
+
+    let meta = parse_transcript_metadata(jsonl);
+
+    // Model: haiku variant → shortened
+    assert!(meta.model.is_some());
+    assert!(meta.model.as_ref().unwrap().contains("haiku"), "got: {:?}", meta.model);
+
+    // Token usage: last unique message's usage (msg_03)
+    assert_eq!(meta.token_usage.input_tokens, 200);
+    assert_eq!(meta.token_usage.output_tokens, 10);
+    assert_eq!(meta.token_usage.cache_creation_input_tokens, 0);
+    assert_eq!(meta.token_usage.cache_read_input_tokens, 1000);
+    assert_eq!(meta.token_usage.context_window(), 1200); // 200 + 0 + 1000
+
+    // Skill extracted from user message
+    assert_eq!(meta.skills, vec!["code-implementer"]);
+}
+
+#[test]
+fn test_parse_transcript_metadata_from_real_file() {
+    // Try to parse a real subagent transcript if available
+    let home = std::env::var("HOME").unwrap_or_default();
+    let project_dir = std::path::PathBuf::from(format!(
+        "{}/.claude/projects/-home-peterstorm-dev-rust-loom-tui",
+        home
+    ));
+
+    if !project_dir.exists() {
+        eprintln!("No Claude project dir found — skipping live test");
+        return;
+    }
+
+    // Find first subagent transcript
+    let transcript = fs::read_dir(&project_dir).ok()
+        .into_iter()
+        .flat_map(|rd| rd.flatten())
+        .filter(|e| e.path().is_dir())
+        .flat_map(|session_dir| {
+            let subagents = session_dir.path().join("subagents");
+            fs::read_dir(subagents).ok().into_iter().flat_map(|rd| rd.flatten())
+        })
+        .find(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"));
+
+    let transcript = match transcript {
+        Some(t) => t.path(),
+        None => {
+            eprintln!("No real subagent transcripts found — skipping live test");
+            return;
+        }
+    };
+
+    let content = fs::read_to_string(&transcript).expect("read transcript");
+    let meta = parse_transcript_metadata(&content);
+
+    // Real transcript should have a model
+    assert!(meta.model.is_some(), "Real transcript should have model, file: {}", transcript.display());
+    eprintln!("Real transcript metadata:");
+    eprintln!("  model: {:?}", meta.model);
+    eprintln!("  tokens: in={} out={} cache_create={} cache_read={} total={}",
+        meta.token_usage.input_tokens,
+        meta.token_usage.output_tokens,
+        meta.token_usage.cache_creation_input_tokens,
+        meta.token_usage.cache_read_input_tokens,
+        meta.token_usage.total(),
+    );
+    eprintln!("  skills: {:?}", meta.skills);
+
+    // Token usage should be non-zero for any real transcript
+    assert!(!meta.token_usage.is_empty(), "Real transcript should have token usage");
+}
+
+#[test]
+fn test_parse_transcript_metadata_real_file_with_skills() {
+    // Transcript known to contain <command-name>architecture-tech-lead</command-name>
+    let path = format!(
+        "{}/.claude/projects/-home-peterstorm-dev-rust-loom-tui/2f1ad620-55e8-424b-b190-49043963abb5/subagents/agent-a4170f7.jsonl",
+        std::env::var("HOME").unwrap_or_default(),
+    );
+    let path = std::path::Path::new(&path);
+    if !path.exists() {
+        eprintln!("Specific transcript not found — skipping");
+        return;
+    }
+
+    let content = fs::read_to_string(path).expect("read file");
+    let meta = parse_transcript_metadata(&content);
+
+    assert!(meta.model.is_some());
+    assert!(!meta.token_usage.is_empty());
+    assert!(
+        meta.skills.contains(&"architecture-tech-lead".to_string()),
+        "Expected architecture-tech-lead skill, got: {:?}",
+        meta.skills
+    );
+    eprintln!("Skills found: {:?}", meta.skills);
 }

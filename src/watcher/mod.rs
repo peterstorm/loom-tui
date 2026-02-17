@@ -206,25 +206,33 @@ pub fn start_watching(
 /// Start polling Claude Code transcript files for assistant reasoning text.
 /// Polls files every 200ms, rescans directory every 2s for recently modified .jsonl files,
 /// tails new content, and emits AssistantText events.
-/// Discovers subagent transcripts automatically (each gets its own .jsonl file).
+/// Discovers subagent transcripts in `subagents/` subdirs and emits metadata events.
 fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
         let mut tail_state = TailState::new();
-        let mut known_files: BTreeMap<PathBuf, std::time::SystemTime> = BTreeMap::new();
+        // value: (modified_time, is_subagent)
+        let mut known_files: BTreeMap<PathBuf, (std::time::SystemTime, bool)> = BTreeMap::new();
         let mut scan_counter: u32 = 0;
+        let mut is_metadata_tick;
 
         loop {
             std::thread::sleep(Duration::from_millis(200));
             scan_counter = scan_counter.wrapping_add(1);
+            is_metadata_tick = scan_counter % 10 == 1;
 
             // Rescan directory every ~2s (10 iterations) to discover new files
             if scan_counter % 10 == 1 {
+                let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
+
+                // Scan top-level .jsonl files (parent transcripts)
                 if let Ok(entries) = std::fs::read_dir(&transcript_dir) {
-                    let cutoff = std::time::SystemTime::now()
-                        - Duration::from_secs(3600);
                     for entry in entries.flatten() {
                         let path = entry.path();
                         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                            // Also check for subagents/ subdirectories
+                            if path.is_dir() && path.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+                                scan_subagents_dir(&path, cutoff, &mut known_files);
+                            }
                             continue;
                         }
                         let modified = entry
@@ -233,22 +241,39 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                             .and_then(|m| m.modified().ok())
                             .unwrap_or(std::time::UNIX_EPOCH);
                         if modified > cutoff {
-                            known_files.entry(path).or_insert(modified);
+                            known_files.entry(path).or_insert((modified, false));
+                        }
+                    }
+                }
+
+                // Also scan per-session subagents/ dirs: {transcript_dir}/{session_id}/subagents/
+                if let Ok(entries) = std::fs::read_dir(&transcript_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !path.is_dir() {
+                            continue;
+                        }
+                        let subagents_dir = path.join("subagents");
+                        if subagents_dir.is_dir() {
+                            scan_subagents_dir(&subagents_dir, cutoff, &mut known_files);
                         }
                     }
                 }
             }
 
             // Tail known files for new content
-            for path in known_files.keys() {
+            let paths: Vec<(PathBuf, bool)> = known_files
+                .iter()
+                .map(|(p, (_, is_sub))| (p.clone(), *is_sub))
+                .collect();
+
+            for (path, is_subagent) in paths {
                 if !path.exists() {
                     continue;
                 }
-                let new_content = match tail_state.read_new_lines(path) {
-                    Ok(c) if !c.is_empty() => c,
-                    Ok(_) => continue, // Empty file - no new content
+                let new_content = match tail_state.read_new_lines(&path) {
+                    Ok(c) => c,
                     Err(e) => {
-                        // I/O error - log and continue to next file
                         if tx.send(AppEvent::Error {
                             source: path.display().to_string(),
                             error: WatcherError::Io(e.to_string()).into(),
@@ -264,26 +289,75 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown");
 
-                let events =
-                    parsers::parse_claude_transcript_incremental(&new_content, session_id);
-                for event in events {
-                    if tx.send(AppEvent::HookEventReceived(event)).is_err() {
-                        return;
+                // Parse incremental content for assistant text + tool progress
+                if !new_content.is_empty() {
+                    let events =
+                        parsers::parse_claude_transcript_incremental(&new_content, session_id);
+                    for event in events {
+                        if tx.send(AppEvent::HookEventReceived(event)).is_err() {
+                            return;
+                        }
+                    }
+
+                    let progress_events =
+                        parsers::parse_agent_progress_tool_calls(&new_content, session_id);
+                    for event in progress_events {
+                        if tx.send(AppEvent::HookEventReceived(event)).is_err() {
+                            return;
+                        }
                     }
                 }
 
-                // Also parse agent_progress entries (parent transcripts contain
-                // tool calls with agentId for proper multi-agent attribution)
-                let progress_events =
-                    parsers::parse_agent_progress_tool_calls(&new_content, session_id);
-                for event in progress_events {
-                    if tx.send(AppEvent::HookEventReceived(event)).is_err() {
-                        return;
+                // For subagent transcripts, parse metadata from the FULL file on the ~2s
+                // rescan tick (not every 200ms). Not gated on new_content — the agent
+                // might not be registered yet when the first chunk arrives. Full-file parse
+                // is cheap and the update handler uses SET semantics (idempotent).
+                if is_subagent && is_metadata_tick {
+                    let full_content = match std::fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let metadata = parsers::parse_transcript_metadata(&full_content);
+                    if metadata.model.is_some() || !metadata.token_usage.is_empty() || !metadata.skills.is_empty() {
+                        let agent_id = session_id
+                            .strip_prefix("agent-")
+                            .unwrap_or(session_id)
+                            .to_string();
+                        if tx.send(AppEvent::AgentMetadataUpdated {
+                            agent_id: agent_id.into(),
+                            metadata,
+                        }).is_err() {
+                            return;
+                        }
                     }
                 }
             }
         }
     });
+}
+
+/// Scan a subagents/ directory for .jsonl files and add them to known_files.
+fn scan_subagents_dir(
+    dir: &Path,
+    cutoff: std::time::SystemTime,
+    known_files: &mut BTreeMap<PathBuf, (std::time::SystemTime, bool)>,
+) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if modified > cutoff {
+                known_files.entry(path).or_insert((modified, true));
+            }
+        }
+    }
 }
 
 /// Read existing files on startup so the TUI doesn't start empty.

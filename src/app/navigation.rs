@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{AppState, PanelFocus, TaskViewMode, ViewState};
+use crate::app::{AppState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
 
 /// Jump size for Ctrl+D / Ctrl+U (fixed at 20 lines).
 const PAGE_JUMP: usize = 20;
@@ -13,7 +13,13 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
-    // Agent popup has second priority
+    // Prompt popup has second priority
+    if state.ui.prompt_popup.is_open() {
+        handle_prompt_popup_key(state, key);
+        return;
+    }
+
+    // Agent popup has third priority
     if state.ui.show_agent_popup.is_some() {
         handle_popup_key(state, key);
         return;
@@ -63,6 +69,25 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
 
 fn handle_help_key(state: &mut AppState, _key: KeyEvent) {
     state.ui.show_help = false;
+}
+
+fn handle_prompt_popup_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('p') => {
+            state.ui.prompt_popup = PromptPopupState::Closed;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let PromptPopupState::Open { scroll } = &mut state.ui.prompt_popup {
+                *scroll = scroll.saturating_add(1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let PromptPopupState::Open { scroll } = &mut state.ui.prompt_popup {
+                *scroll = scroll.saturating_sub(1);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn handle_popup_key(state: &mut AppState, key: KeyEvent) {
@@ -133,11 +158,20 @@ fn active_scroll_offset_mut(state: &mut AppState) -> &mut usize {
     }
 }
 
+/// Count of agents in the currently selected session.
+fn session_agent_count(state: &AppState) -> usize {
+    use crate::view::session_detail::get_selected_session_data;
+    get_selected_session_data(state)
+        .map(|d| d.agents.len())
+        .unwrap_or(0)
+}
+
 /// Returns item count for current view+focus (for bounds checking).
 fn item_count(state: &AppState) -> Option<usize> {
     match (&state.ui.view, &state.ui.focus) {
         (ViewState::Dashboard, PanelFocus::Left) => Some(task_count(state)),
         (ViewState::AgentDetail, PanelFocus::Left) => Some(state.domain.agents.len()),
+        (ViewState::SessionDetail, PanelFocus::Left) => Some(session_agent_count(state)),
         (ViewState::Sessions, _) => Some(state.domain.confirmed_active_count() + state.domain.sessions.len()),
         _ => None,
     }
@@ -168,6 +202,17 @@ fn scroll_down(state: &mut AppState) {
                         state.ui.scroll_offsets.agent_events = 0;
                     }
                     state.ui.selected_agent_index = Some(new_idx);
+                }
+            }
+        }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            if let (Some(current), Some(count)) = (state.ui.selected_session_agent_index, item_count(state)) {
+                if count > 0 {
+                    let new_idx = (current + 1).min(count - 1);
+                    if new_idx != current {
+                        state.ui.scroll_offsets.session_detail_right = 0;
+                    }
+                    state.ui.selected_session_agent_index = Some(new_idx);
                 }
             }
         }
@@ -203,6 +248,15 @@ fn scroll_up(state: &mut AppState) {
             }
             state.ui.selected_agent_index = Some(new_idx);
         }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            if let Some(current) = state.ui.selected_session_agent_index {
+                let new_idx = current.saturating_sub(1);
+                if new_idx != current {
+                    state.ui.scroll_offsets.session_detail_right = 0;
+                }
+                state.ui.selected_session_agent_index = Some(new_idx);
+            }
+        }
         (ViewState::Sessions, _) => {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(1));
@@ -230,6 +284,17 @@ fn scroll_page_down(state: &mut AppState) {
                         state.ui.scroll_offsets.agent_events = 0;
                     }
                     state.ui.selected_agent_index = Some(new_idx);
+                }
+            }
+        }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            if let (Some(current), Some(count)) = (state.ui.selected_session_agent_index, item_count(state)) {
+                if count > 0 {
+                    let new_idx = (current + PAGE_JUMP).min(count - 1);
+                    if new_idx != current {
+                        state.ui.scroll_offsets.session_detail_right = 0;
+                    }
+                    state.ui.selected_session_agent_index = Some(new_idx);
                 }
             }
         }
@@ -263,6 +328,15 @@ fn scroll_page_up(state: &mut AppState) {
             }
             state.ui.selected_agent_index = Some(new_idx);
         }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            if let Some(current) = state.ui.selected_session_agent_index {
+                let new_idx = current.saturating_sub(PAGE_JUMP);
+                if new_idx != current {
+                    state.ui.scroll_offsets.session_detail_right = 0;
+                }
+                state.ui.selected_session_agent_index = Some(new_idx);
+            }
+        }
         (ViewState::Sessions, _) => {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(PAGE_JUMP));
@@ -288,6 +362,10 @@ fn jump_to_top(state: &mut AppState) {
                 state.ui.scroll_offsets.agent_events = 0;
             }
         }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            state.ui.selected_session_agent_index = Some(0);
+            state.ui.scroll_offsets.session_detail_right = 0;
+        }
         (ViewState::Sessions, _) => {
             state.ui.selected_session_index = Some(0);
         }
@@ -307,6 +385,14 @@ fn jump_to_bottom(state: &mut AppState) {
                 if count > 0 {
                     state.ui.selected_agent_index = Some(count - 1);
                     state.ui.scroll_offsets.agent_events = 0;
+                }
+            }
+        }
+        (ViewState::SessionDetail, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    state.ui.selected_session_agent_index = Some(count - 1);
+                    state.ui.scroll_offsets.session_detail_right = 0;
                 }
             }
         }
@@ -352,20 +438,14 @@ fn drill_down(state: &mut AppState) {
                     if let Some((sid, _)) = state.domain.confirmed_active_sessions().nth(idx) {
                         state.ui.selected_session_id = Some(sid.clone());
                     }
-                    state.ui.view = ViewState::SessionDetail;
-                    state.ui.scroll_offsets.session_detail_left = 0;
-                    state.ui.scroll_offsets.session_detail_right = 0;
-                    state.ui.focus = PanelFocus::Left;
+                    enter_session_detail(state);
                 } else {
                     let archive_idx = idx - active_count;
                     if let Some(session) = state.domain.sessions.get(archive_idx) {
                         let sid = session.meta.id.clone();
                         if session.data.is_some() {
                             state.ui.selected_session_id = Some(sid);
-                            state.ui.view = ViewState::SessionDetail;
-                            state.ui.scroll_offsets.session_detail_left = 0;
-                            state.ui.scroll_offsets.session_detail_right = 0;
-                            state.ui.focus = PanelFocus::Left;
+                            enter_session_detail(state);
                         } else {
                             state.ui.selected_session_id = Some(sid.clone());
                             state.ui.loading_session = Some(sid);
@@ -378,9 +458,20 @@ fn drill_down(state: &mut AppState) {
     }
 }
 
+fn enter_session_detail(state: &mut AppState) {
+    state.ui.view = ViewState::SessionDetail;
+    state.ui.scroll_offsets.session_detail_left = 0;
+    state.ui.scroll_offsets.session_detail_right = 0;
+    state.ui.focus = PanelFocus::Left;
+    // Auto-select first agent if session has agents
+    let agent_count = session_agent_count(state);
+    state.ui.selected_session_agent_index = if agent_count > 0 { Some(0) } else { None };
+}
+
 fn go_back(state: &mut AppState) {
     match state.ui.view {
         ViewState::AgentDetail => {
+            state.ui.prompt_popup = PromptPopupState::Closed;
             state.ui.view = ViewState::Dashboard;
         }
         ViewState::Sessions => {
@@ -402,6 +493,8 @@ fn go_back(state: &mut AppState) {
                 }
             }
             state.ui.selected_session_id = None;
+            state.ui.selected_session_agent_index = None;
+            state.ui.prompt_popup = PromptPopupState::Closed;
             state.ui.view = ViewState::Sessions;
         }
         ViewState::Dashboard => {}
@@ -421,21 +514,31 @@ fn toggle_auto_scroll(state: &mut AppState) {
 }
 
 fn show_agent_popup(state: &mut AppState) {
-    // Show popup for selected task's agent (Dashboard only)
-    if !matches!(state.ui.view, ViewState::Dashboard) {
-        return;
-    }
-
-    if let Some(task_idx) = state.ui.selected_task_index {
-        if let Some(ref task_graph) = state.domain.task_graph {
-            let all_tasks: Vec<_> = task_graph.flat_tasks().collect();
-
-            if let Some(task) = all_tasks.get(task_idx) {
-                if let Some(ref agent_id) = task.agent_id {
-                    state.ui.show_agent_popup = Some(agent_id.clone());
+    match state.ui.view {
+        ViewState::Dashboard => {
+            // Show agent popup for selected task's agent
+            if let Some(task_idx) = state.ui.selected_task_index {
+                if let Some(ref task_graph) = state.domain.task_graph {
+                    let all_tasks: Vec<_> = task_graph.flat_tasks().collect();
+                    if let Some(task) = all_tasks.get(task_idx) {
+                        if let Some(ref agent_id) = task.agent_id {
+                            state.ui.show_agent_popup = Some(agent_id.clone());
+                        }
+                    }
                 }
             }
         }
+        ViewState::AgentDetail => {
+            if state.ui.selected_agent_index.is_some() {
+                state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+            }
+        }
+        ViewState::SessionDetail => {
+            if state.ui.selected_session_agent_index.is_some() {
+                state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+            }
+        }
+        _ => {}
     }
 }
 
@@ -458,6 +561,7 @@ fn toggle_task_view_mode(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::PromptPopupState;
     use crate::model::{Agent, AgentId, ArchivedSession, SessionMeta, Task, TaskId, TaskGraph, TaskStatus, Wave};
     use std::path::PathBuf;
     use chrono::Utc;
@@ -844,13 +948,23 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_page_scrolls_session_detail() {
+    fn ctrl_u_page_scrolls_session_detail_left_agent_selection() {
         let mut state = AppState::new();
         state.ui.view = ViewState::SessionDetail;
         state.ui.focus = PanelFocus::Left;
-        state.ui.scroll_offsets.session_detail_left = 25;
+        state.ui.selected_session_agent_index = Some(25);
         handle_key(&mut state, ctrl(KeyCode::Char('u')));
-        assert_eq!(state.ui.scroll_offsets.session_detail_left, 25 - PAGE_JUMP);
+        assert_eq!(state.ui.selected_session_agent_index, Some(25 - PAGE_JUMP));
+    }
+
+    #[test]
+    fn ctrl_u_page_scrolls_session_detail_right() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::SessionDetail;
+        state.ui.focus = PanelFocus::Right;
+        state.ui.scroll_offsets.session_detail_right = 25;
+        handle_key(&mut state, ctrl(KeyCode::Char('u')));
+        assert_eq!(state.ui.scroll_offsets.session_detail_right, 25 - PAGE_JUMP);
     }
 
     #[test]
@@ -987,9 +1101,9 @@ mod tests {
     }
 
     #[test]
-    fn show_agent_popup_only_works_in_dashboard() {
+    fn p_is_noop_in_sessions_view() {
         let mut state = AppState::new();
-        state.ui.view = ViewState::Sessions; // Not Dashboard
+        state.ui.view = ViewState::Sessions;
 
         let mut task = Task::new("T1", "Task".into(), TaskStatus::Running);
         task.agent_id = Some(AgentId::new("a01"));
@@ -997,8 +1111,69 @@ mod tests {
         state.ui.selected_task_index = Some(0);
 
         handle_key(&mut state, key(KeyCode::Char('p')));
-        // Should be no-op since not in Dashboard
         assert_eq!(state.ui.show_agent_popup, None);
+        assert!(!state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn p_opens_prompt_popup_in_agent_detail() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::AgentDetail;
+        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        state.ui.selected_agent_index = Some(0);
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert!(state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn p_opens_prompt_popup_in_session_detail() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::SessionDetail;
+        state.ui.selected_session_agent_index = Some(0);
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert!(state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn p_noop_when_no_agent_selected() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::AgentDetail;
+        state.ui.selected_agent_index = None;
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert!(!state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn p_dismisses_prompt_popup() {
+        let mut state = AppState::new();
+        state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert!(!state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn prompt_popup_jk_scrolls() {
+        let mut state = AppState::new();
+        state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+
+        handle_key(&mut state, key(KeyCode::Char('j')));
+        assert_eq!(state.ui.prompt_popup.scroll(), 1);
+        handle_key(&mut state, key(KeyCode::Char('k')));
+        assert_eq!(state.ui.prompt_popup.scroll(), 0);
+    }
+
+    #[test]
+    fn prompt_popup_esc_dismisses() {
+        let mut state = AppState::new();
+        state.ui.prompt_popup = PromptPopupState::Open { scroll: 5 };
+
+        handle_key(&mut state, key(KeyCode::Esc));
+        assert!(!state.ui.prompt_popup.is_open());
+        assert_eq!(state.ui.prompt_popup.scroll(), 0);
     }
 
     #[test]

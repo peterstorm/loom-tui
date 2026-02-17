@@ -213,6 +213,7 @@ fn parse_hook_events_jsonl() {
         HookEventKind::PreToolUse {
             tool_name,
             input_summary,
+            ..
         } => {
             assert_eq!(tool_name.as_str(), "Write");
             assert_eq!(input_summary, "Cargo.toml");
@@ -483,6 +484,64 @@ fn task_graph_empty_constructor() {
     assert_eq!(graph.waves.len(), 0);
     assert_eq!(graph.total_tasks(), 0);
     assert_eq!(graph.completed_tasks(), 0);
+}
+
+#[test]
+fn pre_tool_use_deserializes_with_task_model() {
+    let json = r#"{
+        "timestamp": "2026-02-17T10:00:00Z",
+        "event": "pre_tool_use",
+        "tool_name": "Task",
+        "input_summary": "Explore codebase",
+        "task_prompt": "Find all modules",
+        "task_model": "opus"
+    }"#;
+    let event: HookEvent = serde_json::from_str(json).expect("Should parse with task_model");
+    match &event.kind {
+        HookEventKind::PreToolUse { task_model, task_prompt, .. } => {
+            assert_eq!(task_model.as_deref(), Some("opus"));
+            assert_eq!(task_prompt.as_deref(), Some("Find all modules"));
+        }
+        _ => panic!("Expected PreToolUse"),
+    }
+}
+
+#[test]
+fn pre_tool_use_deserializes_without_task_model() {
+    let json = r#"{
+        "timestamp": "2026-02-17T10:00:00Z",
+        "event": "pre_tool_use",
+        "tool_name": "Read",
+        "input_summary": "file.rs"
+    }"#;
+    let event: HookEvent = serde_json::from_str(json).expect("Should parse without task_model");
+    match &event.kind {
+        HookEventKind::PreToolUse { task_model, task_prompt, .. } => {
+            assert!(task_model.is_none());
+            assert!(task_prompt.is_none());
+        }
+        _ => panic!("Expected PreToolUse"),
+    }
+}
+
+#[test]
+fn agent_serializes_with_model_field() {
+    let agent = Agent::new("a01", Utc::now()).with_model("sonnet".to_string());
+    let json = serde_json::to_string(&agent).unwrap();
+    assert!(json.contains("\"model\":\"sonnet\""));
+
+    let restored: Agent = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.model.as_deref(), Some("sonnet"));
+}
+
+#[test]
+fn agent_deserializes_without_model_field() {
+    let json = r#"{
+        "id": "a01",
+        "started_at": "2026-02-17T10:00:00Z"
+    }"#;
+    let agent: Agent = serde_json::from_str(json).expect("Should parse without model");
+    assert!(agent.model.is_none());
 }
 
 #[test]

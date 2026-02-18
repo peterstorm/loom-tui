@@ -171,7 +171,7 @@ fn item_count(state: &AppState) -> Option<usize> {
     match (&state.ui.view, &state.ui.focus) {
         (ViewState::Dashboard, PanelFocus::Left) => Some(task_count(state)),
         (ViewState::AgentDetail, PanelFocus::Left) => Some(state.domain.agents.len()),
-        (ViewState::SessionDetail, PanelFocus::Left) => Some(session_agent_count(state)),
+        (ViewState::SessionDetail, PanelFocus::Left) => Some(session_agent_count(state) + 1), // +1 for Main
         (ViewState::Sessions, _) => Some(state.domain.confirmed_active_count() + state.domain.sessions.len()),
         _ => None,
     }
@@ -534,8 +534,11 @@ fn show_agent_popup(state: &mut AppState) {
             }
         }
         ViewState::SessionDetail => {
-            if state.ui.selected_session_agent_index.is_some() {
-                state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+            // Index 0 = Main (no prompt), index >= 1 = agent
+            if let Some(idx) = state.ui.selected_session_agent_index {
+                if idx >= 1 {
+                    state.ui.prompt_popup = PromptPopupState::Open { scroll: 0 };
+                }
             }
         }
         _ => {}
@@ -1130,10 +1133,20 @@ mod tests {
     fn p_opens_prompt_popup_in_session_detail() {
         let mut state = AppState::new();
         state.ui.view = ViewState::SessionDetail;
-        state.ui.selected_session_agent_index = Some(0);
+        state.ui.selected_session_agent_index = Some(1); // index 0 = Main (no popup)
 
         handle_key(&mut state, key(KeyCode::Char('p')));
         assert!(state.ui.prompt_popup.is_open());
+    }
+
+    #[test]
+    fn p_noop_on_main_in_session_detail() {
+        let mut state = AppState::new();
+        state.ui.view = ViewState::SessionDetail;
+        state.ui.selected_session_agent_index = Some(0); // Main
+
+        handle_key(&mut state, key(KeyCode::Char('p')));
+        assert!(!state.ui.prompt_popup.is_open());
     }
 
     #[test]

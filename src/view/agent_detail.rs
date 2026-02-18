@@ -68,6 +68,7 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
                 area,
                 &agent.display_name(),
                 agent.model.as_deref(),
+                agent.agent_type.as_deref(),
                 text,
                 &agent.messages,
                 &agent.skills,

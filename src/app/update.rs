@@ -292,11 +292,62 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 }
             }
 
-            // Ring buffer eviction: pop oldest if at capacity
-            if state.domain.events.len() >= 10_000 {
-                state.domain.events.pop_front();
+            // Dedup: tool events arrive from both hooks (agent_id=None) and
+            // transcript parsing (agent_id=Some). Scan backwards through the full
+            // ring buffer — the 64-event window was too small when concurrent sessions
+            // push many events between hook delivery and transcript parse.
+            // If existing has no agent_id and new does → upgrade attribution.
+            // If existing has agent_id and new doesn't → skip (already have better data).
+            // If both match → skip (pure duplicate).
+            //
+            // When upgrading a PreToolUse, also upgrade the matching PostToolUse
+            // (same tool_name, nearby in buffer). Transcripts only produce PreToolUse
+            // from tool_use blocks — PostToolUse has no transcript counterpart.
+            let should_insert = if let Some(new_key) = enriched.dedup_key() {
+                let mut replaced = false;
+                for i in (0..state.domain.events.len()).rev() {
+                    if let Some(existing_key) = state.domain.events[i].dedup_key() {
+                        if existing_key == new_key {
+                            if state.domain.events[i].agent_id.is_none() && enriched.agent_id.is_some() {
+                                state.domain.events[i].agent_id = enriched.agent_id.clone();
+                                // Also upgrade the matching PostToolUse (no transcript counterpart)
+                                if let HookEventKind::PreToolUse { ref tool_name, .. } = enriched.kind {
+                                    let tn = tool_name.clone();
+                                    let aid = enriched.agent_id.clone();
+                                    // Scan forward from the matched PreToolUse for its PostToolUse
+                                    for j in (i + 1)..state.domain.events.len() {
+                                        if let HookEventKind::PostToolUse { ref tool_name, .. } = state.domain.events[j].kind {
+                                            if *tool_name == tn && state.domain.events[j].agent_id.is_none() {
+                                                state.domain.events[j].agent_id = aid;
+                                                break;
+                                            }
+                                        }
+                                        // Stop scanning if we hit another PreToolUse for the same tool
+                                        if let HookEventKind::PreToolUse { ref tool_name, .. } = state.domain.events[j].kind {
+                                            if *tool_name == tn {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            replaced = true;
+                            break;
+                        }
+                    }
+                }
+                !replaced
+            } else {
+                true
+            };
+
+            if should_insert {
+                // Ring buffer eviction: pop oldest if at capacity
+                if state.domain.events.len() >= 10_000 {
+                    state.domain.events.pop_front();
+                }
+                state.domain.events.push_back(enriched);
             }
-            state.domain.events.push_back(enriched);
         }
 
         AppEvent::AgentStarted { agent_id, timestamp } => {

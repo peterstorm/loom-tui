@@ -15,6 +15,7 @@ pub fn render_prompt_popup(
     area: Rect,
     agent_name: &str,
     model: Option<&str>,
+    agent_type: Option<&str>,
     text: &str,
     messages: &[AgentMessage],
     skills: &[String],
@@ -31,7 +32,11 @@ pub fn render_prompt_popup(
 
     // Build content: prompt text + skills/references + token breakdown
     let refs = extract_references(messages);
-    let mut all_refs: Vec<String> = skills.iter().map(|s| format!("skill:{}", s)).collect();
+    let mut all_refs: Vec<String> = Vec::new();
+    if let Some(at) = agent_type {
+        all_refs.push(format!("agent:{}", at));
+    }
+    all_refs.extend(skills.iter().map(|s| format!("skill:{}", s)));
     for r in &refs {
         if !all_refs.contains(r) {
             all_refs.push(r.clone());
@@ -111,6 +116,7 @@ fn is_reference_path(path: &str) -> bool {
     path.contains(".claude/skills/")
         || path.contains(".claude/rules/")
         || path.contains("CLAUDE.md")
+        || path.contains("/rules/") && path.ends_with(".md")
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

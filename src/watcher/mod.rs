@@ -207,7 +207,15 @@ pub fn start_watching(
 /// Polls files every 200ms, rescans directory every 2s for recently modified .jsonl files,
 /// tails new content, and emits AssistantText events.
 /// Discovers subagent transcripts in `subagents/` subdirs and emits metadata events.
+///
+/// Scans ALL project directories under `~/.claude/projects/` (not just the current project)
+/// because hook events from all Claude Code sessions arrive in the same events.jsonl.
+/// Without cross-project scanning, subagent tool events from other projects never get
+/// agent_id attribution via dedup upgrade.
 fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>) {
+    // Derive ~/.claude/projects/ root from the primary transcript dir
+    let projects_root = transcript_dir.parent().map(|p| p.to_path_buf());
+
     std::thread::spawn(move || {
         let mut tail_state = TailState::new();
         // value: (modified_time, is_subagent)
@@ -220,44 +228,25 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
             scan_counter = scan_counter.wrapping_add(1);
             is_metadata_tick = scan_counter % 10 == 1;
 
-            // Rescan directory every ~2s (10 iterations) to discover new files
+            // Rescan directories every ~2s (10 iterations) to discover new files
             if scan_counter % 10 == 1 {
                 let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
 
-                // Scan top-level .jsonl files (parent transcripts)
-                if let Ok(entries) = std::fs::read_dir(&transcript_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                            // Also check for subagents/ subdirectories
-                            if path.is_dir() && path.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-                                scan_subagents_dir(&path, cutoff, &mut known_files);
+                // Collect all project dirs to scan: primary + all others under ~/.claude/projects/
+                let mut project_dirs = vec![transcript_dir.clone()];
+                if let Some(ref root) = projects_root {
+                    if let Ok(entries) = std::fs::read_dir(root) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() && path != transcript_dir {
+                                project_dirs.push(path);
                             }
-                            continue;
-                        }
-                        let modified = entry
-                            .metadata()
-                            .ok()
-                            .and_then(|m| m.modified().ok())
-                            .unwrap_or(std::time::UNIX_EPOCH);
-                        if modified > cutoff {
-                            known_files.entry(path).or_insert((modified, false));
                         }
                     }
                 }
 
-                // Also scan per-session subagents/ dirs: {transcript_dir}/{session_id}/subagents/
-                if let Ok(entries) = std::fs::read_dir(&transcript_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if !path.is_dir() {
-                            continue;
-                        }
-                        let subagents_dir = path.join("subagents");
-                        if subagents_dir.is_dir() {
-                            scan_subagents_dir(&subagents_dir, cutoff, &mut known_files);
-                        }
-                    }
+                for proj_dir in &project_dirs {
+                    scan_project_dir(proj_dir, cutoff, &mut known_files);
                 }
             }
 
@@ -284,28 +273,35 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                     }
                 };
 
-                let session_id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
+                // For subagent transcripts ({session_id}/subagents/agent-{id}.jsonl),
+                // extract session_id from grandparent dir, not filename.
+                let session_id: String = if is_subagent {
+                    path.parent()                         // subagents/
+                        .and_then(|p| p.parent())         // {session_id}/
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                } else {
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
 
                 // Parse incremental content for assistant text + tool progress
                 if !new_content.is_empty() {
                     let events =
-                        parsers::parse_claude_transcript_incremental(&new_content, session_id);
+                        parsers::parse_claude_transcript_incremental(&new_content, &session_id);
                     for event in events {
                         if tx.send(AppEvent::HookEventReceived(event)).is_err() {
                             return;
                         }
                     }
 
-                    let progress_events =
-                        parsers::parse_agent_progress_tool_calls(&new_content, session_id);
-                    for event in progress_events {
-                        if tx.send(AppEvent::HookEventReceived(event)).is_err() {
-                            return;
-                        }
-                    }
+                    // Note: parse_agent_progress_tool_calls removed — subagent transcripts
+                    // now produce properly-attributed tool events via
+                    // parse_claude_transcript_incremental (assistant entries with agentId).
                 }
 
                 // For subagent transcripts, parse metadata from the FULL file on the ~2s
@@ -319,9 +315,13 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
                     };
                     let metadata = parsers::parse_transcript_metadata(&full_content);
                     if metadata.model.is_some() || !metadata.token_usage.is_empty() || !metadata.skills.is_empty() {
-                        let agent_id = session_id
+                        // Extract agent_id from filename (agent-{id}.jsonl)
+                        let file_stem = path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown");
+                        let agent_id = file_stem
                             .strip_prefix("agent-")
-                            .unwrap_or(session_id)
+                            .unwrap_or(file_stem)
                             .to_string();
                         if tx.send(AppEvent::AgentMetadataUpdated {
                             agent_id: agent_id.into(),
@@ -334,6 +334,42 @@ fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>)
             }
         }
     });
+}
+
+/// Scan a single project dir for .jsonl transcripts and per-session subagent dirs.
+fn scan_project_dir(
+    proj_dir: &Path,
+    cutoff: std::time::SystemTime,
+    known_files: &mut BTreeMap<PathBuf, (std::time::SystemTime, bool)>,
+) {
+    let entries = match std::fs::read_dir(proj_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if modified > cutoff {
+                known_files.entry(path).or_insert((modified, false));
+            }
+        } else if path.is_dir() {
+            // Check for flat subagents/ at project root
+            if path.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+                scan_subagents_dir(&path, cutoff, known_files);
+            } else {
+                // Per-session dir: {session_id}/subagents/
+                let subagents_dir = path.join("subagents");
+                if subagents_dir.is_dir() {
+                    scan_subagents_dir(&subagents_dir, cutoff, known_files);
+                }
+            }
+        }
+    }
 }
 
 /// Scan a subagents/ directory for .jsonl files and add them to known_files.

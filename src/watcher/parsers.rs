@@ -264,10 +264,18 @@ pub fn parse_agent_progress_tool_calls(
 /// Extract a human-readable summary from tool input JSON (mirrors send_event.sh logic).
 fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
     let summary = match tool_name {
-        "Read" | "Glob" | "Grep" => input
+        "Read" | "Glob" => input
             .get("file_path")
             .or_else(|| input.get("path"))
             .or_else(|| input.get("pattern"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        // Grep: hook script uses .pattern (the regex), not .path (the directory).
+        // Must match hook extraction order for dedup to work.
+        "Grep" => input
+            .get("pattern")
+            .or_else(|| input.get("path"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -300,12 +308,13 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
     truncate_str(&summary, 8000)
 }
 
-/// Parse Claude Code transcript JSONL incrementally, extracting assistant text blocks.
+/// Parse Claude Code transcript JSONL incrementally, extracting assistant text and tool_use blocks.
 ///
 /// # Functional Core
 /// Pure function — takes raw content + session_id, returns HookEvents.
-/// Only extracts `type: "text"` blocks from `type: "assistant"` entries.
-/// Skips `type: "thinking"` blocks (too verbose). Truncates to 4000 chars per block.
+/// Extracts `type: "text"` blocks as AssistantText and `type: "tool_use"` blocks as PreToolUse.
+/// Captures `agentId` from transcript entries for proper agent attribution.
+/// Skips `type: "thinking"` blocks (too verbose). Truncates text to 4000 chars per block.
 pub fn parse_claude_transcript_incremental(
     content: &str,
     session_id: &str,
@@ -334,7 +343,8 @@ pub fn parse_claude_transcript_incremental(
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(Utc::now);
 
-        // Extract text blocks from message.content[]
+        let agent_id = entry.get("agentId").and_then(|v| v.as_str());
+
         let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
             Some(Value::Array(blocks)) => blocks,
             _ => continue,
@@ -342,20 +352,41 @@ pub fn parse_claude_transcript_incremental(
 
         for block in content_blocks {
             let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if block_type != "text" {
-                continue;
+
+            match block_type {
+                "text" => {
+                    let text = match block.get("text").and_then(|v| v.as_str()) {
+                        Some(t) if !t.trim().is_empty() => t,
+                        _ => continue,
+                    };
+                    let truncated = truncate_str(text, 4000);
+                    let mut event = HookEvent::new(timestamp, HookEventKind::assistant_text(truncated))
+                        .with_session(session_id.to_string());
+                    if let Some(aid) = agent_id {
+                        event = event.with_agent(aid.to_string());
+                    }
+                    events.push(event);
+                }
+                "tool_use" => {
+                    let tool_name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    let input_summary = extract_tool_input_summary(&tool_name, &input);
+                    let mut event = HookEvent::new(
+                        timestamp,
+                        HookEventKind::pre_tool_use(tool_name, input_summary),
+                    )
+                    .with_session(session_id.to_string());
+                    if let Some(aid) = agent_id {
+                        event = event.with_agent(aid.to_string());
+                    }
+                    events.push(event);
+                }
+                _ => {}
             }
-
-            let text = match block.get("text").and_then(|v| v.as_str()) {
-                Some(t) if !t.trim().is_empty() => t,
-                _ => continue,
-            };
-
-            let truncated = truncate_str(text, 4000);
-
-            let event = HookEvent::new(timestamp, HookEventKind::assistant_text(truncated))
-                .with_session(session_id.to_string());
-            events.push(event);
         }
     }
 
@@ -451,22 +482,24 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
                 }
             }
             "human" | "user" => {
-                // Scan content text blocks for <command-name>X</command-name>
-                let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
-                    Some(Value::Array(blocks)) => blocks,
+                // Scan content for <command-name>X</command-name>
+                // Content can be either a string or an array of blocks
+                match entry.get("message").and_then(|m| m.get("content")) {
+                    Some(Value::Array(blocks)) => {
+                        for block in blocks {
+                            if block.get("type").and_then(|v| v.as_str()) != Some("text") {
+                                continue;
+                            }
+                            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                                extract_command_names(text, &mut meta.skills);
+                            }
+                        }
+                    }
+                    Some(Value::String(text)) => {
+                        extract_command_names(text, &mut meta.skills);
+                    }
                     _ => continue,
                 };
-
-                for block in content_blocks {
-                    if block.get("type").and_then(|v| v.as_str()) != Some("text") {
-                        continue;
-                    }
-                    let text = match block.get("text").and_then(|v| v.as_str()) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    extract_command_names(text, &mut meta.skills);
-                }
             }
             _ => {}
         }

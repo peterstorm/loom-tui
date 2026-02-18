@@ -42,6 +42,23 @@ impl HookEvent {
         self.raw = raw;
         self
     }
+
+    /// Dedup key: (session_id, tool signature).
+    /// Two events with the same key are duplicates from different sources
+    /// (hook vs transcript). The one with agent_id wins.
+    /// Timestamp is intentionally excluded: hook events use second-precision
+    /// `date -u` while transcript events carry Claude API timestamps.
+    pub fn dedup_key(&self) -> Option<(Option<&SessionId>, DedupSig<'_>)> {
+        let sig = self.kind.dedup_sig()?;
+        Some((self.session_id.as_ref(), sig))
+    }
+}
+
+/// Lightweight signature for dedup matching — avoids cloning.
+#[derive(PartialEq, Eq)]
+pub enum DedupSig<'a> {
+    PreTool { tool_name: &'a str, input: &'a str },
+    PostTool { tool_name: &'a str, result: &'a str },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +103,23 @@ pub enum HookEventKind {
 }
 
 impl HookEventKind {
+    /// Returns a dedup signature for tool events, None for non-dedupable events.
+    /// Input/result are truncated to first line to normalize differences between
+    /// hook summaries (multi-line for Edit/Write) and transcript summaries (file path only).
+    pub fn dedup_sig(&self) -> Option<DedupSig<'_>> {
+        match self {
+            Self::PreToolUse { tool_name, input_summary, .. } => {
+                let first_line = input_summary.split('\n').next().unwrap_or(input_summary);
+                Some(DedupSig::PreTool { tool_name: tool_name.as_str(), input: first_line })
+            }
+            Self::PostToolUse { tool_name, result_summary, .. } => {
+                let first_line = result_summary.split('\n').next().unwrap_or(result_summary);
+                Some(DedupSig::PostTool { tool_name: tool_name.as_str(), result: first_line })
+            }
+            _ => None,
+        }
+    }
+
     pub fn session_start() -> Self {
         Self::SessionStart
     }

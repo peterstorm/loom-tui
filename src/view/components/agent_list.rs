@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use crate::app::{AppState, PanelFocus};
-use crate::model::{Agent, Theme};
-use super::format::format_elapsed;
+use crate::model::{Agent, SessionMeta, SessionStatus, Theme};
+use super::format::{format_duration, format_elapsed};
 
 /// Render agent list panel for agent detail view (uses global state).
 pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -60,6 +60,72 @@ pub fn render_agent_list_generic(
         .highlight_style(Style::default().bg(Theme::SELECTION_BG));
 
     frame.render_widget(list, area);
+}
+
+/// Render agent list with a "Main" entry prepended at index 0.
+/// Index 0 = Main orchestrator, index n>=1 = sorted_agents[n-1].
+pub fn render_agent_list_with_main(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[&Agent],
+    selected: Option<usize>,
+    is_focused: bool,
+    session_meta: &SessionMeta,
+) {
+    let main_item = build_main_item(selected == Some(0), session_meta);
+    let agent_items = build_agent_items_generic(
+        agents,
+        selected.and_then(|i| i.checked_sub(1)),
+        None,
+    );
+
+    let mut items = vec![main_item];
+    items.extend(agent_items);
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if is_focused {
+                    Theme::ACTIVE_BORDER
+                } else {
+                    Theme::PANEL_BORDER
+                }))
+                .title("Agents"),
+        )
+        .highlight_style(Style::default().bg(Theme::SELECTION_BG));
+
+    frame.render_widget(list, area);
+}
+
+/// Build the "Main" list item for the orchestrator entry.
+fn build_main_item(is_selected: bool, meta: &SessionMeta) -> ListItem<'static> {
+    let bg = if is_selected { Theme::SELECTION_BG } else { Theme::BACKGROUND };
+    let name_style = if is_selected {
+        Style::default().fg(Theme::ACCENT).bg(bg).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::TEXT).bg(bg)
+    };
+
+    let duration_str = match meta.duration {
+        Some(d) => format_duration(Some(d)),
+        None if meta.status == SessionStatus::Active => {
+            let elapsed = Utc::now().signed_duration_since(meta.timestamp);
+            format_duration(elapsed.to_std().ok())
+        }
+        None => format_duration(None),
+    };
+
+    let spans = vec![
+        Span::styled("◈ ", Style::default().fg(Theme::ACCENT).bg(bg)),
+        Span::styled("Main", name_style),
+        Span::styled(
+            format!("  {}", duration_str),
+            Style::default().fg(Theme::MUTED_TEXT).bg(bg),
+        ),
+    ];
+
+    ListItem::new(Line::from(spans))
 }
 
 /// Pure function: build list items from an agent slice.

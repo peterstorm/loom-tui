@@ -13,7 +13,7 @@ pub mod syntax;
 pub mod task_list;
 pub mod wave_river;
 
-pub use agent_list::{render_agent_list, render_agent_list_generic};
+pub use agent_list::{render_agent_list, render_agent_list_generic, render_agent_list_with_main};
 pub use banner::render_banner;
 pub use event_stream::{render_agent_event_stream, render_event_stream};
 pub use filter_bar::render_filter_bar;

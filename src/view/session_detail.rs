@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::app::state::{AppState, PanelFocus};
 use crate::model::{Agent, AgentId, HookEvent, SessionMeta, SessionStatus, TaskGraph, Theme};
-use super::components::agent_list::render_agent_list_generic;
+use super::components::agent_list::render_agent_list_with_main;
 use super::components::format::format_duration;
 use super::components::prompt_popup::render_prompt_popup;
 
@@ -209,13 +209,24 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
     render_left_panel(frame, main_chunks[0], &data, &sorted_agents, state, is_left_focused);
 
     // Right: per-agent filtered events
-    let selected_agent = state.ui.selected_session_agent_index
-        .and_then(|idx| sorted_agents.get(idx).copied());
-    render_right_panel(frame, main_chunks[1], &data, selected_agent, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
+    // Index 0 = Main (show agent_id=None events), index n>=1 = sorted_agents[n-1]
+    let event_filter = match state.ui.selected_session_agent_index {
+        Some(0) => EventFilter::Main,
+        Some(n) => match sorted_agents.get(n - 1) {
+            Some(agent) => EventFilter::Agent(&agent.id),
+            None => EventFilter::All,
+        },
+        None => EventFilter::All,
+    };
+    let selected_agent = match state.ui.selected_session_agent_index {
+        Some(n) if n >= 1 => sorted_agents.get(n - 1).copied(),
+        _ => None,
+    };
+    render_right_panel(frame, main_chunks[1], &data, &event_filter, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
 
     render_session_detail_footer(frame, chunks[2]);
 
-    // Prompt popup overlay (rendered last, on top)
+    // Prompt popup overlay — only for agent selections (not Main)
     if state.ui.prompt_popup.is_open() {
         if let Some(agent) = selected_agent {
             let text = agent.task_description.as_deref().unwrap_or("No prompt available");
@@ -224,6 +235,7 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
                 area,
                 &agent.display_name(),
                 agent.model.as_deref(),
+                agent.agent_type.as_deref(),
                 text,
                 &agent.messages,
                 &agent.skills,
@@ -313,13 +325,13 @@ fn render_left_panel(
         .split(area);
 
     render_session_info(frame, chunks[0], data, is_focused);
-    render_agent_list_generic(
+    render_agent_list_with_main(
         frame,
         chunks[1],
         sorted_agents,
         state.ui.selected_session_agent_index,
-        None,
         is_focused,
+        data.meta,
     );
 }
 
@@ -373,31 +385,40 @@ fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>
     frame.render_widget(p, area);
 }
 
+/// Which events to show in the right panel.
+enum EventFilter<'a> {
+    /// Main orchestrator: events with no agent_id
+    Main,
+    /// Specific agent: strict match on agent_id
+    Agent(&'a AgentId),
+    /// All events (no filter)
+    All,
+}
+
 fn render_right_panel(
     frame: &mut Frame,
     area: Rect,
     data: &SessionViewData<'_>,
-    selected_agent: Option<&Agent>,
+    filter: &EventFilter<'_>,
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    // Filter events by selected agent's ID if one is selected
-    let agent_filter = selected_agent.map(|a| &a.id);
-    render_events_list(frame, area, data, agent_filter, scroll_offset, is_focused);
+    render_events_list(frame, area, data, filter, scroll_offset, is_focused);
 }
 
 fn render_events_list(
     frame: &mut Frame,
     area: Rect,
     data: &SessionViewData<'_>,
-    agent_filter: Option<&AgentId>,
+    filter: &EventFilter<'_>,
     scroll_offset: usize,
     is_focused: bool,
 ) {
     let events: Vec<&HookEvent> = data.events.iter_rev()
-        .filter(|e| match agent_filter {
-            Some(aid) => e.agent_id.as_ref() == Some(aid) || e.agent_id.is_none(),
-            None => true,
+        .filter(|e| match filter {
+            EventFilter::Main => e.agent_id.is_none(),
+            EventFilter::Agent(aid) => e.agent_id.as_ref() == Some(*aid),
+            EventFilter::All => true,
         })
         .collect();
 

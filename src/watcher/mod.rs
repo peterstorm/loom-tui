@@ -28,6 +28,12 @@ const CONFIRMED_TIMEOUT: Duration = Duration::from_secs(600);
 /// Unconfirmed sessions (no user prompt received) are removed after 30 seconds.
 const UNCONFIRMED_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Sessions that have a "result" entry in their transcript use this shorter timeout.
+const POST_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Agents are marked finished after this idle time without new transcript content.
+const AGENT_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How often we re-scan the transcript directory for new .jsonl files (session discovery).
 /// 10 × 200ms = ~2 seconds, satisfying NFR-001.
 const DIR_RESCAN_INTERVAL: u32 = 10;
@@ -101,13 +107,15 @@ fn polling_loop(
     // sessions we have already emitted SessionCompleted for
     let mut completed_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Agent idle tracking: subagent path → last time new content was seen
+    let mut agent_last_activity: BTreeMap<PathBuf, SystemTime> = BTreeMap::new();
+    let mut finished_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Sessions that have seen a "result" entry → use shorter timeout
+    let mut session_has_result: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     let mut task_graph_mtime: Option<SystemTime> = None;
     let mut scan_counter: u32 = 0;
-
-    // Initial session reply done immediately
-    if tx.send(AppEvent::ReplayComplete).is_err() {
-        return;
-    }
+    let mut replay_complete_sent = false;
 
     loop {
         std::thread::sleep(Duration::from_millis(200));
@@ -209,18 +217,33 @@ fn polling_loop(
                     }
                 }
 
+                // Detect "result" entries for faster completion
+                let has_result = content_has_result(&new_content);
+
+                if is_subagent {
+                    // Track agent activity for idle detection
+                    agent_last_activity.insert(path.clone(), SystemTime::now());
+
+                    // If result seen, immediately mark agent finished
+                    if has_result {
+                        let aid = extract_agent_id(&path);
+                        if finished_agents.insert(aid.clone()) {
+                            if tx.send(AppEvent::AgentFinished {
+                                agent_id: crate::model::AgentId::new(&aid),
+                            }).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                } else if has_result {
+                    // Main transcript: mark session for faster timeout
+                    session_has_result.insert(session_id.clone());
+                }
+
                 for mut event in events {
                     // Mark whether this is a subagent event
                     if is_subagent {
-                        // Extract agent id from filename: agent-{id}.jsonl
-                        let agent_id = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .and_then(|s| s.strip_prefix("agent-"))
-                            .unwrap_or_else(|| {
-                                path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
-                            })
-                            .to_string();
+                        let agent_id = extract_agent_id(&path);
                         if event.agent_id.is_none() {
                             event = event.with_agent(agent_id);
                         }
@@ -231,6 +254,24 @@ fn polling_loop(
                     }
                     if tx.send(AppEvent::TranscriptEventReceived(event)).is_err() {
                         return;
+                    }
+                }
+            } else if is_subagent {
+                // No new content — check idle timeout for agent completion
+                if let Some(&last_active) = agent_last_activity.get(&path) {
+                    let aid = extract_agent_id(&path);
+                    if !finished_agents.contains(&aid) {
+                        let elapsed = SystemTime::now()
+                            .duration_since(last_active)
+                            .unwrap_or(Duration::ZERO);
+                        if elapsed >= AGENT_IDLE_TIMEOUT {
+                            finished_agents.insert(aid.clone());
+                            if tx.send(AppEvent::AgentFinished {
+                                agent_id: crate::model::AgentId::new(&aid),
+                            }).is_err() {
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -255,7 +296,9 @@ fn polling_loop(
             if completed_sessions.contains(&session_id) {
                 continue;
             }
-            let timeout = if confirmed {
+            let timeout = if session_has_result.contains(&session_id) {
+                POST_RESULT_TIMEOUT
+            } else if confirmed {
                 CONFIRMED_TIMEOUT
             } else {
                 UNCONFIRMED_TIMEOUT
@@ -278,6 +321,19 @@ fn polling_loop(
         if new_mtime.is_some() && new_mtime != task_graph_mtime {
             task_graph_mtime = new_mtime;
             handle_task_graph_update(&task_graph_path, &tx);
+        }
+
+        // ----------------------------------------------------------------
+        // 6. Signal replay complete AFTER first full scan+tail cycle
+        // ----------------------------------------------------------------
+        // This must come AFTER all initial events are queued so the Tick
+        // handler in update.rs doesn't expire sessions based on stale
+        // intermediate last_event_at timestamps from chronological replay.
+        if !replay_complete_sent {
+            replay_complete_sent = true;
+            if tx.send(AppEvent::ReplayComplete).is_err() {
+                return;
+            }
         }
     }
 }
@@ -500,6 +556,34 @@ fn load_archived_session_metas(archive_dir: &PathBuf, tx: &mpsc::Sender<AppEvent
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: detect "result" entry in transcript content (session/agent completion)
+// ---------------------------------------------------------------------------
+
+/// Check if JSONL content contains a `{"type":"result",...}` entry,
+/// indicating the session or agent has completed.
+fn content_has_result(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            entry.get("type").and_then(|v| v.as_str()) == Some("result")
+        } else {
+            false
+        }
+    })
+}
+
+/// Extract agent ID from a subagent file path (e.g. `agent-abc123.jsonl` → `abc123`).
+fn extract_agent_id(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("agent-"))
+        .unwrap_or_else(|| {
+            path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
+        })
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1179,5 +1263,43 @@ mod tests {
                 path
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: content_has_result
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn content_has_result_detects_result_entry() {
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}
+{"type":"result","data":{}}"#;
+        assert!(content_has_result(content));
+    }
+
+    #[test]
+    fn content_has_result_false_when_no_result() {
+        let content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+        assert!(!content_has_result(content));
+    }
+
+    #[test]
+    fn content_has_result_false_on_empty() {
+        assert!(!content_has_result(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: extract_agent_id
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_agent_id_strips_prefix() {
+        let path = std::path::Path::new("/tmp/subagents/agent-abc123.jsonl");
+        assert_eq!(extract_agent_id(path), "abc123");
+    }
+
+    #[test]
+    fn extract_agent_id_without_prefix() {
+        let path = std::path::Path::new("/tmp/subagents/custom-name.jsonl");
+        assert_eq!(extract_agent_id(path), "custom-name");
     }
 }

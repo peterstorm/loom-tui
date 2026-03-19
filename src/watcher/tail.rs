@@ -4,7 +4,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Tracks byte offsets for append-only files to enable incremental reading.
-/// Used for events.jsonl to avoid re-parsing entire file on each update.
+/// Used for Claude Code transcript .jsonl files to avoid re-parsing entire file on each update.
 ///
 /// # Functional Core Principle
 /// This struct holds pure data (offsets). The I/O operations (`read_new_lines`)

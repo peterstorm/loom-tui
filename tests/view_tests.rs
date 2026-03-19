@@ -1,5 +1,5 @@
-use loom_tui::app::{AppState, HookStatus, PanelFocus, ViewState};
-use loom_tui::model::{HookEvent, HookEventKind, Task, TaskGraph, TaskStatus, Wave};
+use loom_tui::app::{AppState, PanelFocus, ViewState};
+use loom_tui::model::{Task, TaskGraph, TaskStatus, TranscriptEvent, TranscriptEventKind, Wave};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -59,14 +59,21 @@ fn dashboard_renders_without_panic_with_events() {
     let mut state = AppState::new();
 
     let events = vec![
-        HookEvent::new(Utc::now(), HookEventKind::session_start()),
-        HookEvent::new(
+        TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
+        TranscriptEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
+            TranscriptEventKind::ToolUse {
+                tool_name: "Read".into(),
+                input_summary: "file.rs".to_string(),
+            },
         ),
-        HookEvent::new(
+        TranscriptEvent::new(
             Utc::now(),
-            HookEventKind::post_tool_use("Read", "success".to_string(), Some(150)),
+            TranscriptEventKind::ToolResult {
+                tool_name: "Read".into(),
+                result_summary: "success".to_string(),
+                duration_ms: Some(150),
+            },
         ),
     ];
 
@@ -80,25 +87,11 @@ fn dashboard_renders_without_panic_with_events() {
 }
 
 #[test]
-fn dashboard_renders_with_hook_missing_banner() {
+fn dashboard_renders_without_panic_with_empty_events() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let state = AppState::with_hook_status(HookStatus::Missing);
-
-    terminal
-        .draw(|frame| {
-            loom_tui::view::render_dashboard(frame, &state, frame.area());
-        })
-        .unwrap();
-}
-
-#[test]
-fn dashboard_renders_with_hook_failed_banner() {
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    let state = AppState::with_hook_status(HookStatus::InstallFailed("test error".into()));
+    let state = AppState::new();
 
     terminal
         .draw(|frame| {
@@ -331,10 +324,13 @@ fn event_stream_renders_with_events() {
     let mut state = AppState::new();
 
     let events = vec![
-        HookEvent::new(Utc::now(), HookEventKind::session_start()),
-        HookEvent::new(
+        TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
+        TranscriptEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
+            TranscriptEventKind::ToolUse {
+                tool_name: "Read".into(),
+                input_summary: "file.rs".to_string(),
+            },
         ),
     ];
 
@@ -377,26 +373,13 @@ fn event_stream_renders_with_focus() {
         .unwrap();
 }
 
+/// Banner is now a stub (hook_status removed). Renders nothing but must not panic.
 #[test]
-fn banner_renders_for_missing_hooks() {
+fn banner_renders_without_panic() {
     let backend = TestBackend::new(80, 2);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let state = AppState::with_hook_status(HookStatus::Missing);
-
-    terminal
-        .draw(|frame| {
-            loom_tui::view::components::render_banner(frame, frame.area(), &state);
-        })
-        .unwrap();
-}
-
-#[test]
-fn banner_renders_for_failed_install() {
-    let backend = TestBackend::new(80, 2);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    let state = AppState::with_hook_status(HookStatus::InstallFailed("test error".into()));
+    let state = AppState::new();
 
     terminal
         .draw(|frame| {
@@ -473,10 +456,10 @@ fn dashboard_layout_with_many_events() {
 
     let mut state = AppState::new();
 
-    for i in 0..100 {
-        state.domain.events.push_back(HookEvent::new(
+    for i in 0..100usize {
+        state.domain.events.push_back(TranscriptEvent::new(
             Utc::now(),
-            HookEventKind::notification(format!("Event {}", i)),
+            TranscriptEventKind::AssistantMessage { content: format!("Event {i}") },
         ));
     }
 

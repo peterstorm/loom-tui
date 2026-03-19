@@ -6,9 +6,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use loom_tui::{
-    app::{update, AppState, HookStatus},
+    app::{update, AppState},
     event::AppEvent,
-    hook_install::{detect_hook, install_hook},
     paths::Paths,
     session,
     view::render,
@@ -33,11 +32,8 @@ fn main() -> Result<()> {
     // Resolve all file paths
     let paths = Paths::resolve(&project_root);
 
-    // Detect hook installation status
-    let hook_status = detect_hook(&project_root);
-
     // Initialize application state
-    let mut state = AppState::with_hook_status(hook_status)
+    let mut state = AppState::new()
         .with_project_path(project_root.display().to_string());
 
     // Terminal initialization
@@ -47,11 +43,8 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Resolve Claude Code transcript directory for this project
-    let transcript_dir = watcher::transcript_dir_for_project(&project_root);
-
     // Start file watchers (returns channel for receiving events)
-    let watcher_rx = watcher::start_watching(&paths, transcript_dir)
+    let watcher_rx = watcher::start_watching(&paths)
         .map_err(|e| color_eyre::eyre::eyre!("Failed to start file watcher: {}", e))?;
 
     // Main event loop (Elm Architecture)
@@ -62,7 +55,6 @@ fn main() -> Result<()> {
         &mut terminal,
         &mut state,
         &watcher_rx,
-        &project_root,
         tick_rate,
         &mut last_tick,
     );
@@ -82,7 +74,6 @@ fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
     watcher_rx: &std::sync::mpsc::Receiver<AppEvent>,
-    project_root: &std::path::Path,
     tick_rate: Duration,
     last_tick: &mut Instant,
 ) -> Result<()> {
@@ -105,23 +96,6 @@ fn run_event_loop(
             if let Event::Key(key) = event::read()? {
                 // Send key event to update
                 update(state, AppEvent::Key(key));
-
-                // Handle hook installation side effect (imperative shell)
-                if matches!(key.code, crossterm::event::KeyCode::Char('i'))
-                    && matches!(state.meta.hook_status, HookStatus::Missing) {
-                    // Send InstallHookRequested event to update (functional core)
-                    update(state, AppEvent::InstallHookRequested);
-
-                    // Perform I/O side-effect in shell
-                    match install_hook(project_root) {
-                        Ok(()) => {
-                            state.meta.hook_status = HookStatus::Installed;
-                        }
-                        Err(e) => {
-                            state.meta.hook_status = HookStatus::InstallFailed(e.to_string());
-                        }
-                    }
-                }
             }
         }
 
@@ -190,16 +164,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_status_transition() {
-        let state = AppState::with_hook_status(HookStatus::Missing);
-        assert!(matches!(state.meta.hook_status, HookStatus::Missing));
-
-        let mut state = state;
-        state.meta.hook_status = HookStatus::Installed;
-        assert!(matches!(state.meta.hook_status, HookStatus::Installed));
-    }
-
-    #[test]
     fn test_tick_duration_configuration() {
         let tick_rate = Duration::from_millis(250);
         assert_eq!(tick_rate.as_millis(), 250);
@@ -213,9 +177,7 @@ mod tests {
 
         // Verify paths are absolute
         assert!(paths.task_graph.is_absolute());
-        assert!(paths.transcripts.is_absolute());
-        assert!(paths.events.is_absolute());
-        assert!(paths.active_agents.is_absolute());
+        assert!(paths.transcript_dir.is_absolute());
         assert!(paths.archive_dir.is_absolute());
     }
 }

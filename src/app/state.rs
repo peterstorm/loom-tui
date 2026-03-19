@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
-
-use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, SessionId, SessionMeta, TaskGraph};
+use crate::model::{Agent, AgentId, ArchivedSession, SessionId, SessionMeta, TaskGraph, TranscriptEvent};
 
 /// UI state: view mode, focus, scrolling, selections, display flags
 #[derive(Debug, Clone)]
@@ -75,23 +73,14 @@ impl PromptPopupState {
     }
 }
 
-/// Buffered prompt from PreToolUse(Task), awaiting SubagentStart correlation.
-#[derive(Debug, Clone)]
-pub struct PendingTaskPrompt {
-    pub session_id: SessionId,
-    pub prompt: String,
-    pub model: Option<String>,
-    pub timestamp: DateTime<Utc>,
-}
-
 /// Domain state: agents, events, sessions, task graph
 #[derive(Debug, Clone)]
 pub struct DomainState {
     /// Active agents keyed by agent ID
     pub agents: BTreeMap<AgentId, Agent>,
 
-    /// Ring buffer of hook events (max 10,000)
-    pub events: VecDeque<HookEvent>,
+    /// Ring buffer of transcript events (max 10,000)
+    pub events: VecDeque<TranscriptEvent>,
 
     /// List of archived sessions (meta always available, full data loaded on demand)
     pub sessions: Vec<ArchivedSession>,
@@ -101,22 +90,11 @@ pub struct DomainState {
 
     /// Current task graph (None if not yet loaded)
     pub task_graph: Option<TaskGraph>,
-
-    /// Maps session_id → agent_ids for subagent event attribution.
-    /// Multiple agents can share the same parent session_id when spawned in bulk.
-    pub transcript_agent_map: BTreeMap<SessionId, Vec<AgentId>>,
-
-    /// Buffered prompts from PreToolUse(Task) awaiting SubagentStart correlation.
-    /// FIFO per session — oldest prompt matched first.
-    pub pending_task_prompts: VecDeque<PendingTaskPrompt>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
 #[derive(Debug, Clone)]
 pub struct AppMeta {
-    /// Hook installation status
-    pub hook_status: HookStatus,
-
     /// Error message ring buffer (for status bar display)
     pub errors: VecDeque<String>,
 
@@ -142,7 +120,7 @@ struct CacheState {
     /// Whether agent keys need re-sorting
     dirty: bool,
 
-    /// Cached tool counts per agent (incremented on PostToolUse events)
+    /// Cached tool counts per agent (incremented on ToolUse events)
     agent_tool_counts: BTreeMap<AgentId, usize>,
 }
 
@@ -190,22 +168,6 @@ pub enum PanelFocus {
     Right,
 }
 
-/// Hook installation status
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HookStatus {
-    /// Status unknown (not yet checked)
-    Unknown,
-
-    /// Hooks properly installed
-    Installed,
-
-    /// Hooks missing or not installed
-    Missing,
-
-    /// Hook installation failed with error
-    InstallFailed(String),
-}
-
 /// Scroll state for each scrollable panel
 #[derive(Debug, Clone, Default)]
 pub struct ScrollState {
@@ -232,7 +194,7 @@ pub struct ScrollState {
 }
 
 impl DomainState {
-    /// Iterator over active sessions confirmed by a UserPromptSubmit event.
+    /// Iterator over active sessions confirmed by a UserMessage transcript event.
     /// Filters out phantom subagent sessions from display and navigation.
     pub fn confirmed_active_sessions(&self) -> impl Iterator<Item = (&SessionId, &SessionMeta)> {
         self.active_sessions.iter().filter(|(_, m)| m.confirmed)
@@ -274,8 +236,6 @@ impl Default for DomainState {
             sessions: Vec::new(),
             active_sessions: BTreeMap::new(),
             task_graph: None,
-            transcript_agent_map: BTreeMap::new(),
-            pending_task_prompts: VecDeque::with_capacity(32),
         }
     }
 }
@@ -283,7 +243,6 @@ impl Default for DomainState {
 impl Default for AppMeta {
     fn default() -> Self {
         Self {
-            hook_status: HookStatus::Unknown,
             errors: VecDeque::with_capacity(100),
             started_at: Instant::now(),
             project_path: String::new(),
@@ -326,17 +285,6 @@ impl AppState {
             ui: UiState {
                 view,
                 ..UiState::default()
-            },
-            ..Self::new()
-        }
-    }
-
-    /// Create new state with custom hook status
-    pub fn with_hook_status(status: HookStatus) -> Self {
-        Self {
-            meta: AppMeta {
-                hook_status: status,
-                ..AppMeta::default()
             },
             ..Self::new()
         }
@@ -386,7 +334,7 @@ impl AppState {
         self.cache.agent_tool_counts.get(id).copied().unwrap_or(0)
     }
 
-    /// Increment tool count for an agent (called on PostToolUse events).
+    /// Increment tool count for an agent (called on ToolUse events).
     pub(crate) fn increment_tool_count(&mut self, id: &AgentId) {
         *self.cache.agent_tool_counts.entry(id.clone()).or_insert(0) += 1;
     }
@@ -427,7 +375,6 @@ mod tests {
         assert!(state.ui.auto_scroll);
         assert!(state.ui.filter.is_none());
         assert!(!state.ui.show_help);
-        assert!(matches!(state.meta.hook_status, HookStatus::Unknown));
         assert!(state.meta.errors.is_empty());
         assert!(!state.meta.should_quit);
         assert!(state.ui.selected_task_index.is_none());
@@ -444,27 +391,12 @@ mod tests {
     fn test_app_state_with_view() {
         let state = AppState::with_view(ViewState::Sessions);
         assert!(matches!(state.ui.view, ViewState::Sessions));
-        assert!(matches!(state.meta.hook_status, HookStatus::Unknown));
     }
 
     #[test]
     fn test_app_state_with_view_agent_detail() {
         let state = AppState::with_view(ViewState::AgentDetail);
         assert!(matches!(state.ui.view, ViewState::AgentDetail));
-    }
-
-    #[test]
-    fn test_app_state_with_hook_status() {
-        let state = AppState::with_hook_status(HookStatus::Installed);
-        assert!(matches!(state.meta.hook_status, HookStatus::Installed));
-    }
-
-    #[test]
-    fn test_app_state_with_hook_status_failed() {
-        let error_msg = "Permission denied".to_string();
-        let state =
-            AppState::with_hook_status(HookStatus::InstallFailed(error_msg.clone()));
-        assert!(matches!(&state.meta.hook_status, HookStatus::InstallFailed(msg) if msg == &error_msg));
     }
 
     #[test]
@@ -511,23 +443,11 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_status_equality() {
-        assert_eq!(HookStatus::Unknown, HookStatus::Unknown);
-        assert_eq!(HookStatus::Installed, HookStatus::Installed);
-        assert_eq!(HookStatus::Missing, HookStatus::Missing);
-        assert_eq!(
-            HookStatus::InstallFailed("error".to_string()),
-            HookStatus::InstallFailed("error".to_string())
-        );
-        assert_ne!(HookStatus::Unknown, HookStatus::Installed);
-    }
-
-    #[test]
     fn test_app_state_clone() {
         let state = AppState::new();
         let cloned = state.clone();
         assert!(matches!(cloned.ui.view, ViewState::Dashboard));
-        assert!(matches!(cloned.meta.hook_status, HookStatus::Unknown));
+        assert!(cloned.meta.errors.is_empty());
     }
 
     #[test]
@@ -677,5 +597,25 @@ mod tests {
 
         state.recompute_sorted_keys();
         assert!(!state.is_cache_dirty());
+    }
+
+    #[test]
+    fn domain_state_no_transcript_agent_map() {
+        // Verify removed fields are gone (compile test)
+        let state = DomainState::default();
+        assert!(state.agents.is_empty());
+        assert!(state.events.is_empty());
+        assert!(state.sessions.is_empty());
+        assert!(state.active_sessions.is_empty());
+        assert!(state.task_graph.is_none());
+    }
+
+    #[test]
+    fn app_meta_has_expected_defaults() {
+        // Verify removed fields are gone (compile test)
+        let meta = AppMeta::default();
+        assert!(meta.errors.is_empty());
+        assert!(!meta.should_quit);
+        assert!(!meta.replay_complete);
     }
 }

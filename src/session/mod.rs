@@ -6,7 +6,7 @@ use std::time::Instant;
 use serde::Deserialize;
 
 use crate::error::SessionError;
-use crate::model::{Agent, AgentId, HookEvent, SessionArchive, SessionMeta, TaskGraph};
+use crate::model::{Agent, AgentId, SessionArchive, SessionMeta, TaskGraph, TranscriptEvent};
 
 // ============================================================================
 // FUNCTIONAL CORE: Pure functions for serialization and data transformation
@@ -71,7 +71,7 @@ pub fn extract_metadata(archive: &SessionArchive) -> SessionMeta {
 ///
 /// # Arguments
 /// * `task_graph` - Optional task graph (project-level, not session-specific)
-/// * `events` - Ring buffer of hook events
+/// * `events` - Ring buffer of transcript events
 /// * `agents` - Active agents keyed by agent ID
 /// * `meta` - Session metadata (contains session_id for filtering)
 ///
@@ -79,7 +79,7 @@ pub fn extract_metadata(archive: &SessionArchive) -> SessionMeta {
 /// Session archive ready for serialization (contains only data for this session)
 pub fn build_archive(
     task_graph: Option<&TaskGraph>,
-    events: &VecDeque<HookEvent>,
+    events: &VecDeque<TranscriptEvent>,
     agents: &BTreeMap<AgentId, Agent>,
     meta: &SessionMeta,
 ) -> SessionArchive {
@@ -143,12 +143,12 @@ pub fn save_session(path: &Path, archive: &SessionArchive) -> Result<PathBuf, Se
     // Create parent directory if needed (I/O)
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| SessionError::Io { path: parent.display().to_string(), source: e })?;
+            .map_err(|e| SessionError::Io { path: parent.display().to_string(), message: e.to_string() })?;
     }
 
     // Write to disk (I/O)
     fs::write(path, &content)
-        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })?;
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })?;
 
     Ok(path.to_path_buf())
 }
@@ -165,7 +165,7 @@ pub fn save_session(path: &Path, archive: &SessionArchive) -> Result<PathBuf, Se
 pub fn load_session(path: &Path) -> Result<SessionArchive, SessionError> {
     // Read from disk (I/O)
     let content = fs::read_to_string(path)
-        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })?;
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })?;
 
     // Deserialize (functional core)
     deserialize_session(&content)
@@ -194,7 +194,7 @@ pub fn list_sessions(dir: &Path) -> Result<(Vec<SessionArchive>, Vec<SessionErro
     }
 
     let entries = fs::read_dir(dir)
-        .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
+        .map_err(|e| SessionError::Io { path: dir.display().to_string(), message: e.to_string() })?;
 
     let mut sessions = Vec::new();
     let mut errors = Vec::new();
@@ -205,7 +205,7 @@ pub fn list_sessions(dir: &Path) -> Result<(Vec<SessionArchive>, Vec<SessionErro
             Err(e) => {
                 errors.push(SessionError::Io {
                     path: dir.display().to_string(),
-                    source: e,
+                    message: e.to_string(),
                 });
                 continue;
             }
@@ -250,7 +250,7 @@ pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Ve
     }
 
     let entries = fs::read_dir(dir)
-        .map_err(|e| SessionError::Io { path: dir.display().to_string(), source: e })?;
+        .map_err(|e| SessionError::Io { path: dir.display().to_string(), message: e.to_string() })?;
 
     let mut metas = Vec::new();
     let mut errors = Vec::new();
@@ -261,7 +261,7 @@ pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Ve
             Err(e) => {
                 errors.push(SessionError::Io {
                     path: dir.display().to_string(),
-                    source: e,
+                    message: e.to_string(),
                 });
                 continue;
             }
@@ -278,7 +278,7 @@ pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Ve
             Err(e) => {
                 errors.push(SessionError::Io {
                     path: path.display().to_string(),
-                    source: e,
+                    message: e.to_string(),
                 });
                 continue;
             }
@@ -306,7 +306,7 @@ pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Ve
 /// * `Err(SessionError)` - I/O error
 pub fn delete_session(path: &Path) -> Result<(), SessionError> {
     fs::remove_file(path)
-        .map_err(|e| SessionError::Io { path: path.display().to_string(), source: e })
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })
 }
 
 /// Auto-save tick: save session if interval elapsed.
@@ -342,7 +342,7 @@ pub fn auto_save_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HookEvent, HookEventKind, SessionStatus, TaskGraph};
+    use crate::model::{SessionStatus, TaskGraph, TranscriptEvent, TranscriptEventKind};
     use chrono::Utc;
     use std::collections::{BTreeMap, VecDeque};
     use std::time::Duration;
@@ -458,17 +458,17 @@ mod tests {
         let mut events = VecDeque::new();
 
         // Event matching session_id
-        let mut e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
-        e1.session_id = Some(meta.id.clone());
+        let e1 = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage)
+            .with_session(meta.id.clone());
         events.push_back(e1);
 
         // Event with different session_id
-        let mut e2 = HookEvent::new(Utc::now(), HookEventKind::notification("test".into()));
-        e2.session_id = Some("s2".into());
+        let e2 = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage)
+            .with_session("s2");
         events.push_back(e2);
 
         // Event with no session_id
-        let e3 = HookEvent::new(Utc::now(), HookEventKind::notification("test2".into()));
+        let e3 = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage);
         events.push_back(e3);
 
         let archive = build_archive(None, &events, &BTreeMap::new(), &meta);

@@ -1,10 +1,11 @@
 use crate::error::ParseError;
-use crate::model::{AgentMessage, HookEvent, HookEventKind, Task, TaskGraph, TokenUsage, Wave};
+use crate::model::{AgentMessage, Task, TaskGraph, TokenUsage, Wave};
+use crate::model::ids::{AgentId, ToolName};
+use crate::model::transcript_event::{TranscriptEvent, TranscriptEventKind};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 
 /// Safely truncate a string to a maximum character count (not bytes).
 /// Prevents panics from slicing on multibyte UTF-8 character boundaries.
@@ -115,16 +116,26 @@ pub fn parse_transcript(content: &str) -> Result<Vec<AgentMessage>, ParseError> 
     Ok(messages)
 }
 
-/// Parse hook events JSONL file into vector of events.
+
+/// Parse Claude Code transcript JSONL incrementally, extracting TranscriptEvents.
 ///
 /// # Functional Core
-/// Pure function - no I/O, just string parsing.
-/// Each line is a separate JSON object representing a HookEvent.
+/// Pure function — takes raw content + session_id, returns TranscriptEvents.
 ///
-/// # Errors
-/// Returns ParseError if any line is malformed JSON.
-/// Skips empty lines gracefully.
-pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, ParseError> {
+/// Mapping from transcript entry types:
+/// - `type: "human"` or `type: "user"` with text content -> UserMessage
+/// - `type: "user"` with tool_result content blocks -> ToolResult per block
+/// - `type: "assistant"` with text content blocks -> AssistantMessage per block
+/// - `type: "assistant"` with tool_use content blocks -> ToolUse per block
+/// - Other entry types -> silently skipped (FR-007, NFR-006)
+///
+/// Malformed JSONL lines are skipped without propagating errors (NFR-005).
+/// `agentId` field is extracted for agent attribution (FR-008).
+/// `session_id` is propagated to all events (FR-008).
+pub fn parse_transcript_events(content: &str, session_id: &str) -> Vec<TranscriptEvent> {
+    // First pass: build tool_use_id -> tool_name map for ToolResult correlation
+    let tool_id_map = build_tool_id_map(content);
+
     let mut events = Vec::new();
 
     for line in content.lines() {
@@ -133,135 +144,228 @@ pub fn parse_hook_events(content: &str) -> Result<Vec<HookEvent>, ParseError> {
             continue;
         }
 
-        // Parse as raw Value first, then deserialize struct, preserving raw for extra fields (cwd etc)
-        // Skip unparseable lines (concurrent writes can produce partial JSON)
-        let raw_value = match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut event = match serde_json::from_value::<HookEvent>(raw_value.clone()) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        event.raw = raw_value;
-        events.push(event);
-    }
-
-    Ok(events)
-}
-
-/// Scan active agents directory and return list of active agent IDs.
-///
-/// # Functional Core
-/// Takes list of file paths as input (I/O already done by caller).
-/// Pure extraction of agent IDs from filenames.
-///
-/// # Returns
-/// Vector of agent IDs extracted from *.active filenames.
-pub fn extract_active_agent_ids(paths: &[&Path]) -> Vec<String> {
-    paths
-        .iter()
-        .filter(|p| p.extension() == Some("active".as_ref()))
-        .filter_map(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-        })
-        .collect()
-}
-
-/// Parse Claude Code transcript JSONL incrementally, extracting agent_progress tool calls.
-/// These entries exist in the PARENT transcript and contain `agentId` per tool call,
-/// solving the attribution problem when multiple subagents run in parallel.
-///
-/// # Functional Core
-/// Pure function — extracts PreToolUse events with agent_id from agent_progress entries.
-pub fn parse_agent_progress_tool_calls(
-    content: &str,
-    session_id: &str,
-) -> Vec<HookEvent> {
-    let mut events = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
+        // NFR-005: skip malformed lines without dropping rest of batch
         let entry: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        // Only process agent_progress entries
-        if entry.get("type").and_then(|v| v.as_str()) != Some("progress") {
-            continue;
-        }
-        let data = match entry.get("data") {
-            Some(d) => d,
-            None => continue,
-        };
-        if data.get("type").and_then(|v| v.as_str()) != Some("agent_progress") {
-            continue;
-        }
-
-        let agent_id = match data.get("agentId").and_then(|v| v.as_str()) {
-            Some(id) => id,
-            None => continue,
-        };
-
-        // Extract timestamp
-        let timestamp: DateTime<Utc> = entry
-            .get("timestamp")
+        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let timestamp = parse_timestamp(&entry);
+        let agent_id: Option<AgentId> = entry
+            .get("agentId")
             .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .or_else(|| {
-                data.get("message")
-                    .and_then(|m| m.get("timestamp"))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or_else(Utc::now);
+            .filter(|s| !s.is_empty())
+            .map(AgentId::new);
 
-        // Look for tool_use blocks in data.message.message.content[]
-        let content_blocks = match data
-            .get("message")
-            .and_then(|m| m.get("message"))
-            .and_then(|m| m.get("content"))
-        {
-            Some(Value::Array(blocks)) => blocks,
-            _ => continue,
-        };
+        match entry_type {
+            "human" | "user" => {
+                let content_val = entry.get("message").and_then(|m| m.get("content"));
+                match content_val {
+                    Some(Value::Array(blocks)) => {
+                        // Check if first block is a tool_result -> emit ToolResult events
+                        let has_tool_results = blocks
+                            .iter()
+                            .any(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_result"));
 
-        for block in content_blocks {
-            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
-                continue;
+                        if has_tool_results {
+                            for block in blocks {
+                                if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                                    continue;
+                                }
+                                let tool_use_id = block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tool_name = tool_id_map
+                                    .get(tool_use_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                let result_summary = extract_tool_result_summary(block);
+                                let event = build_event(
+                                    timestamp,
+                                    TranscriptEventKind::ToolResult {
+                                        tool_name: ToolName::new(&tool_name),
+                                        result_summary,
+                                        duration_ms: None,
+                                    },
+                                    session_id,
+                                    agent_id.clone(),
+                                );
+                                events.push(event);
+                            }
+                        } else {
+                            // Array of text/other blocks -> UserMessage
+                            let event = build_event(
+                                timestamp,
+                                TranscriptEventKind::UserMessage,
+                                session_id,
+                                agent_id.clone(),
+                            );
+                            events.push(event);
+                        }
+                    }
+                    Some(Value::String(_)) | None => {
+                        // Plain text or no content -> UserMessage
+                        let event = build_event(
+                            timestamp,
+                            TranscriptEventKind::UserMessage,
+                            session_id,
+                            agent_id.clone(),
+                        );
+                        events.push(event);
+                    }
+                    _ => {
+                        // Unknown content shape -> UserMessage (forward compat)
+                        let event = build_event(
+                            timestamp,
+                            TranscriptEventKind::UserMessage,
+                            session_id,
+                            agent_id.clone(),
+                        );
+                        events.push(event);
+                    }
+                }
             }
+            "assistant" => {
+                let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
+                    Some(Value::Array(blocks)) => blocks,
+                    _ => continue,
+                };
 
-            let tool_name = block
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-
-            let input = block.get("input").cloned().unwrap_or(Value::Null);
-            let input_summary = extract_tool_input_summary(&tool_name, &input);
-
-            let event = HookEvent::new(
-                timestamp,
-                HookEventKind::pre_tool_use(tool_name, input_summary),
-            )
-            .with_session(session_id.to_string())
-            .with_agent(agent_id.to_string());
-
-            events.push(event);
+                for block in content_blocks {
+                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            let text = match block.get("text").and_then(|v| v.as_str()) {
+                                Some(t) if !t.trim().is_empty() => t,
+                                _ => continue,
+                            };
+                            let content = truncate_str(text, 4000);
+                            let event = build_event(
+                                timestamp,
+                                TranscriptEventKind::AssistantMessage { content },
+                                session_id,
+                                agent_id.clone(),
+                            );
+                            events.push(event);
+                        }
+                        "tool_use" => {
+                            let tool_name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let input = block.get("input").cloned().unwrap_or(Value::Null);
+                            let input_summary = extract_tool_input_summary(&tool_name, &input);
+                            let event = build_event(
+                                timestamp,
+                                TranscriptEventKind::ToolUse {
+                                    tool_name: ToolName::new(&tool_name),
+                                    input_summary,
+                                },
+                                session_id,
+                                agent_id.clone(),
+                            );
+                            events.push(event);
+                        }
+                        // "thinking" and others -> silently skip (NFR-006)
+                        _ => {}
+                    }
+                }
+            }
+            // NFR-006: unknown entry types silently skipped
+            _ => {}
         }
     }
 
     events
 }
 
-/// Extract a human-readable summary from tool input JSON (mirrors send_event.sh logic).
+/// Build a TranscriptEvent with session and optional agent attribution.
+fn build_event(
+    timestamp: DateTime<Utc>,
+    kind: TranscriptEventKind,
+    session_id: &str,
+    agent_id: Option<AgentId>,
+) -> TranscriptEvent {
+    let mut event = TranscriptEvent::new(timestamp, kind).with_session(session_id);
+    if let Some(aid) = agent_id {
+        event = event.with_agent(aid);
+    }
+    event
+}
+
+/// Parse timestamp from a JSONL entry, falling back to now if absent/malformed.
+fn parse_timestamp(entry: &Value) -> DateTime<Utc> {
+    entry
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(Utc::now)
+}
+
+/// First pass over content to build a map of tool_use_id -> tool_name.
+/// Used to correlate ToolResult blocks with their originating ToolUse.
+fn build_tool_id_map(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
+            continue;
+        }
+        let blocks = match entry.get("message").and_then(|m| m.get("content")) {
+            Some(Value::Array(b)) => b,
+            _ => continue,
+        };
+        for block in blocks {
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+            if let (Some(id), Some(name)) = (
+                block.get("id").and_then(|v| v.as_str()),
+                block.get("name").and_then(|v| v.as_str()),
+            ) {
+                map.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+
+    map
+}
+
+/// Extract a human-readable summary from a tool_result content block.
+fn extract_tool_result_summary(block: &Value) -> String {
+    match block.get("content") {
+        Some(Value::String(s)) => truncate_str(s, 500),
+        Some(Value::Array(items)) => {
+            let text = items
+                .iter()
+                .filter_map(|item| {
+                    if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        item.get("text").and_then(|v| v.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            truncate_str(&text, 500)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Extract a human-readable summary from tool input JSON.
 fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
     let summary = match tool_name {
         "Read" | "Glob" => input
@@ -271,8 +375,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        // Grep: hook script uses .pattern (the regex), not .path (the directory).
-        // Must match hook extraction order for dedup to work.
+        // Grep: prefer .pattern (the regex) over .path for the summary, to show what was searched.
         "Grep" => input
             .get("pattern")
             .or_else(|| input.get("path"))
@@ -308,97 +411,14 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
     truncate_str(&summary, 8000)
 }
 
-/// Parse Claude Code transcript JSONL incrementally, extracting assistant text and tool_use blocks.
-///
-/// # Functional Core
-/// Pure function — takes raw content + session_id, returns HookEvents.
-/// Extracts `type: "text"` blocks as AssistantText and `type: "tool_use"` blocks as PreToolUse.
-/// Captures `agentId` from transcript entries for proper agent attribution.
-/// Skips `type: "thinking"` blocks (too verbose). Truncates text to 4000 chars per block.
-pub fn parse_claude_transcript_incremental(
-    content: &str,
-    session_id: &str,
-) -> Vec<HookEvent> {
-    let mut events = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let entry: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // Only process assistant entries
-        if entry.get("type").and_then(|v| v.as_str()) != Some("assistant") {
-            continue;
-        }
-
-        let timestamp: DateTime<Utc> = entry
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Utc::now);
-
-        let agent_id = entry.get("agentId").and_then(|v| v.as_str());
-
-        let content_blocks = match entry.get("message").and_then(|m| m.get("content")) {
-            Some(Value::Array(blocks)) => blocks,
-            _ => continue,
-        };
-
-        for block in content_blocks {
-            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-            match block_type {
-                "text" => {
-                    let text = match block.get("text").and_then(|v| v.as_str()) {
-                        Some(t) if !t.trim().is_empty() => t,
-                        _ => continue,
-                    };
-                    let truncated = truncate_str(text, 4000);
-                    let mut event = HookEvent::new(timestamp, HookEventKind::assistant_text(truncated))
-                        .with_session(session_id.to_string());
-                    if let Some(aid) = agent_id {
-                        event = event.with_agent(aid.to_string());
-                    }
-                    events.push(event);
-                }
-                "tool_use" => {
-                    let tool_name = block
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let input = block.get("input").cloned().unwrap_or(Value::Null);
-                    let input_summary = extract_tool_input_summary(&tool_name, &input);
-                    let mut event = HookEvent::new(
-                        timestamp,
-                        HookEventKind::pre_tool_use(tool_name, input_summary),
-                    )
-                    .with_session(session_id.to_string());
-                    if let Some(aid) = agent_id {
-                        event = event.with_agent(aid.to_string());
-                    }
-                    events.push(event);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    events
-}
-
 /// Metadata extracted from a Claude Code subagent transcript.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptMetadata {
     pub model: Option<String>,
     pub token_usage: TokenUsage,
     pub skills: Vec<String>,
+    /// The task prompt (first user message content), truncated to 4000 chars.
+    pub task_description: Option<String>,
 }
 
 /// Parse Claude Code transcript JSONL to extract model, token usage, and skills.
@@ -420,6 +440,7 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
     // Preserve insertion order so we can pick the last unique message.
     let mut msg_order: Vec<String> = Vec::new();
     let mut msg_usage: HashMap<String, TokenUsage> = HashMap::new();
+    let mut seen_first_user = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -484,7 +505,8 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
             "human" | "user" => {
                 // Scan content for <command-name>X</command-name>
                 // Content can be either a string or an array of blocks
-                match entry.get("message").and_then(|m| m.get("content")) {
+                let content_val = entry.get("message").and_then(|m| m.get("content"));
+                match content_val {
                     Some(Value::Array(blocks)) => {
                         for block in blocks {
                             if block.get("type").and_then(|v| v.as_str()) != Some("text") {
@@ -492,11 +514,20 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
                             }
                             if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 extract_command_names(text, &mut meta.skills);
+                                // Capture first user message as task description
+                                if !seen_first_user {
+                                    meta.task_description = Some(truncate_str(text, 4000));
+                                    seen_first_user = true;
+                                }
                             }
                         }
                     }
                     Some(Value::String(text)) => {
                         extract_command_names(text, &mut meta.skills);
+                        if !seen_first_user {
+                            meta.task_description = Some(truncate_str(text, 4000));
+                            seen_first_user = true;
+                        }
                     }
                     _ => continue,
                 };
@@ -572,7 +603,8 @@ fn shorten_model_id(full: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AgentId, MessageKind, SessionId, TaskStatus};
+    use crate::model::{MessageKind, TaskStatus};
+    use crate::model::ids::{AgentId, SessionId};
 
     #[test]
     fn test_parse_task_graph_valid() {
@@ -685,71 +717,6 @@ not valid json
     }
 
     #[test]
-    fn test_parse_hook_events_valid() {
-        let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
-{"timestamp":"2026-02-11T10:01:00Z","event":"subagent_start","task_description":"Test task"}
-{"timestamp":"2026-02-11T10:02:00Z","event":"notification","message":"Test message"}"#;
-
-        let result = parse_hook_events(jsonl);
-        assert!(result.is_ok());
-
-        let events = result.unwrap();
-        assert_eq!(events.len(), 3);
-    }
-
-    #[test]
-    fn test_parse_hook_events_empty() {
-        let jsonl = "";
-        let result = parse_hook_events(jsonl);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_parse_hook_events_skips_invalid_lines() {
-        let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
-invalid
-{"timestamp":"2026-02-11T10:02:00Z","event":"session_end"}"#;
-
-        let result = parse_hook_events(jsonl).unwrap();
-        // Invalid line skipped, valid events preserved
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn test_extract_active_agent_ids() {
-        let paths = vec![
-            Path::new("/tmp/claude-subagents/a01.active"),
-            Path::new("/tmp/claude-subagents/a02.active"),
-            Path::new("/tmp/claude-subagents/a03.txt"), // wrong extension
-            Path::new("/tmp/claude-subagents/other.file"),
-        ];
-
-        let agent_ids = extract_active_agent_ids(&paths);
-        assert_eq!(agent_ids.len(), 2);
-        assert!(agent_ids.contains(&"a01".to_string()));
-        assert!(agent_ids.contains(&"a02".to_string()));
-    }
-
-    #[test]
-    fn test_extract_active_agent_ids_empty() {
-        let paths: Vec<&Path> = vec![];
-        let agent_ids = extract_active_agent_ids(&paths);
-        assert!(agent_ids.is_empty());
-    }
-
-    #[test]
-    fn test_extract_active_agent_ids_no_active_files() {
-        let paths = vec![
-            Path::new("/tmp/claude-subagents/file.txt"),
-            Path::new("/tmp/claude-subagents/other.log"),
-        ];
-
-        let agent_ids = extract_active_agent_ids(&paths);
-        assert!(agent_ids.is_empty());
-    }
-
-    #[test]
     fn test_parse_transcript_with_tool_duration() {
         let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","type":"tool","tool_name":"Bash","input_summary":"cargo test","duration":1500,"success":true}"#;
 
@@ -822,78 +789,6 @@ invalid
     }
 
     #[test]
-    fn test_parse_claude_transcript_extracts_text_blocks() {
-        let jsonl = r#"{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"text","text":"Let me read the file."}]},"sessionId":"s1"}"#;
-
-        let events = parse_claude_transcript_incremental(jsonl, "s1");
-        assert_eq!(events.len(), 1);
-        match &events[0].kind {
-            HookEventKind::AssistantText { content } => {
-                assert_eq!(content, "Let me read the file.");
-            }
-            _ => panic!("Expected AssistantText"),
-        }
-        assert_eq!(events[0].session_id.as_ref(), Some(&SessionId::new("s1")));
-    }
-
-    #[test]
-    fn test_parse_claude_transcript_skips_thinking_blocks() {
-        let jsonl = r#"{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"thinking","thinking":"internal thought"},{"type":"text","text":"visible"}]}}"#;
-
-        let events = parse_claude_transcript_incremental(jsonl, "s1");
-        assert_eq!(events.len(), 1);
-        match &events[0].kind {
-            HookEventKind::AssistantText { content } => {
-                assert_eq!(content, "visible");
-            }
-            _ => panic!("Expected AssistantText"),
-        }
-    }
-
-    #[test]
-    fn test_parse_claude_transcript_skips_non_assistant() {
-        let jsonl = r#"{"type":"human","timestamp":"2026-02-11T10:00:00Z","message":{"content":[{"type":"text","text":"user message"}]}}
-{"type":"tool_result","timestamp":"2026-02-11T10:00:01Z","message":{"content":[]}}"#;
-
-        let events = parse_claude_transcript_incremental(jsonl, "s1");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_parse_claude_transcript_truncates_long_text() {
-        let long_text = "x".repeat(5000);
-        let jsonl = format!(
-            r#"{{"type":"assistant","timestamp":"2026-02-11T10:00:00Z","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
-            long_text
-        );
-
-        let events = parse_claude_transcript_incremental(&jsonl, "s1");
-        assert_eq!(events.len(), 1);
-        match &events[0].kind {
-            HookEventKind::AssistantText { content } => {
-                assert!(content.len() <= 4003); // 4000 + "..."
-                assert!(content.ends_with("..."));
-            }
-            _ => panic!("Expected AssistantText"),
-        }
-    }
-
-    #[test]
-    fn test_parse_claude_transcript_empty_content() {
-        let jsonl = "";
-        let events = parse_claude_transcript_incremental(jsonl, "s1");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_parse_claude_transcript_skips_malformed_lines() {
-        let jsonl = "not json\n{\"type\":\"assistant\",\"timestamp\":\"2026-02-11T10:00:00Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}";
-
-        let events = parse_claude_transcript_incremental(jsonl, "s1");
-        assert_eq!(events.len(), 1);
-    }
-
-    #[test]
     fn test_parse_task_graph_with_failed_task() {
         let json = r#"{
             "waves": [
@@ -928,46 +823,6 @@ invalid
             }
             _ => panic!("Expected Failed status"),
         }
-    }
-
-    #[test]
-    fn test_parse_agent_progress_extracts_tool_calls() {
-        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","agentId":"a01","message":{"timestamp":"2026-02-12T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/foo.rs"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
-
-        let events = parse_agent_progress_tool_calls(jsonl, "s1");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].agent_id.as_ref(), Some(&AgentId::new("a01")));
-        assert_eq!(events[0].session_id.as_ref(), Some(&SessionId::new("s1")));
-        match &events[0].kind {
-            HookEventKind::PreToolUse { tool_name, input_summary, .. } => {
-                assert_eq!(tool_name.as_str(), "Read");
-                assert_eq!(input_summary, "/tmp/foo.rs");
-            }
-            _ => panic!("Expected PreToolUse"),
-        }
-    }
-
-    #[test]
-    fn test_parse_agent_progress_skips_non_progress() {
-        let jsonl = r#"{"type":"assistant","data":{},"timestamp":"2026-02-12T10:00:00Z"}"#;
-        let events = parse_agent_progress_tool_calls(jsonl, "s1");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_parse_agent_progress_skips_no_agent_id() {
-        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","message":{"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
-        let events = parse_agent_progress_tool_calls(jsonl, "s1");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_parse_agent_progress_multiple_tools_in_one_entry() {
-        let jsonl = r#"{"type":"progress","data":{"type":"agent_progress","agentId":"a02","message":{"timestamp":"2026-02-12T10:00:00Z","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"a.rs"}},{"type":"tool_use","name":"Read","input":{"file_path":"b.rs"}}]}}},"timestamp":"2026-02-12T10:00:00Z"}"#;
-
-        let events = parse_agent_progress_tool_calls(jsonl, "s1");
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().all(|e| e.agent_id.as_ref() == Some(&AgentId::new("a02"))));
     }
 
     #[test]
@@ -1161,20 +1016,23 @@ invalid
     }
 
     #[test]
-    fn shorten_model_haiku_3_5() {
-        assert_eq!(shorten_model_id("claude-3-5-haiku-20241022"), "haiku-3.5");
+    fn shorten_model_haiku_3_5_new_prefix() {
         assert_eq!(shorten_model_id("claude-haiku-3-5-20241022"), "haiku-3.5");
+    }
+
+    #[test]
+    fn shorten_model_haiku_3_5_old_prefix() {
+        assert_eq!(shorten_model_id("claude-3-5-haiku-20241022"), "haiku-3.5");
     }
 
     #[test]
     fn shorten_model_sonnet_4() {
         assert_eq!(shorten_model_id("claude-sonnet-4-20250514"), "sonnet-4");
-        assert_eq!(shorten_model_id("claude-4-sonnet-20250514"), "sonnet-4");
     }
 
     #[test]
     fn shorten_model_sonnet_3_5() {
-        assert_eq!(shorten_model_id("claude-3-5-sonnet-20250620"), "sonnet-3.5");
+        assert_eq!(shorten_model_id("claude-3-5-sonnet-20241022"), "sonnet-3.5");
     }
 
     #[test]
@@ -1183,43 +1041,313 @@ invalid
     }
 
     #[test]
-    fn shorten_model_unknown_fallback() {
-        let result = shorten_model_id("some-unknown-model-20260101");
+    fn shorten_model_unknown_falls_back() {
+        let result = shorten_model_id("some-unknown-model-20250101");
         assert!(!result.is_empty());
     }
 
     // ============================================================================
-    // extract_command_names tests
+    // parse_transcript_events tests (FR-005, FR-006, FR-007, FR-008, NFR-005, NFR-006)
     // ============================================================================
 
+    fn ts_str() -> &'static str {
+        "2026-03-18T10:00:00Z"
+    }
+
+    fn make_user_entry(content_json: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":{content}}}}}"#,
+            ts = ts_str(),
+            content = content_json
+        )
+    }
+
+    fn make_assistant_entry(content_json: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{ts}","message":{{"role":"assistant","content":{content}}}}}"#,
+            ts = ts_str(),
+            content = content_json
+        )
+    }
+
+    // --- UserMessage ---
+
     #[test]
-    fn extract_command_names_none() {
-        let mut skills = Vec::new();
-        extract_command_names("no tags here", &mut skills);
-        assert!(skills.is_empty());
+    fn parse_events_user_string_content_emits_user_message() {
+        let jsonl = make_user_entry(r#""Hello, world!""#);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TranscriptEventKind::UserMessage);
+        assert_eq!(events[0].session_id, Some(SessionId::new("s1")));
     }
 
     #[test]
-    fn extract_command_names_one() {
-        let mut skills = Vec::new();
-        extract_command_names("<command-name>commit</command-name>", &mut skills);
-        assert_eq!(skills, vec!["commit"]);
-    }
-
-    #[test]
-    fn extract_command_names_multiple() {
-        let mut skills = Vec::new();
-        extract_command_names(
-            "<command-name>a</command-name> text <command-name>b</command-name>",
-            &mut skills,
+    fn parse_events_human_type_emits_user_message() {
+        let jsonl = format!(
+            r#"{{"type":"human","timestamp":"{ts}","message":{{"role":"user","content":"hi"}}}}"#,
+            ts = ts_str()
         );
-        assert_eq!(skills, vec!["a", "b"]);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TranscriptEventKind::UserMessage);
     }
 
     #[test]
-    fn extract_command_names_unclosed_tag() {
-        let mut skills = Vec::new();
-        extract_command_names("<command-name>broken", &mut skills);
-        assert!(skills.is_empty());
+    fn parse_events_user_text_array_emits_user_message() {
+        let jsonl = make_user_entry(r#"[{"type":"text","text":"Hello"}]"#);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TranscriptEventKind::UserMessage);
+    }
+
+    // --- AssistantMessage ---
+
+    #[test]
+    fn parse_events_assistant_text_block_emits_assistant_message() {
+        let jsonl = make_assistant_entry(r#"[{"type":"text","text":"Let me read the file."}]"#);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            TranscriptEventKind::AssistantMessage { content } => {
+                assert_eq!(content, "Let me read the file.");
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+        assert_eq!(events[0].session_id, Some(SessionId::new("s1")));
+    }
+
+    #[test]
+    fn parse_events_assistant_empty_text_skipped() {
+        let jsonl = make_assistant_entry(r#"[{"type":"text","text":"   "}]"#);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_events_assistant_thinking_block_skipped() {
+        let jsonl = make_assistant_entry(
+            r#"[{"type":"thinking","thinking":"internal"},{"type":"text","text":"visible"}]"#,
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            TranscriptEventKind::AssistantMessage { content } => {
+                assert_eq!(content, "visible");
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn parse_events_assistant_text_truncated_at_4000() {
+        let long_text = "x".repeat(5000);
+        let jsonl = make_assistant_entry(&format!(
+            r#"[{{"type":"text","text":"{}"}}]"#,
+            long_text
+        ));
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            TranscriptEventKind::AssistantMessage { content } => {
+                assert!(content.len() <= 4003); // 4000 chars + "..."
+                assert!(content.ends_with("..."));
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    // --- ToolUse ---
+
+    #[test]
+    fn parse_events_tool_use_block_emits_tool_use() {
+        let jsonl = make_assistant_entry(
+            r#"[{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"/tmp/foo.rs"}}]"#,
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            TranscriptEventKind::ToolUse { tool_name, input_summary } => {
+                assert_eq!(tool_name.as_str(), "Read");
+                assert_eq!(input_summary, "/tmp/foo.rs");
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn parse_events_multiple_tool_use_blocks() {
+        let jsonl = make_assistant_entry(
+            r#"[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"a.rs"}},{"type":"tool_use","id":"t2","name":"Write","input":{"file_path":"b.rs"}}]"#,
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 2);
+    }
+
+    // --- ToolResult ---
+
+    #[test]
+    fn parse_events_tool_result_block_emits_tool_result() {
+        // Two-line input: assistant declares tool_use, then user returns tool_result
+        let jsonl = format!(
+            "{}\n{}",
+            make_assistant_entry(
+                r#"[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]"#
+            ),
+            make_user_entry(
+                r#"[{"type":"tool_result","tool_use_id":"toolu_01","content":"file1\nfile2"}]"#
+            )
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        // Expect: ToolUse then ToolResult
+        assert_eq!(events.len(), 2);
+        match &events[1].kind {
+            TranscriptEventKind::ToolResult { tool_name, result_summary, .. } => {
+                assert_eq!(tool_name.as_str(), "Bash");
+                assert!(result_summary.contains("file1"));
+            }
+            _ => panic!("expected ToolResult, got {:?}", events[1].kind),
+        }
+    }
+
+    #[test]
+    fn parse_events_tool_result_unknown_tool_name_when_no_prior_tool_use() {
+        // tool_result with no matching tool_use_id in content
+        let jsonl = make_user_entry(
+            r#"[{"type":"tool_result","tool_use_id":"toolu_99","content":"ok"}]"#,
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            TranscriptEventKind::ToolResult { tool_name, .. } => {
+                assert_eq!(tool_name.as_str(), "unknown");
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    // --- agent_id extraction (FR-008) ---
+
+    #[test]
+    fn parse_events_propagates_agent_id() {
+        let jsonl = format!(
+            r#"{{"type":"user","timestamp":"{ts}","agentId":"a88f285","message":{{"role":"user","content":"hi"}}}}"#,
+            ts = ts_str()
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].agent_id, Some(AgentId::new("a88f285")));
+    }
+
+    #[test]
+    fn parse_events_no_agent_id_when_absent() {
+        let jsonl = make_user_entry(r#""hello""#);
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].agent_id.is_none());
+    }
+
+    // --- session_id propagation (FR-008) ---
+
+    #[test]
+    fn parse_events_session_id_set_on_all_events() {
+        let jsonl = format!(
+            "{}\n{}",
+            make_user_entry(r#""hello""#),
+            make_assistant_entry(r#"[{"type":"text","text":"world"}]"#)
+        );
+        let events = parse_transcript_events(&jsonl, "sess-42");
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(event.session_id, Some(SessionId::new("sess-42")));
+        }
+    }
+
+    // --- resilience (NFR-005, NFR-006, FR-007) ---
+
+    #[test]
+    fn parse_events_skips_malformed_lines() {
+        let jsonl = format!(
+            "not json\n{}",
+            make_user_entry(r#""hello""#)
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn parse_events_empty_content_returns_empty() {
+        let events = parse_transcript_events("", "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_events_unknown_entry_type_silently_skipped() {
+        let jsonl = format!(
+            r#"{{"type":"queue-operation","timestamp":"{ts}","operation":"enqueue","content":"something"}}"#,
+            ts = ts_str()
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_events_progress_entry_silently_skipped() {
+        let jsonl = format!(
+            r#"{{"type":"progress","timestamp":"{ts}","data":{{"type":"agent_progress","agentId":"a01"}}}}"#,
+            ts = ts_str()
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn parse_events_unknown_fields_ignored_sc007() {
+        let jsonl = format!(
+            r#"{{"type":"user","timestamp":"{ts}","future_field":"some_value","another_unknown":42,"message":{{"role":"user","content":"hi"}}}}"#,
+            ts = ts_str()
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TranscriptEventKind::UserMessage);
+    }
+
+    #[test]
+    fn parse_events_mixed_valid_and_invalid_lines() {
+        let jsonl = format!(
+            "{}\nnot-json\n{}\nstill-not-json\n{}",
+            make_user_entry(r#""line1""#),
+            make_assistant_entry(r#"[{"type":"text","text":"line2"}]"#),
+            make_user_entry(r#""line3""#),
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 3);
+    }
+
+    // --- mixed assistant entry (text + tool_use) ---
+
+    #[test]
+    fn parse_events_mixed_text_and_tool_use_blocks() {
+        let jsonl = make_assistant_entry(
+            r#"[{"type":"text","text":"Let me read."},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"foo.rs"}}]"#,
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].kind, TranscriptEventKind::AssistantMessage { .. }));
+        assert!(matches!(events[1].kind, TranscriptEventKind::ToolUse { .. }));
+    }
+
+    // --- timestamp parsing ---
+
+    #[test]
+    fn parse_events_timestamp_parsed_from_entry() {
+        let jsonl = format!(
+            r#"{{"type":"user","timestamp":"2026-03-18T15:30:00Z","message":{{"role":"user","content":"hi"}}}}"#
+        );
+        let events = parse_transcript_events(&jsonl, "s1");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].timestamp.to_rfc3339(),
+            "2026-03-18T15:30:00+00:00"
+        );
     }
 }

@@ -7,10 +7,10 @@ use ratatui::{
 };
 
 use crate::app::{AppState, PanelFocus};
-use crate::model::{HookEventKind, Theme};
+use crate::model::{Theme, TranscriptEventKind};
 
 /// Render event stream panel.
-/// Shows scrollable log of recent hook events with timestamps.
+/// Shows scrollable log of recent transcript events with timestamps.
 /// Uses Paragraph with word wrap so long lines don't clip.
 pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
     let lines = build_filtered_event_lines(state, None);
@@ -89,8 +89,8 @@ pub fn render_agent_event_stream(
 /// Pure function: build lines from events, optionally filtered by agent_id.
 fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
     // When filtering by agent, also include unattributed events from the same session.
-    // TODO: Claude Code should include agent_id in all hook events for subagents.
-    // Workaround: concurrent agents produce unattributed events, so we match by session_id.
+    // Some transcript events from subagent files may arrive without agent_id
+    // before the watcher attributes them. Fall back to session_id matching.
     let agent_session = agent_filter.and_then(|aid| {
         state.domain.agents.get(&crate::model::AgentId::new(aid))
             .and_then(|a| a.session_id.clone())
@@ -131,7 +131,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
 
             // Then, filter by search text if specified
             if let Some(ref query_lower) = search_query_lower {
-                event_matches_search(&e.kind, query_lower, e.agent_id.as_ref())
+                event_matches_search_transcript(&e.kind, query_lower, e.agent_id.as_ref())
             } else {
                 true
             }
@@ -160,7 +160,7 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         first = false;
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, detail, event_color, tool_name) = format_event_lines(&event.kind);
+        let (icon, header, detail, event_color, tool_name) = format_transcript_event_lines(&event.kind);
 
         // Resolve agent display name
         let agent_label = event.agent_id.as_ref().map(|aid| {
@@ -195,23 +195,29 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         if let Some(detail_text) = detail {
             let clean = clean_detail(&detail_text);
             if !clean.is_empty() {
-                let (start_line, offset_clean) = extract_line_offset(&clean);
-                let ext_hint = tool_name
-                    .as_ref()
-                    .filter(|t| {
-                        matches!(
-                            t.as_str(),
-                            "Read" | "Edit" | "Write" | "Grep" | "Glob"
-                        )
-                    })
-                    .and_then(|_| {
-                        // Check first few lines for file path/extension
-                        offset_clean
-                            .lines()
-                            .take(5)
-                            .find_map(super::syntax::detect_extension)
-                    });
-                lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                if tool_name.is_none() {
+                    // Assistant messages: full markdown rendering via tui_markdown
+                    let rendered = tui_markdown::from_str(&clean);
+                    lines.extend(own_text_lines(rendered));
+                } else {
+                    // Tool use/result: custom rendering with syntax highlighting + diff coloring
+                    let (start_line, offset_clean) = extract_line_offset(&clean);
+                    let ext_hint = tool_name
+                        .as_ref()
+                        .filter(|t| {
+                            matches!(
+                                t.as_str(),
+                                "Read" | "Edit" | "Write" | "Grep" | "Glob"
+                            )
+                        })
+                        .and_then(|_| {
+                            offset_clean
+                                .lines()
+                                .take(5)
+                                .find_map(super::syntax::detect_extension)
+                        });
+                    lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                }
             }
         }
     }
@@ -239,7 +245,7 @@ pub fn clean_detail(s: &str) -> String {
 }
 
 /// Extract `@offset:N\n` prefix from text. Returns (start_line, rest).
-/// The hook script prepends this for Read tool results with an offset.
+/// The watcher parser prepends this prefix for Read tool results that include a line offset.
 pub fn extract_line_offset(text: &str) -> (usize, &str) {
     if let Some(rest) = text.strip_prefix("@offset:") {
         if let Some(nl_pos) = rest.find('\n') {
@@ -466,6 +472,33 @@ fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
+/// Convert tui_markdown's `Text` to owned `Vec<Line<'static>>`.
+/// Merges line-level styles (used by tui_markdown for headings) into
+/// span-level styles so they survive the lifetime conversion.
+/// Strips the raw `# ` prefix spans that tui_markdown leaves on headings.
+pub fn own_text_lines(text: ratatui::text::Text<'_>) -> Vec<Line<'static>> {
+    text.lines
+        .into_iter()
+        .map(|line| {
+            let line_style = line.style;
+            let owned_spans: Vec<Span<'static>> = line
+                .spans
+                .into_iter()
+                .filter(|s| {
+                    // Strip tui_markdown's heading prefix spans ("# ", "## ", etc.)
+                    let t = s.content.trim_end();
+                    !(t.chars().all(|c| c == '#') && !t.is_empty())
+                })
+                .map(|s| {
+                    let merged = line_style.patch(s.style);
+                    Span::styled(s.content.to_string(), merged)
+                })
+                .collect();
+            Line::from(owned_spans)
+        })
+        .collect()
+}
+
 /// Shorten an agent ID to first 7 chars (like git short hash).
 fn short_id(id: &str) -> String {
     if id.chars().count() > 7 {
@@ -475,72 +508,41 @@ fn short_id(id: &str) -> String {
     }
 }
 
-/// Check if an event matches the search query.
-/// Searches in: header text, detail text, tool name, agent type, task description, agent ID.
-fn event_matches_search(kind: &HookEventKind, query: &str, agent_id: Option<&crate::model::AgentId>) -> bool {
-    let (_, header, detail, _, tool_name) = format_event_lines(kind);
+/// Check if a TranscriptEvent matches the search query.
+fn event_matches_search_transcript(kind: &TranscriptEventKind, query: &str, agent_id: Option<&crate::model::AgentId>) -> bool {
+    let (_, header, detail, _, tool_name) = format_transcript_event_lines(kind);
 
-    // Check header
     if header.to_lowercase().contains(query) {
         return true;
     }
-
-    // Check detail text
     if let Some(detail_text) = detail {
         if detail_text.to_lowercase().contains(query) {
             return true;
         }
     }
-
-    // Check tool name
     if let Some(tool) = tool_name {
         if tool.to_lowercase().contains(query) {
             return true;
         }
     }
-
-    // Check agent ID
     if let Some(aid) = agent_id {
         if aid.as_str().to_lowercase().contains(query) {
             return true;
         }
     }
-
-    // Check type-specific fields
-    if let HookEventKind::SubagentStart { agent_type, task_description } = kind {
-        if let Some(t) = agent_type {
-            if t.to_lowercase().contains(query) {
-                return true;
-            }
-        }
-        if let Some(desc) = task_description {
-            if desc.to_lowercase().contains(query) {
-                return true;
-            }
-        }
-    }
-
     false
 }
 
-/// Format hook event kind into (icon, header, optional detail, color, optional tool_name).
-pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option<String>, ratatui::style::Color, Option<String>) {
+
+/// Format a TranscriptEventKind into (icon, header, optional detail, color, optional tool_name).
+pub fn format_transcript_event_lines(kind: &TranscriptEventKind) -> (&'static str, String, Option<String>, ratatui::style::Color, Option<String>) {
     match kind {
-        HookEventKind::SessionStart => ("●", "Session started".into(), None, Theme::SUCCESS, None),
-        HookEventKind::SessionEnd => ("○", "Session ended".into(), None, Theme::INFO, None),
-        HookEventKind::SubagentStart { agent_type, task_description } => {
-            let header = agent_type
-                .as_ref()
-                .map(|t| format!("Agent started ({})", t))
-                .unwrap_or_else(|| "Agent started".into());
-            ("▶", header, task_description.clone(), Theme::SUCCESS, None)
+        TranscriptEventKind::UserMessage => ("→", "User message".into(), None, Theme::INFO, None),
+        TranscriptEventKind::AssistantMessage { content } => {
+            let truncated = crate::watcher::truncate_str(content, 4000);
+            ("💭", "Assistant".into(), Some(truncated), Theme::MUTED_TEXT, None)
         }
-        HookEventKind::SubagentStop => ("■", "Agent stopped".into(), None, Theme::MUTED_TEXT, None),
-        HookEventKind::PreToolUse {
-            tool_name,
-            input_summary,
-            ..
-        } => {
+        TranscriptEventKind::ToolUse { tool_name, input_summary } => {
             let detail = if input_summary.is_empty() {
                 None
             } else {
@@ -548,11 +550,7 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             };
             ("⚡", tool_name.to_string(), detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
-        HookEventKind::PostToolUse {
-            tool_name,
-            duration_ms,
-            result_summary,
-        } => {
+        TranscriptEventKind::ToolResult { tool_name, result_summary, duration_ms } => {
             let duration_text = duration_ms
                 .map(|ms| format!(" ({}ms)", ms))
                 .unwrap_or_default();
@@ -564,16 +562,8 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
             };
             ("✓", header, detail, Theme::tool_color(tool_name.as_str()), Some(tool_name.to_string()))
         }
-        HookEventKind::Stop { reason } => {
-            ("⏹", "Stopped".into(), reason.clone(), Theme::WARNING, None)
-        }
-        HookEventKind::Notification { message } => {
-            ("ℹ", "Note".into(), Some(message.clone()), Theme::INFO, None)
-        }
-        HookEventKind::UserPromptSubmit => ("→", "User prompt".into(), None, Theme::INFO, None),
-        HookEventKind::AssistantText { content } => {
-            let truncated = crate::watcher::truncate_str(content, 4000);
-            ("💭", "Thinking".into(), Some(truncated), Theme::MUTED_TEXT, None)
+        TranscriptEventKind::Unknown { entry_type } => {
+            ("?", entry_type.clone(), None, Theme::MUTED_TEXT, None)
         }
     }
 }
@@ -581,7 +571,6 @@ pub fn format_event_lines(kind: &HookEventKind) -> (&'static str, String, Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::HookEvent;
     use chrono::Utc;
     use std::collections::VecDeque;
 
@@ -609,47 +598,60 @@ mod tests {
 
     #[test]
     fn build_event_stream_items_shows_events_with_separators() {
+        use crate::model::{TranscriptEvent, TranscriptEventKind};
+
         let mut state = AppState::new();
 
-        let event1 = HookEvent::new(Utc::now(), HookEventKind::session_start());
-        let event2 = HookEvent::new(Utc::now(), HookEventKind::session_end());
+        // Use two events without detail so we get exactly 1 line per event
+        let event1 = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage);
+        let event2 = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage);
 
         state.domain.events = VecDeque::from(vec![event1, event2]);
 
         let lines = build_filtered_event_lines(&state, None);
 
-        // 2 events: header + separator + header = 3 lines
+        // 2 events (each 1 line): header + separator + header = 3 lines
         assert_eq!(lines.len(), 3);
     }
 
     #[test]
-    fn format_event_session_start() {
-        let (icon, header, _, _, _) = format_event_lines(&HookEventKind::SessionStart);
-        assert_eq!(header, "Session started");
-        assert_eq!(icon, "●");
+    fn format_transcript_event_user_message() {
+        let (icon, header, _, _, _) = format_transcript_event_lines(&TranscriptEventKind::UserMessage);
+        assert_eq!(header, "User message");
+        assert_eq!(icon, "→");
     }
 
     #[test]
-    fn format_event_pre_tool_use() {
-        let (_, header, detail, _, _) = format_event_lines(&HookEventKind::pre_tool_use(
-            "Read",
-            "file.rs".to_string(),
-        ));
+    fn format_transcript_event_tool_use() {
+        let (_, header, detail, _, tool_name) = format_transcript_event_lines(&TranscriptEventKind::ToolUse {
+            tool_name: "Read".into(),
+            input_summary: "file.rs".to_string(),
+        });
         assert!(header.contains("Read"));
         assert_eq!(detail, Some("file.rs".into()));
+        assert_eq!(tool_name, Some("Read".to_string()));
     }
 
     #[test]
-    fn format_event_post_tool_use_with_duration() {
-        let (icon, header, detail, _, _) = format_event_lines(&HookEventKind::post_tool_use(
-            "Bash",
-            "success".to_string(),
-            Some(250),
-        ));
+    fn format_transcript_event_tool_result_with_duration() {
+        let (icon, header, detail, _, _) = format_transcript_event_lines(&TranscriptEventKind::ToolResult {
+            tool_name: "Bash".into(),
+            result_summary: "success".to_string(),
+            duration_ms: Some(250),
+        });
         assert!(header.contains("Bash"));
         assert!(header.contains("250ms"));
         assert_eq!(detail, Some("success".into()));
         assert_eq!(icon, "✓");
+    }
+
+    #[test]
+    fn format_transcript_event_unknown() {
+        let (icon, header, _, _, _) = format_transcript_event_lines(&TranscriptEventKind::Unknown {
+            entry_type: "some_new_type".to_string(),
+        });
+        assert_eq!(icon, "?");
+        assert_eq!(header, "some_new_type");
     }
 
     #[test]
@@ -760,16 +762,19 @@ mod tests {
 
     #[test]
     fn agent_label_resolves_from_state() {
-        use crate::model::Agent;
+        use crate::model::{Agent, TranscriptEvent, TranscriptEventKind};
 
         let mut state = AppState::new();
         let mut agent = Agent::new("a01", Utc::now());
         agent.agent_type = Some("Explore".into());
         state.domain.agents.insert("a01".into(), agent);
 
-        let event = HookEvent::new(
+        let event = TranscriptEvent::new(
             Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
+            TranscriptEventKind::ToolUse {
+                tool_name: "Read".into(),
+                input_summary: "file.rs".to_string(),
+            },
         )
         .with_agent("a01");
         state.domain.events = VecDeque::from(vec![event]);
@@ -785,65 +790,67 @@ mod tests {
     }
 
     #[test]
-    fn event_matches_search_empty_query() {
-        let kind = HookEventKind::SessionStart;
-        assert!(event_matches_search(&kind, "", None));
+    fn event_matches_search_transcript_tool_use() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::ToolUse {
+            tool_name: "Read".into(),
+            input_summary: "my_file.rs".to_string(),
+        };
+        assert!(event_matches_search_transcript(&kind, "read", None));
+        assert!(event_matches_search_transcript(&kind, "my_file", None));
+        assert!(!event_matches_search_transcript(&kind, "write", None));
     }
 
     #[test]
-    fn event_matches_search_case_insensitive() {
-        // Note: event_matches_search expects the query to be pre-lowercased
-        let kind = HookEventKind::pre_tool_use("Read", "file.rs".to_string());
-        assert!(event_matches_search(&kind, "read", None));
-        // Mixed case tool name "Read" matches lowercase query "read"
+    fn event_matches_search_transcript_assistant_message() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::AssistantMessage {
+            content: "Here is the analysis".to_string(),
+        };
+        assert!(event_matches_search_transcript(&kind, "analysis", None));
+        assert!(!event_matches_search_transcript(&kind, "other", None));
     }
 
     #[test]
-    fn event_matches_search_in_tool_name() {
-        let kind = HookEventKind::pre_tool_use("Read", "file.rs".to_string());
-        assert!(event_matches_search(&kind, "read", None));
-        assert!(!event_matches_search(&kind, "write", None));
+    fn event_matches_search_transcript_user_message() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::UserMessage;
+        // "User message" is the header
+        assert!(event_matches_search_transcript(&kind, "user", None));
+        assert!(event_matches_search_transcript(&kind, "message", None));
     }
 
     #[test]
-    fn event_matches_search_in_detail() {
-        let kind = HookEventKind::pre_tool_use("Read", "my_file.rs".to_string());
-        assert!(event_matches_search(&kind, "my_file", None));
-        assert!(event_matches_search(&kind, "file", None));
-        assert!(!event_matches_search(&kind, "other", None));
-    }
-
-    #[test]
-    fn event_matches_search_in_agent_id() {
-        let kind = HookEventKind::subagent_start(Some("Test task".into()));
+    fn event_matches_search_transcript_in_agent_id() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::UserMessage;
         let agent_id = crate::model::AgentId::new("explore-agent-123");
-        assert!(event_matches_search(&kind, "explore", Some(&agent_id)));
-        assert!(event_matches_search(&kind, "123", Some(&agent_id)));
-        assert!(!event_matches_search(&kind, "write", Some(&agent_id)));
+        assert!(event_matches_search_transcript(&kind, "explore", Some(&agent_id)));
+        assert!(event_matches_search_transcript(&kind, "123", Some(&agent_id)));
+        assert!(!event_matches_search_transcript(&kind, "write", Some(&agent_id)));
     }
 
     #[test]
-    fn event_matches_search_special_chars_no_panic() {
-        // Regex metacharacters should be treated as literal strings
-        let kind = HookEventKind::pre_tool_use("Read", "file[1].rs".to_string());
-        // Should not panic even with regex metacharacters
-        let _ = event_matches_search(&kind, "a.*[b]", None);
-        let _ = event_matches_search(&kind, "[1]", None);
-        let _ = event_matches_search(&kind, "(test)", None);
+    fn event_matches_search_transcript_special_chars_no_panic() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::ToolUse {
+            tool_name: "Read".into(),
+            input_summary: "file[1].rs".to_string(),
+        };
+        let _ = event_matches_search_transcript(&kind, "a.*[b]", None);
+        let _ = event_matches_search_transcript(&kind, "[1]", None);
+        let _ = event_matches_search_transcript(&kind, "(test)", None);
     }
 
     #[test]
-    fn event_matches_search_unicode() {
-        let kind = HookEventKind::pre_tool_use("Read", "日本語.rs".to_string());
-        assert!(event_matches_search(&kind, "日本", None));
-        assert!(event_matches_search(&kind, "本語", None));
-        assert!(!event_matches_search(&kind, "中文", None));
-    }
-
-    #[test]
-    fn event_matches_search_header_text() {
-        let kind = HookEventKind::SessionStart;
-        assert!(event_matches_search(&kind, "session", None));
-        assert!(event_matches_search(&kind, "started", None));
+    fn event_matches_search_transcript_unicode() {
+        use crate::model::TranscriptEventKind;
+        let kind = TranscriptEventKind::ToolUse {
+            tool_name: "Read".into(),
+            input_summary: "日本語.rs".to_string(),
+        };
+        assert!(event_matches_search_transcript(&kind, "日本", None));
+        assert!(event_matches_search_transcript(&kind, "本語", None));
+        assert!(!event_matches_search_transcript(&kind, "中文", None));
     }
 }

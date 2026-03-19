@@ -1,10 +1,11 @@
 use chrono::Utc;
 use loom_tui::app::AppState;
-use loom_tui::model::{SessionArchive, SessionMeta, SessionStatus, TaskGraph};
+use loom_tui::model::{SessionArchive, SessionMeta, SessionStatus, TaskGraph, TranscriptEvent};
 use loom_tui::session::{
     auto_save_tick, build_archive, delete_session, generate_filename, list_session_metas,
     list_sessions, load_session, save_session,
 };
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -237,7 +238,7 @@ fn build_archive_from_app_state() {
 
     let archive = build_archive(
         state.domain.task_graph.as_ref(),
-        &state.domain.events,
+        &VecDeque::<TranscriptEvent>::new(),
         &state.domain.agents,
         &meta,
     );
@@ -256,7 +257,7 @@ fn full_workflow_save_list_load_delete() {
         .with_status(SessionStatus::Completed);
     let archive = build_archive(
         state.domain.task_graph.as_ref(),
-        &state.domain.events,
+        &VecDeque::<TranscriptEvent>::new(),
         &state.domain.agents,
         &meta,
     );

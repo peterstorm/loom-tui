@@ -177,80 +177,8 @@ fn parse_agent_transcript_jsonl() {
     }
 }
 
-#[test]
-fn parse_hook_events_jsonl() {
-    let content =
-        std::fs::read_to_string("tests/fixtures/events.jsonl").expect("Failed to read fixture");
-
-    let mut events = Vec::new();
-
-    for line in content.lines() {
-        let event: HookEvent = serde_json::from_str(line).expect("Invalid JSON line");
-        events.push(event);
-    }
-
-    assert_eq!(events.len(), 12);
-
-    // Verify session start
-    match &events[0].kind {
-        HookEventKind::SessionStart => {
-            assert_eq!(events[0].session_id, Some(SessionId::new("s20260211-095900")));
-        }
-        _ => panic!("Expected SessionStart"),
-    }
-
-    // Verify subagent start with task description
-    match &events[1].kind {
-        HookEventKind::SubagentStart { task_description, .. } => {
-            assert_eq!(task_description, &Some("Create project scaffold".to_string()));
-            assert_eq!(events[1].agent_id, Some(AgentId::new("a01")));
-        }
-        _ => panic!("Expected SubagentStart"),
-    }
-
-    // Verify pre tool use
-    match &events[2].kind {
-        HookEventKind::PreToolUse {
-            tool_name,
-            input_summary,
-            ..
-        } => {
-            assert_eq!(tool_name.as_str(), "Write");
-            assert_eq!(input_summary, "Cargo.toml");
-        }
-        _ => panic!("Expected PreToolUse"),
-    }
-
-    // Verify post tool use with duration
-    match &events[3].kind {
-        HookEventKind::PostToolUse {
-            tool_name,
-            result_summary,
-            duration_ms,
-        } => {
-            assert_eq!(tool_name.as_str(), "Write");
-            assert_eq!(result_summary, "Success");
-            assert_eq!(*duration_ms, Some(150));
-        }
-        _ => panic!("Expected PostToolUse"),
-    }
-
-    // Verify notification
-    match &events[8].kind {
-        HookEventKind::Notification { message } => {
-            assert!(message.contains("Wave 1"));
-        }
-        _ => panic!("Expected Notification"),
-    }
-
-    // Verify stop with reason
-    match &events[10].kind {
-        HookEventKind::Stop { reason } => {
-            assert_eq!(reason, &Some("User requested stop".to_string()));
-        }
-        _ => panic!("Expected Stop"),
-    }
-}
+/// parse_hook_events_jsonl removed — HookEvent model deleted (SC-001).
+/// Replaced by parse_transcript_events tests in watcher_tests.rs.
 
 #[test]
 fn parse_session_archive_fixture() {
@@ -343,30 +271,7 @@ fn agent_round_trip_serialization() {
     assert_eq!(original, restored);
 }
 
-#[test]
-fn hook_event_round_trip_serialization() {
-    let events = vec![
-        HookEvent::new(Utc::now(), HookEventKind::session_start()),
-        HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Bash", "cargo test".to_string()),
-        ),
-        HookEvent::new(
-            Utc::now(),
-            HookEventKind::post_tool_use("Bash", "Success".to_string(), Some(5000)),
-        ),
-        HookEvent::new(
-            Utc::now(),
-            HookEventKind::notification("Test message".to_string()),
-        ),
-    ];
-
-    for original in events {
-        let json = serde_json::to_string(&original).expect("Serialization failed");
-        let restored: HookEvent = serde_json::from_str(&json).expect("Deserialization failed");
-        assert_eq!(original, restored);
-    }
-}
+/// hook_event_round_trip_serialization removed — HookEvent model deleted (SC-001).
 
 #[test]
 fn session_archive_round_trip_serialization() {
@@ -379,10 +284,15 @@ fn session_archive_round_trip_serialization() {
         vec![Task::new("T1", "Test".to_string(), TaskStatus::Completed)],
     )]);
 
-    let events = vec![HookEvent::new(
-        Utc::now(),
-        HookEventKind::session_start(),
-    )];
+    let events = vec![
+        TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
+        TranscriptEvent::new(
+            Utc::now(),
+            TranscriptEventKind::AssistantMessage {
+                content: "Hello".to_string(),
+            },
+        ),
+    ];
 
     let mut agents = BTreeMap::new();
     agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
@@ -406,9 +316,6 @@ fn malformed_json_returns_error() {
     assert!(result.is_err(), "Should fail on malformed JSON");
 
     let result: Result<Agent, _> = serde_json::from_str(bad_json);
-    assert!(result.is_err(), "Should fail on malformed JSON");
-
-    let result: Result<HookEvent, _> = serde_json::from_str(bad_json);
     assert!(result.is_err(), "Should fail on malformed JSON");
 
     let result: Result<SessionArchive, _> = serde_json::from_str(bad_json);
@@ -486,43 +393,8 @@ fn task_graph_empty_constructor() {
     assert_eq!(graph.completed_tasks(), 0);
 }
 
-#[test]
-fn pre_tool_use_deserializes_with_task_model() {
-    let json = r#"{
-        "timestamp": "2026-02-17T10:00:00Z",
-        "event": "pre_tool_use",
-        "tool_name": "Task",
-        "input_summary": "Explore codebase",
-        "task_prompt": "Find all modules",
-        "task_model": "opus"
-    }"#;
-    let event: HookEvent = serde_json::from_str(json).expect("Should parse with task_model");
-    match &event.kind {
-        HookEventKind::PreToolUse { task_model, task_prompt, .. } => {
-            assert_eq!(task_model.as_deref(), Some("opus"));
-            assert_eq!(task_prompt.as_deref(), Some("Find all modules"));
-        }
-        _ => panic!("Expected PreToolUse"),
-    }
-}
-
-#[test]
-fn pre_tool_use_deserializes_without_task_model() {
-    let json = r#"{
-        "timestamp": "2026-02-17T10:00:00Z",
-        "event": "pre_tool_use",
-        "tool_name": "Read",
-        "input_summary": "file.rs"
-    }"#;
-    let event: HookEvent = serde_json::from_str(json).expect("Should parse without task_model");
-    match &event.kind {
-        HookEventKind::PreToolUse { task_model, task_prompt, .. } => {
-            assert!(task_model.is_none());
-            assert!(task_prompt.is_none());
-        }
-        _ => panic!("Expected PreToolUse"),
-    }
-}
+/// HookEvent-specific deserialization tests removed (SC-001).
+/// TranscriptEvent deserialization tests in model/transcript_event.rs unit tests.
 
 #[test]
 fn agent_serializes_with_model_field() {

@@ -62,7 +62,10 @@ pub fn render_prompt_popup(
         ));
     }
 
-    let paragraph = Paragraph::new(full_text)
+    let rendered = tui_markdown::from_str(&full_text);
+    let owned_lines = super::event_stream::own_text_lines(rendered);
+
+    let paragraph = Paragraph::new(owned_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)

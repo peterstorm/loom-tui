@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use crate::app::state::{AppState, PanelFocus};
-use crate::model::{Agent, AgentId, HookEvent, SessionMeta, SessionStatus, TaskGraph, Theme};
+use crate::model::{Agent, AgentId, SessionMeta, SessionStatus, TaskGraph, Theme, TranscriptEvent};
 use super::components::agent_list::render_agent_list_with_main;
 use super::components::format::format_duration;
 use super::components::prompt_popup::render_prompt_popup;
@@ -68,9 +68,9 @@ impl<'a> AgentsRef<'a> {
 }
 
 pub enum EventsRef<'a> {
-    Deque(&'a VecDeque<HookEvent>),
-    Vec(&'a Vec<HookEvent>),
-    Owned(Vec<HookEvent>),
+    Deque(&'a VecDeque<TranscriptEvent>),
+    Vec(&'a Vec<TranscriptEvent>),
+    Owned(Vec<TranscriptEvent>),
 }
 
 impl<'a> EventsRef<'a> {
@@ -86,7 +86,7 @@ impl<'a> EventsRef<'a> {
         self.len() == 0
     }
 
-    pub fn iter(&'a self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
+    pub fn iter(&'a self) -> Box<dyn Iterator<Item = &'a TranscriptEvent> + 'a> {
         match self {
             EventsRef::Deque(d) => Box::new(d.iter()),
             EventsRef::Vec(v) => Box::new(v.iter()),
@@ -94,7 +94,7 @@ impl<'a> EventsRef<'a> {
         }
     }
 
-    pub fn iter_rev(&'a self) -> Box<dyn Iterator<Item = &'a HookEvent> + 'a> {
+    pub fn iter_rev(&'a self) -> Box<dyn Iterator<Item = &'a TranscriptEvent> + 'a> {
         match self {
             EventsRef::Deque(d) => Box::new(d.iter().rev()),
             EventsRef::Vec(v) => Box::new(v.iter().rev()),
@@ -125,10 +125,9 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
             .filter(|(_, a)| a.session_id.as_ref() == Some(sid))
             .map(|(k, v)| (k.clone(), v))
             .collect();
-        let filtered_events: Vec<HookEvent> = state.domain.events.iter()
-            .filter(|e| e.session_id.as_ref() == Some(sid))
-            .cloned()
-            .collect();
+        // TODO: filter state.domain.events by session_id for live sessions.
+        // Currently active sessions show no events in the detail view.
+        let filtered_events: Vec<TranscriptEvent> = Vec::new();
         return Some(SessionViewData {
             meta,
             agents: AgentsRef::Filtered(filtered_agents),
@@ -414,7 +413,7 @@ fn render_events_list(
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    let events: Vec<&HookEvent> = data.events.iter_rev()
+    let events: Vec<&TranscriptEvent> = data.events.iter_rev()
         .filter(|e| match filter {
             EventFilter::Main => e.agent_id.is_none(),
             EventFilter::Agent(aid) => e.agent_id.as_ref() == Some(*aid),
@@ -453,7 +452,7 @@ fn render_events_list(
 
         let timestamp = event.timestamp.format("%H:%M:%S").to_string();
         let (icon, header, detail, event_color, tool_name) =
-            crate::view::components::event_stream::format_event_lines(&event.kind);
+            crate::view::components::event_stream::format_transcript_event_lines(&event.kind);
 
         let agent_label = event.agent_id.as_ref().map(|aid| {
             data.agents
@@ -552,7 +551,7 @@ fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use crate::app::state::AppState;
-    use crate::model::{Agent, AgentId, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta, SessionStatus};
+    use crate::model::{Agent, AgentId, ArchivedSession, SessionArchive, SessionId, SessionMeta, SessionStatus, TranscriptEvent, TranscriptEventKind};
     use chrono::Utc;
     use std::time::Duration;
     use ratatui::backend::TestBackend;
@@ -606,10 +605,22 @@ mod tests {
         agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
 
         let events = vec![
-            HookEvent::new(Utc::now(), HookEventKind::SessionStart),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(100))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Read", "ok".to_string(), Some(200))),
-            HookEvent::new(Utc::now(), HookEventKind::post_tool_use("Bash", "ok".to_string(), Some(500))),
+            TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
+            TranscriptEvent::new(Utc::now(), TranscriptEventKind::ToolResult {
+                tool_name: "Read".into(),
+                result_summary: "ok".to_string(),
+                duration_ms: Some(100),
+            }),
+            TranscriptEvent::new(Utc::now(), TranscriptEventKind::ToolResult {
+                tool_name: "Read".into(),
+                result_summary: "ok".to_string(),
+                duration_ms: Some(200),
+            }),
+            TranscriptEvent::new(Utc::now(), TranscriptEventKind::ToolResult {
+                tool_name: "Bash".into(),
+                result_summary: "ok".to_string(),
+                duration_ms: Some(500),
+            }),
         ];
 
         let archive = SessionArchive::new(meta.clone())

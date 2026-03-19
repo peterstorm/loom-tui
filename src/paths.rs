@@ -8,17 +8,9 @@ pub struct Paths {
     /// Example: <project_root>/.claude/state/active_task_graph.json
     pub task_graph: PathBuf,
 
-    /// Directory containing agent transcript JSONL files
-    /// Example: <project_root>/.claude/state/subagents/
-    pub transcripts: PathBuf,
-
-    /// Path to the hook events JSONL file
-    /// Example: /tmp/loom-tui/events.jsonl (always uses /tmp, not $TMPDIR)
-    pub events: PathBuf,
-
-    /// Directory containing active agent marker files (*.active)
-    /// Example: /tmp/claude-subagents/
-    pub active_agents: PathBuf,
+    /// Directory containing Claude Code transcript JSONL files for this project
+    /// Example: ~/.claude/projects/-home-user-dev-myproject/
+    pub transcript_dir: PathBuf,
 
     /// Directory for archived session storage
     /// Example: ~/.local/share/loom-tui/sessions/
@@ -37,9 +29,8 @@ impl Paths {
     ///
     /// # Environment
     ///
-    /// * `HOME` - Used to resolve the archive directory (~/.local/share/loom-tui/sessions/).
-    ///
-    /// Note: Temp directory paths always use "/tmp" (not $TMPDIR) to ensure TUI and hook scripts agree on path.
+    /// * `HOME` - Used to resolve transcript_dir (~/.claude/projects/PROJECT_HASH/)
+    ///   and archive_dir (~/.local/share/loom-tui/sessions/).
     ///
     /// # Examples
     ///
@@ -57,7 +48,9 @@ impl Paths {
     /// ```
     pub fn resolve(project_root: &Path) -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let home_path = PathBuf::from(home);
+        let home_path = PathBuf::from(&home);
+
+        let hash = Self::project_hash(project_root);
 
         Self {
             task_graph: project_root
@@ -65,13 +58,7 @@ impl Paths {
                 .join("state")
                 .join("active_task_graph.json"),
 
-            transcripts: project_root.join(".claude").join("state").join("subagents"),
-
-            // Always use /tmp (not $TMPDIR) so TUI and hook scripts agree on path.
-            // Hooks run outside nix-shell where TMPDIR differs.
-            events: PathBuf::from("/tmp").join("loom-tui").join("events.jsonl"),
-
-            active_agents: PathBuf::from("/tmp").join("claude-subagents"),
+            transcript_dir: home_path.join(".claude").join("projects").join(hash),
 
             archive_dir: home_path
                 .join(".local")
@@ -80,6 +67,27 @@ impl Paths {
                 .join("sessions"),
         }
     }
+
+    /// Compute the project hash from an absolute path.
+    ///
+    /// Replaces all forward slashes with dashes and strips the leading dash.
+    /// This matches Claude Code's own project directory naming convention.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use loom_tui::paths::Paths;
+    ///
+    /// assert_eq!(
+    ///     Paths::project_hash(Path::new("/home/user/dev/myproject")),
+    ///     "-home-user-dev-myproject"
+    /// );
+    /// ```
+    pub fn project_hash(project_root: &Path) -> String {
+        let raw = project_root.to_string_lossy();
+        raw.replace('/', "-")
+    }
 }
 
 #[cfg(test)]
@@ -87,11 +95,118 @@ mod tests {
     use super::*;
     use std::env;
 
-    #[test]
-    fn test_resolve_paths_with_default_tmpdir() {
-        // Remove TMPDIR if set to test default behavior
-        let _guard = TmpdirGuard::unset();
+    // ---------------------------------------------------------------------------
+    // project_hash tests
+    // ---------------------------------------------------------------------------
 
+    #[test]
+    fn project_hash_typical_path() {
+        assert_eq!(
+            Paths::project_hash(Path::new("/home/user/dev/myproject")),
+            "-home-user-dev-myproject"
+        );
+    }
+
+    #[test]
+    fn project_hash_root_path() {
+        assert_eq!(Paths::project_hash(Path::new("/")), "-");
+    }
+
+    #[test]
+    fn project_hash_single_segment() {
+        assert_eq!(Paths::project_hash(Path::new("/project")), "-project");
+    }
+
+    #[test]
+    fn project_hash_deep_path() {
+        assert_eq!(
+            Paths::project_hash(Path::new("/home/peterstorm/dev/rust/loom-tui")),
+            "-home-peterstorm-dev-rust-loom-tui"
+        );
+    }
+
+    #[test]
+    fn project_hash_matches_claude_code_convention() {
+        // Claude Code uses leading dash: /home/user -> -home-user
+        let hash = Paths::project_hash(Path::new("/any/path"));
+        assert!(hash.starts_with('-'), "hash must start with dash to match Claude Code dirs");
+    }
+
+    // ---------------------------------------------------------------------------
+    // transcript_dir resolution tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn transcript_dir_uses_project_hash() {
+        let _guard = HomeGuard::set("/home/testuser");
+        let project_root = Path::new("/home/testuser/dev/myproject");
+        let paths = Paths::resolve(project_root);
+
+        assert_eq!(
+            paths.transcript_dir,
+            Path::new("/home/testuser/.claude/projects/-home-testuser-dev-myproject")
+        );
+    }
+
+    #[test]
+    fn transcript_dir_fallback_when_no_home() {
+        let _guard = HomeGuard::unset();
+        let project_root = Path::new("/home/user/project");
+        let paths = Paths::resolve(project_root);
+
+        // When HOME is unset, falls back to /tmp
+        assert_eq!(
+            paths.transcript_dir,
+            Path::new("/tmp/.claude/projects/-home-user-project")
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // task_graph and archive_dir unchanged
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn task_graph_path_correct() {
+        let project_root = Path::new("/home/user/project");
+        let paths = Paths::resolve(project_root);
+        assert_eq!(
+            paths.task_graph,
+            Path::new("/home/user/project/.claude/state/active_task_graph.json")
+        );
+    }
+
+    #[test]
+    fn archive_dir_uses_home() {
+        assert!(Paths::resolve(Path::new("/test"))
+            .archive_dir
+            .to_str()
+            .unwrap()
+            .ends_with(".local/share/loom-tui/sessions"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // derive tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn paths_derive_clone() {
+        let paths = Paths::resolve(Path::new("/test"));
+        let _cloned = paths.clone();
+    }
+
+    #[test]
+    fn paths_derive_debug() {
+        let paths = Paths::resolve(Path::new("/test"));
+        let debug_str = format!("{:?}", paths);
+        assert!(debug_str.contains("Paths"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Resolve tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_paths_task_graph_and_archive() {
         let project_root = Path::new("/home/user/project");
         let paths = Paths::resolve(project_root);
 
@@ -100,19 +215,6 @@ mod tests {
             Path::new("/home/user/project/.claude/state/active_task_graph.json")
         );
 
-        assert_eq!(
-            paths.transcripts,
-            Path::new("/home/user/project/.claude/state/subagents")
-        );
-
-        assert_eq!(paths.events, Path::new("/tmp/loom-tui/events.jsonl"));
-
-        assert_eq!(
-            paths.active_agents,
-            Path::new("/tmp/claude-subagents")
-        );
-
-        // archive_dir depends on HOME, which varies - just verify it ends correctly
         assert!(paths
             .archive_dir
             .to_str()
@@ -121,9 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_paths_with_custom_tmpdir() {
-        let _guard = TmpdirGuard::set("/var/tmp");
-
+    fn test_resolve_paths_projects_my_app() {
         let project_root = Path::new("/projects/my-app");
         let paths = Paths::resolve(project_root);
 
@@ -131,64 +231,42 @@ mod tests {
             paths.task_graph,
             Path::new("/projects/my-app/.claude/state/active_task_graph.json")
         );
-
-        assert_eq!(
-            paths.transcripts,
-            Path::new("/projects/my-app/.claude/state/subagents")
-        );
-
-        // events always uses /tmp, not $TMPDIR (hooks run outside nix-shell)
-        assert_eq!(
-            paths.events,
-            Path::new("/tmp/loom-tui/events.jsonl")
-        );
-
-        // active_agents always uses /tmp, not $TMPDIR
-        assert_eq!(
-            paths.active_agents,
-            Path::new("/tmp/claude-subagents")
-        );
     }
 
-    #[test]
-    fn test_paths_derive_clone() {
-        let project_root = Path::new("/test");
-        let paths = Paths::resolve(project_root);
-        let _cloned = paths.clone();
-    }
+    // ---------------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------------
 
-    #[test]
-    fn test_paths_derive_debug() {
-        let project_root = Path::new("/test");
-        let paths = Paths::resolve(project_root);
-        let debug_str = format!("{:?}", paths);
-        assert!(debug_str.contains("Paths"));
-    }
+    use std::sync::Mutex;
 
-    // Test helper: RAII guard for setting/unsetting TMPDIR
-    struct TmpdirGuard {
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
         original: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
-    impl TmpdirGuard {
+    impl HomeGuard {
         fn set(value: &str) -> Self {
-            let original = env::var("TMPDIR").ok();
-            env::set_var("TMPDIR", value);
-            Self { original }
+            let lock = HOME_LOCK.lock().unwrap();
+            let original = env::var("HOME").ok();
+            unsafe { env::set_var("HOME", value) };
+            Self { original, _lock: lock }
         }
 
         fn unset() -> Self {
-            let original = env::var("TMPDIR").ok();
-            env::remove_var("TMPDIR");
-            Self { original }
+            let lock = HOME_LOCK.lock().unwrap();
+            let original = env::var("HOME").ok();
+            unsafe { env::remove_var("HOME") };
+            Self { original, _lock: lock }
         }
     }
 
-    impl Drop for TmpdirGuard {
+    impl Drop for HomeGuard {
         fn drop(&mut self) {
             match &self.original {
-                Some(val) => env::set_var("TMPDIR", val),
-                None => env::remove_var("TMPDIR"),
+                Some(val) => unsafe { env::set_var("HOME", val) },
+                None => unsafe { env::remove_var("HOME") },
             }
         }
     }

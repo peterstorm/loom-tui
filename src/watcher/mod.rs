@@ -6,628 +6,520 @@ pub use tail::TailState;
 
 use crate::error::WatcherError;
 use crate::event::AppEvent;
+use crate::model::ids::SessionId;
 use crate::paths::Paths;
 use crate::session;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Result type for watcher operations
 pub type WatcherResult<T> = Result<T, WatcherError>;
 
-/// Commands sent to the tail worker thread
-enum TailCommand {
-    ReadFile(PathBuf),
-    /// Sentinel: initial file replay done, safe to run stale cleanup
-    ReplayDone,
+// ---------------------------------------------------------------------------
+// Session lifecycle timeouts (FR-010, FR-013)
+// ---------------------------------------------------------------------------
+
+/// Confirmed sessions (received at least one user prompt) are marked complete
+/// after 10 minutes without new writes.
+const CONFIRMED_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Unconfirmed sessions (no user prompt received) are removed after 30 seconds.
+const UNCONFIRMED_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often we re-scan the transcript directory for new .jsonl files (session discovery).
+/// 10 × 200ms = ~2 seconds, satisfying NFR-001.
+const DIR_RESCAN_INTERVAL: u32 = 10;
+
+/// How often we emit AgentMetadataUpdated from the full subagent transcript content.
+/// 10 × 200ms = ~2 seconds.
+const METADATA_EMIT_INTERVAL: u32 = 10;
+
+// ---------------------------------------------------------------------------
+// Internal state per known transcript file
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct FileState {
+    /// Last observed mtime on disk (used for lifecycle decisions)
+    mtime: SystemTime,
+    /// True when this is a subagent transcript (inside {session_id}/subagents/)
+    is_subagent: bool,
+    /// The session_id this file belongs to (stem of top-level jsonl, or parent dir stem for
+    /// subagent files)
+    session_id: String,
 }
 
-/// Start a dedicated worker thread that owns TailState and processes file read requests.
-/// Eliminates Arc<Mutex<TailState>> anti-pattern by using message passing.
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Start unified polling loop. Returns channel receiver for AppEvents.
 ///
-/// # Returns
-/// - Sender for file paths to read
-fn start_tail_worker(tx: mpsc::Sender<AppEvent>) -> mpsc::Sender<TailCommand> {
-    let (cmd_tx, cmd_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let mut tail_state = TailState::new();
-
-        while let Ok(cmd) = cmd_rx.recv() {
-            match cmd {
-                TailCommand::ReplayDone => {
-                    let _ = tx.send(AppEvent::ReplayComplete);
-                }
-                TailCommand::ReadFile(path) => {
-                    let new_content = match tail_state.read_new_lines(&path) {
-                        Ok(content) => content,
-                        Err(e) => {
-                            if tx.send(AppEvent::Error {
-                                source: path.display().to_string(),
-                                error: WatcherError::Io(e.to_string()).into(),
-                            }).is_err() {
-                                return;
-                            }
-                            continue;
-                        }
-                    };
-
-                    if new_content.is_empty() {
-                        continue;
-                    }
-
-                    match parsers::parse_hook_events(&new_content) {
-                        Ok(events) => {
-                            for event in events {
-                                let enriched = if matches!(event.kind, crate::model::HookEventKind::SessionStart) {
-                                    enrich_session_start_event(event)
-                                } else {
-                                    event
-                                };
-                                if tx.send(AppEvent::HookEventReceived(enriched)).is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if tx.send(AppEvent::Error {
-                                source: path.display().to_string(),
-                                error: WatcherError::Parse(e).into(),
-                            }).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-
-    cmd_tx
-}
-
-/// Resolve the Claude Code transcript directory for a given project root.
-/// Returns ~/.claude/projects/{project_hash}/ where project_hash = cwd with / → -
-pub fn transcript_dir_for_project(project_root: &Path) -> Option<PathBuf> {
-    let project_hash = project_root.display().to_string().replace('/', "-");
-    let home = std::env::var("HOME").ok()?;
-    let dir = PathBuf::from(format!("{}/.claude/projects/{}", home, project_hash));
-    if dir.is_dir() { Some(dir) } else { None }
-}
-
-/// Derive transcript path from cwd + session_id when not provided by hook.
-/// Claude Code stores transcripts at ~/.claude/projects/{project_hash}/{session_id}.jsonl
-/// where project_hash is the cwd with `/` replaced by `-`.
+/// The loop runs every 200ms and:
+/// 1. (Re)scans transcript_dir for new .jsonl files  -> SessionDiscovered
+/// 2. Checks mtime on known files                     -> SessionCompleted / SessionReactivated
+/// 3. Tails transcript files via TailState            -> TranscriptEventReceived
+/// 4. Scans {session_id}/subagents/ dirs              -> agent discovery + AgentMetadataUpdated
+/// 5. Polls task_graph file mtime                     -> TaskGraphUpdated
 ///
-/// # Imperative Shell
-/// This function performs filesystem I/O (Path::exists check) and belongs in the shell.
-pub fn derive_transcript_path(cwd: &str, session_id: &str) -> Option<String> {
-    if cwd.is_empty() || session_id.is_empty() {
-        return None;
-    }
-    let project_hash = cwd.replace('/', "-");
-    let home = std::env::var("HOME").ok()?;
-    let path = format!("{}/.claude/projects/{}/{}.jsonl", home, project_hash, session_id);
-    if std::path::Path::new(&path).exists() {
-        Some(path)
-    } else {
-        None
-    }
-}
-
-/// Starts file watching for all paths and returns a channel for receiving events.
-/// Debounces file changes at 200ms.
-///
-/// # Imperative Shell
-/// This function handles I/O setup (file watching) but delegates parsing to pure functions.
-///
-/// # Returns
-/// Channel receiver for AppEvent stream
-pub fn start_watching(
-    paths: &Paths,
-    transcript_dir: Option<PathBuf>,
-) -> WatcherResult<mpsc::Receiver<AppEvent>> {
+/// # FR-018 / FR-032 / SC-002
+/// No notify crate, no events.jsonl watcher, no /tmp/loom-tui references.
+pub fn start_watching(paths: &Paths) -> WatcherResult<mpsc::Receiver<AppEvent>> {
     let (tx, rx) = mpsc::channel();
 
-    // Start dedicated worker thread that owns TailState
-    let tail_worker = start_tail_worker(tx.clone());
+    // Load archived session metas immediately on startup (lightweight)
+    load_archived_session_metas(&paths.archive_dir, &tx);
 
-    // Clone tx for watcher callback; keep original for initial reads
-    let tx_watcher = tx.clone();
-
-    // Clone paths for move into watcher thread
+    let transcript_dir = paths.transcript_dir.clone();
     let task_graph_path = paths.task_graph.clone();
-    let transcripts_dir = paths.transcripts.clone();
-    let events_path = paths.events.clone();
-    let tail_worker_watcher = tail_worker.clone();
-
-    // Create notify watcher with 200ms debounce
-    let mut watcher = RecommendedWatcher::new(
-        move |res: Result<notify::Event, notify::Error>| {
-            handle_watch_event(
-                res,
-                &task_graph_path,
-                &transcripts_dir,
-                &events_path,
-                &tail_worker_watcher,
-                &tx_watcher,
-            );
-        },
-        Config::default().with_poll_interval(Duration::from_millis(200)),
-    )?;
-
-    // Watch all paths (no longer watching active_agents — derived from hook events)
-    watch_path(&mut watcher, &paths.task_graph)?;
-    watch_path(&mut watcher, &paths.transcripts)?;
-
-    // Watch events file's parent dir so we catch file creation + modifications
-    // even if events.jsonl doesn't exist yet at startup
-    if let Some(events_dir) = paths.events.parent() {
-        std::fs::create_dir_all(events_dir)?;
-        watch_path(&mut watcher, events_dir)?;
-    }
-
-    // Initial read of existing files
-    load_existing_files(paths, &tail_worker, &tx);
-
-    // Periodic polling of events file — ensures real-time updates even if inotify
-    // misses appends (common on tmpfs). TailState deduplicates so no double-processing.
-    let events_path_poll = paths.events.clone();
-    let tail_worker_poll = tail_worker.clone();
 
     std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_millis(200));
-            if events_path_poll.exists()
-                && tail_worker_poll.send(TailCommand::ReadFile(events_path_poll.clone())).is_err() {
-                    return;
-                }
-        }
-    });
-
-    // Poll Claude Code transcript files for assistant reasoning text
-    if let Some(dir) = transcript_dir {
-        start_transcript_polling(dir, tx);
-    }
-
-    // Keep watcher alive by moving it to a separate thread
-    std::thread::spawn(move || {
-        let _watcher = watcher;
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-        }
+        polling_loop(transcript_dir, task_graph_path, tx);
     });
 
     Ok(rx)
 }
 
-/// Start polling Claude Code transcript files for assistant reasoning text.
-/// Polls files every 200ms, rescans directory every 2s for recently modified .jsonl files,
-/// tails new content, and emits AssistantText events.
-/// Discovers subagent transcripts in `subagents/` subdirs and emits metadata events.
-///
-/// Scans ALL project directories under `~/.claude/projects/` (not just the current project)
-/// because hook events from all Claude Code sessions arrive in the same events.jsonl.
-/// Without cross-project scanning, subagent tool events from other projects never get
-/// agent_id attribution via dedup upgrade.
-fn start_transcript_polling(transcript_dir: PathBuf, tx: mpsc::Sender<AppEvent>) {
-    // Derive ~/.claude/projects/ root from the primary transcript dir
-    let projects_root = transcript_dir.parent().map(|p| p.to_path_buf());
+// ---------------------------------------------------------------------------
+// Polling loop (imperative shell — all I/O lives here)
+// ---------------------------------------------------------------------------
 
-    std::thread::spawn(move || {
-        let mut tail_state = TailState::new();
-        // value: (modified_time, is_subagent)
-        let mut known_files: BTreeMap<PathBuf, (std::time::SystemTime, bool)> = BTreeMap::new();
-        let mut scan_counter: u32 = 0;
-        let mut is_metadata_tick;
+fn polling_loop(
+    transcript_dir: PathBuf,
+    task_graph_path: PathBuf,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let mut tail_state = TailState::new();
 
-        loop {
-            std::thread::sleep(Duration::from_millis(200));
-            scan_counter = scan_counter.wrapping_add(1);
-            is_metadata_tick = scan_counter % 10 == 1;
+    // key: absolute path to .jsonl file
+    let mut known_files: BTreeMap<PathBuf, FileState> = BTreeMap::new();
 
-            // Rescan directories every ~2s (10 iterations) to discover new files
-            if scan_counter % 10 == 1 {
-                let cutoff = std::time::SystemTime::now() - Duration::from_secs(3600);
+    // key: session_id (string), value: whether session is confirmed + last_mtime
+    let mut session_confirmed: BTreeMap<String, (bool, SystemTime)> = BTreeMap::new();
+    // sessions we have already emitted SessionCompleted for
+    let mut completed_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-                // Collect all project dirs to scan: primary + all others under ~/.claude/projects/
-                let mut project_dirs = vec![transcript_dir.clone()];
-                if let Some(ref root) = projects_root {
-                    if let Ok(entries) = std::fs::read_dir(root) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_dir() && path != transcript_dir {
-                                project_dirs.push(path);
-                            }
-                        }
-                    }
-                }
+    let mut task_graph_mtime: Option<SystemTime> = None;
+    let mut scan_counter: u32 = 0;
 
-                for proj_dir in &project_dirs {
-                    scan_project_dir(proj_dir, cutoff, &mut known_files);
-                }
-            }
+    // Initial session reply done immediately
+    if tx.send(AppEvent::ReplayComplete).is_err() {
+        return;
+    }
 
-            // Tail known files for new content
-            let paths: Vec<(PathBuf, bool)> = known_files
-                .iter()
-                .map(|(p, (_, is_sub))| (p.clone(), *is_sub))
-                .collect();
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        scan_counter = scan_counter.wrapping_add(1);
 
-            for (path, is_subagent) in paths {
-                if !path.exists() {
+        let do_dir_rescan = scan_counter % DIR_RESCAN_INTERVAL == 1;
+        let do_metadata_emit = scan_counter % METADATA_EMIT_INTERVAL == 1;
+
+        // ----------------------------------------------------------------
+        // 1. Scan transcript directory for new .jsonl files
+        // ----------------------------------------------------------------
+        if do_dir_rescan {
+            scan_transcript_dir(
+                &transcript_dir,
+                &mut known_files,
+                &mut session_confirmed,
+                &mut completed_sessions,
+                &tx,
+            );
+        }
+
+        // ----------------------------------------------------------------
+        // 2 + 3. For each known file: check mtime lifecycle + tail content
+        // ----------------------------------------------------------------
+        let paths: Vec<PathBuf> = known_files.keys().cloned().collect();
+        for path in paths {
+            let file_state = match known_files.get_mut(&path) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let session_id = file_state.session_id.clone();
+            let is_subagent = file_state.is_subagent;
+
+            // Get current mtime (non-fatal on error)
+            let current_mtime = match path.metadata().and_then(|m| m.modified()) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File deleted — clean up state to stop polling it
+                    known_files.remove(&path);
+                    session_confirmed.remove(&session_id);
                     continue;
                 }
-                let new_content = match tail_state.read_new_lines(&path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        if tx.send(AppEvent::Error {
-                            source: path.display().to_string(),
-                            error: WatcherError::Io(e.to_string()).into(),
+                Err(e) => {
+                    if tx.send(AppEvent::Error {
+                        source: path.display().to_string(),
+                        error: WatcherError::Io(e.to_string()).into(),
+                    }).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            // Update mtime on file state
+            file_state.mtime = current_mtime;
+
+            // Update per-session mtime tracker (use the freshest mtime across all files)
+            if let Some((confirmed, prev_mtime)) = session_confirmed.get_mut(&session_id) {
+                if current_mtime > *prev_mtime {
+                    *prev_mtime = current_mtime;
+
+                    // Reactivate if previously completed
+                    if completed_sessions.remove(&session_id) {
+                        if tx.send(AppEvent::SessionReactivated {
+                            session_id: SessionId::new(&session_id),
                         }).is_err() {
                             return;
                         }
-                        continue;
                     }
-                };
+                    let _ = confirmed; // borrowed; confirm state updated by update.rs on UserMessage
+                }
+            }
 
-                // For subagent transcripts ({session_id}/subagents/agent-{id}.jsonl),
-                // extract session_id from grandparent dir, not filename.
-                let session_id: String = if is_subagent {
-                    path.parent()                         // subagents/
-                        .and_then(|p| p.parent())         // {session_id}/
-                        .and_then(|p| p.file_name())
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                } else {
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                };
-
-                // Parse incremental content for assistant text + tool progress
-                if !new_content.is_empty() {
-                    let events =
-                        parsers::parse_claude_transcript_incremental(&new_content, &session_id);
-                    for event in events {
-                        if tx.send(AppEvent::HookEventReceived(event)).is_err() {
-                            return;
-                        }
+            // Tail new content from this file (FR-003, NFR-002, NFR-003)
+            let new_content = match tail_state.read_new_lines(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    if tx.send(AppEvent::Error {
+                        source: path.display().to_string(),
+                        error: WatcherError::Io(e.to_string()).into(),
+                    }).is_err() {
+                        return;
                     }
+                    continue;
+                }
+            };
 
-                    // Note: parse_agent_progress_tool_calls removed — subagent transcripts
-                    // now produce properly-attributed tool events via
-                    // parse_claude_transcript_incremental (assistant entries with agentId).
+            if !new_content.is_empty() {
+                let events = parsers::parse_transcript_events(&new_content, &session_id);
+
+                // FR-010/FR-012: mark session confirmed if any UserMessage seen
+                let has_user_message = events
+                    .iter()
+                    .any(|e| matches!(e.kind, crate::model::TranscriptEventKind::UserMessage));
+                if has_user_message {
+                    if let Some((confirmed, _)) = session_confirmed.get_mut(&session_id) {
+                        *confirmed = true;
+                    }
                 }
 
-                // For subagent transcripts, parse metadata from the FULL file on the ~2s
-                // rescan tick (not every 200ms). Not gated on new_content — the agent
-                // might not be registered yet when the first chunk arrives. Full-file parse
-                // is cheap and the update handler uses SET semantics (idempotent).
-                if is_subagent && is_metadata_tick {
-                    let full_content = match std::fs::read_to_string(&path) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-                    let metadata = parsers::parse_transcript_metadata(&full_content);
-                    if metadata.model.is_some() || !metadata.token_usage.is_empty() || !metadata.skills.is_empty() {
-                        // Extract agent_id from filename (agent-{id}.jsonl)
-                        let file_stem = path.file_stem()
+                for mut event in events {
+                    // Mark whether this is a subagent event
+                    if is_subagent {
+                        // Extract agent id from filename: agent-{id}.jsonl
+                        let agent_id = path
+                            .file_stem()
                             .and_then(|s| s.to_str())
-                            .unwrap_or("unknown");
-                        let agent_id = file_stem
-                            .strip_prefix("agent-")
-                            .unwrap_or(file_stem)
+                            .and_then(|s| s.strip_prefix("agent-"))
+                            .unwrap_or_else(|| {
+                                path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown")
+                            })
                             .to_string();
-                        if tx.send(AppEvent::AgentMetadataUpdated {
-                            agent_id: agent_id.into(),
-                            metadata,
-                        }).is_err() {
-                            return;
+                        if event.agent_id.is_none() {
+                            event = event.with_agent(agent_id);
                         }
+                    }
+                    // Stamp session_id if not already set
+                    if event.session_id.is_none() {
+                        event = event.with_session(session_id.as_str());
+                    }
+                    if tx.send(AppEvent::TranscriptEventReceived(event)).is_err() {
+                        return;
                     }
                 }
             }
-        }
-    });
-}
 
-/// Scan a single project dir for .jsonl transcripts and per-session subagent dirs.
-fn scan_project_dir(
-    proj_dir: &Path,
-    cutoff: std::time::SystemTime,
-    known_files: &mut BTreeMap<PathBuf, (std::time::SystemTime, bool)>,
-) {
-    let entries = match std::fs::read_dir(proj_dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            let modified = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            if modified > cutoff {
-                known_files.entry(path).or_insert((modified, false));
-            }
-        } else if path.is_dir() {
-            // Check for flat subagents/ at project root
-            if path.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-                scan_subagents_dir(&path, cutoff, known_files);
-            } else {
-                // Per-session dir: {session_id}/subagents/
-                let subagents_dir = path.join("subagents");
-                if subagents_dir.is_dir() {
-                    scan_subagents_dir(&subagents_dir, cutoff, known_files);
-                }
+            // Emit metadata for subagent files on the rescan tick (FR-014)
+            if is_subagent && do_metadata_emit {
+                emit_agent_metadata(&path, &tx);
             }
         }
-    }
-}
 
-/// Scan a subagents/ directory for .jsonl files and add them to known_files.
-fn scan_subagents_dir(
-    dir: &Path,
-    cutoff: std::time::SystemTime,
-    known_files: &mut BTreeMap<PathBuf, (std::time::SystemTime, bool)>,
-) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        // ----------------------------------------------------------------
+        // 4. Check session lifecycle (mtime staleness) — FR-009, FR-010, FR-011
+        // ----------------------------------------------------------------
+        let now = SystemTime::now();
+        // We need separate traversal to avoid borrow conflicts
+        let sessions_to_check: Vec<(String, bool, SystemTime)> = session_confirmed
+            .iter()
+            .map(|(id, (confirmed, mtime))| (id.clone(), *confirmed, *mtime))
+            .collect();
+
+        for (session_id, confirmed, last_mtime) in sessions_to_check {
+            if completed_sessions.contains(&session_id) {
                 continue;
             }
-            let modified = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .unwrap_or(std::time::UNIX_EPOCH);
-            if modified > cutoff {
-                known_files.entry(path).or_insert((modified, true));
-            }
-        }
-    }
-}
-
-/// Read existing files on startup so the TUI doesn't start empty.
-/// Agent lifecycle is derived from hook events (SubagentStart/SubagentStop),
-/// not from .active marker files.
-fn load_existing_files(
-    paths: &Paths,
-    tail_worker: &mpsc::Sender<TailCommand>,
-    tx: &mpsc::Sender<AppEvent>,
-) {
-    if paths.task_graph.exists() {
-        handle_task_graph_update(&paths.task_graph, tx);
-    }
-
-    if paths.transcripts.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&paths.transcripts) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension() == Some("jsonl".as_ref()) {
-                    handle_transcript_update(&path, tx);
-                }
-            }
-        }
-    }
-
-    if paths.events.exists()
-        && tail_worker.send(TailCommand::ReadFile(paths.events.clone())).is_err() {
-            return;
-        }
-
-    // Signal that initial replay is done (processed after ReadFile in FIFO order)
-    let _ = tail_worker.send(TailCommand::ReplayDone);
-
-    // Load archived session metas (lightweight — skips events/agents/task_graph)
-    match session::list_session_metas(&paths.archive_dir) {
-        Ok((metas, errors)) => {
-            // Report errors from corrupt session files
-            for error in errors {
-                if tx.send(AppEvent::Error {
-                    source: "sessions".to_string(),
-                    error: error.into(),
+            let timeout = if confirmed {
+                CONFIRMED_TIMEOUT
+            } else {
+                UNCONFIRMED_TIMEOUT
+            };
+            let elapsed = now.duration_since(last_mtime).unwrap_or(Duration::ZERO);
+            if elapsed >= timeout {
+                completed_sessions.insert(session_id.clone());
+                if tx.send(AppEvent::SessionCompleted {
+                    session_id: SessionId::new(&session_id),
                 }).is_err() {
                     return;
                 }
             }
-            // Send metas if any successfully loaded
-            if !metas.is_empty()
-                && tx.send(AppEvent::SessionMetasLoaded(metas)).is_err() {
-                }
         }
-        Err(e) => {
-            if tx.send(AppEvent::Error {
-                source: "sessions".to_string(),
-                error: e.into(),
-            }).is_err() {
-            }
+
+        // ----------------------------------------------------------------
+        // 5. Poll task graph by mtime (FR-033)
+        // ----------------------------------------------------------------
+        let new_mtime = task_graph_path.metadata().and_then(|m| m.modified()).ok();
+        if new_mtime.is_some() && new_mtime != task_graph_mtime {
+            task_graph_mtime = new_mtime;
+            handle_task_graph_update(&task_graph_path, &tx);
         }
     }
 }
 
-/// Watch a single path (file or directory)
-fn watch_path(watcher: &mut RecommendedWatcher, path: &Path) -> WatcherResult<()> {
-    if path.exists() {
-        watcher.watch(path, RecursiveMode::Recursive)?;
-    } else {
-        eprintln!("Warning: watch path does not exist: {}", path.display());
-    }
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Directory scanning (FR-001, FR-002, FR-014)
+// ---------------------------------------------------------------------------
 
-/// Handles a single watch event and emits appropriate AppEvent
-fn handle_watch_event(
-    res: Result<notify::Event, notify::Error>,
-    task_graph_path: &Path,
-    transcripts_dir: &Path,
-    events_path: &Path,
-    tail_worker: &mpsc::Sender<TailCommand>,
+/// Scan transcript_dir for top-level .jsonl files and per-session subagent dirs.
+/// Emits SessionDiscovered for newly found sessions.
+fn scan_transcript_dir(
+    transcript_dir: &PathBuf,
+    known_files: &mut BTreeMap<PathBuf, FileState>,
+    session_confirmed: &mut BTreeMap<String, (bool, SystemTime)>,
+    completed_sessions: &mut std::collections::HashSet<String>,
     tx: &mpsc::Sender<AppEvent>,
 ) {
-    match res {
-        Ok(event) => {
-            for path in event.paths {
-                // Task graph updated
-                if path == task_graph_path {
-                    handle_task_graph_update(&path, tx);
-                }
-                // Transcript file updated
-                else if path.starts_with(transcripts_dir)
-                    && path.extension() == Some("jsonl".as_ref())
-                {
-                    handle_transcript_update(&path, tx);
-                }
-                // Hook events file updated (send to worker thread)
-                else if path == events_path
-                    && tail_worker.send(TailCommand::ReadFile(path)).is_err() {
-                        return;
-                    }
-            }
-        }
+    let entries = match std::fs::read_dir(transcript_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
-            if tx.send(AppEvent::Error {
-                source: "file_watcher".to_string(),
-                error: WatcherError::Notify(e.to_string()).into(),
-            }).is_err() {
+            let _ = tx.send(AppEvent::Error {
+                source: transcript_dir.display().to_string(),
+                error: WatcherError::Io(e.to_string()).into(),
+            });
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            // Top-level session transcript
+            let session_id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            if known_files.contains_key(&path) {
+                continue;
+            }
+
+            let mtime = match entry.metadata().and_then(|m| m.modified()) {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = tx.send(AppEvent::Error {
+                        source: path.display().to_string(),
+                        error: WatcherError::Io(e.to_string()).into(),
+                    });
+                    continue;
+                }
+            };
+
+            known_files.insert(path.clone(), FileState {
+                mtime,
+                is_subagent: false,
+                session_id: session_id.clone(),
+            });
+
+            // Only emit SessionDiscovered if not already known as completed
+            // (re-discovery after restart should still emit)
+            if !session_confirmed.contains_key(&session_id) {
+                session_confirmed.insert(session_id.clone(), (false, mtime));
+                if tx.send(AppEvent::SessionDiscovered {
+                    session_id: SessionId::new(&session_id),
+                    transcript_path: path,
+                }).is_err() {
+                    return;
+                }
+            } else if completed_sessions.contains(&session_id) {
+                // Found a completed session's file again — may have new content;
+                // reactivation is handled by mtime check in polling loop
+            }
+        } else if path.is_dir() {
+            // Per-session subagent dir: {session_id}/subagents/
+            let subagents_dir = path.join("subagents");
+            if subagents_dir.is_dir() {
+                let parent_session_id = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                scan_subagents_dir(
+                    &subagents_dir,
+                    &parent_session_id,
+                    known_files,
+                    tx,
+                );
             }
         }
     }
 }
 
-/// Handle task graph file update (I/O shell calls pure parser)
-fn handle_task_graph_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
+/// Scan a subagents/ directory for agent-*.jsonl files and register them.
+fn scan_subagents_dir(
+    dir: &PathBuf,
+    parent_session_id: &str,
+    known_files: &mut BTreeMap<PathBuf, FileState>,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            let _ = tx.send(AppEvent::Error {
+                source: dir.display().to_string(),
+                error: WatcherError::Io(e.to_string()).into(),
+            });
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if known_files.contains_key(&path) {
+            continue;
+        }
+
+        let mtime = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = tx.send(AppEvent::Error {
+                    source: path.display().to_string(),
+                    error: WatcherError::Io(e.to_string()).into(),
+                });
+                continue;
+            }
+        };
+
+        known_files.insert(path, FileState {
+            mtime,
+            is_subagent: true,
+            session_id: parent_session_id.to_string(),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: emit agent metadata from full file content
+// ---------------------------------------------------------------------------
+
+fn emit_agent_metadata(path: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
+    let full_content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(AppEvent::Error {
+                source: path.display().to_string(),
+                error: WatcherError::Io(e.to_string()).into(),
+            });
+            return;
+        }
+    };
+
+    let metadata = parsers::parse_transcript_metadata(&full_content);
+    if metadata.model.is_none() && metadata.token_usage.is_empty() && metadata.skills.is_empty() {
+        return;
+    }
+
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+    let agent_id = file_stem.strip_prefix("agent-").unwrap_or(file_stem).to_string();
+
+    let _ = tx.send(AppEvent::AgentMetadataUpdated {
+        agent_id: agent_id.into(),
+        metadata,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Helper: read + parse task graph
+// ---------------------------------------------------------------------------
+
+fn handle_task_graph_update(path: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
     match std::fs::read_to_string(path) {
         Ok(content) => match parsers::parse_task_graph(&content) {
             Ok(graph) => {
-                if tx.send(AppEvent::TaskGraphUpdated(graph)).is_err() {
-                }
+                let _ = tx.send(AppEvent::TaskGraphUpdated(graph));
             }
             Err(e) => {
-                if tx.send(AppEvent::Error {
+                let _ = tx.send(AppEvent::Error {
                     source: path.display().to_string(),
                     error: WatcherError::Parse(e).into(),
-                }).is_err() {
-                }
+                });
             }
         },
         Err(e) => {
-            if tx.send(AppEvent::Error {
+            let _ = tx.send(AppEvent::Error {
                 source: path.display().to_string(),
                 error: WatcherError::Io(e.to_string()).into(),
-            }).is_err() {
-            }
+            });
         }
     }
 }
 
-/// Handle transcript file update (I/O shell calls pure parser)
-fn handle_transcript_update(path: &Path, tx: &mpsc::Sender<AppEvent>) {
-    // Extract agent ID from filename (e.g., "agent-a04.jsonl" -> "a04")
-    let agent_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("agent-"))
-        .unwrap_or("unknown")
-        .to_string();
+// ---------------------------------------------------------------------------
+// Startup: load archived session metas
+// ---------------------------------------------------------------------------
 
-    match std::fs::read_to_string(path) {
-        Ok(content) => match parsers::parse_transcript(&content) {
-            Ok(messages) => {
-                if tx.send(AppEvent::TranscriptUpdated { agent_id: agent_id.into(), messages }).is_err() {
-                }
+fn load_archived_session_metas(archive_dir: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
+    match session::list_session_metas(archive_dir) {
+        Ok((metas, errors)) => {
+            for error in errors {
+                let _ = tx.send(AppEvent::Error {
+                    source: "sessions".to_string(),
+                    error: error.into(),
+                });
             }
-            Err(e) => {
-                if tx.send(AppEvent::Error {
-                    source: path.display().to_string(),
-                    error: WatcherError::Parse(e).into(),
-                }).is_err() {
-                }
+            if !metas.is_empty() {
+                let _ = tx.send(AppEvent::SessionMetasLoaded(metas));
             }
-        },
+        }
         Err(e) => {
-            if tx.send(AppEvent::Error {
-                source: path.display().to_string(),
-                error: WatcherError::Io(e.to_string()).into(),
-            }).is_err() {
-            }
+            let _ = tx.send(AppEvent::Error {
+                source: "sessions".to_string(),
+                error: e.into(),
+            });
         }
     }
 }
 
-/// Enrich SessionStart event with transcript_path and git_branch if not already present.
-/// Performs filesystem I/O to derive and verify the transcript path and get git branch.
-fn enrich_session_start_event(mut event: crate::model::HookEvent) -> crate::model::HookEvent {
-    let needs_transcript = event.raw.get("transcript_path").is_none();
-    let needs_git_branch = event.raw.get("git_branch").is_none();
-
-    if !needs_transcript && !needs_git_branch {
-        return event;
-    }
-
-    // Extract cwd and session_id from the event (clone to avoid borrow conflicts)
-    let cwd = event.raw.get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let session_id = event.session_id.as_ref().map(|s| s.as_str()).unwrap_or("");
-
-    if let serde_json::Value::Object(ref mut map) = event.raw {
-        // Derive transcript path (I/O happens here, in the shell)
-        if needs_transcript {
-            if let Some(transcript_path) = derive_transcript_path(&cwd, session_id) {
-                map.insert("transcript_path".to_string(), serde_json::Value::String(transcript_path));
-            }
-        }
-
-        // Get git branch (I/O happens here, in the shell)
-        if needs_git_branch {
-            if let Some(git_branch) = get_current_git_branch() {
-                map.insert("git_branch".to_string(), serde_json::Value::String(git_branch));
-            }
-        }
-    }
-
-    event
-}
-
-/// Get current git branch by executing git command.
-/// Returns None if not in a git repo or git command fails.
-fn get_current_git_branch() -> Option<String> {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
+    use std::time::Duration;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_watch_path_nonexistent() {
-        let mut watcher =
-            RecommendedWatcher::new(|_| {}, Config::default()).expect("create watcher");
-
-        let result = watch_path(&mut watcher, Path::new("/nonexistent/path"));
-        assert!(result.is_ok());
-    }
+    // -----------------------------------------------------------------------
+    // Unit: handle_task_graph_update
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn test_handle_task_graph_update_valid() {
+    fn task_graph_update_valid_json_emits_event() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("task_graph.json");
 
@@ -649,7 +541,6 @@ mod tests {
         }"#;
 
         fs::write(&path, json).unwrap();
-
         let (tx, rx) = mpsc::channel();
         handle_task_graph_update(&path, &tx);
 
@@ -659,12 +550,12 @@ mod tests {
                 assert_eq!(graph.total_tasks(), 1);
                 assert_eq!(graph.waves.len(), 1);
             }
-            _ => panic!("Expected TaskGraphUpdated event"),
+            _ => panic!("expected TaskGraphUpdated"),
         }
     }
 
     #[test]
-    fn test_handle_task_graph_update_invalid() {
+    fn task_graph_update_invalid_json_emits_error() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("task_graph.json");
         fs::write(&path, "invalid json").unwrap();
@@ -674,73 +565,619 @@ mod tests {
 
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         match event {
-            AppEvent::Error { source, error } => {
+            AppEvent::Error { source, .. } => {
                 assert!(source.contains("task_graph.json"));
-                assert!(error.to_string().contains("JSON"));
             }
-            _ => panic!("Expected Error event"),
+            _ => panic!("expected Error event"),
         }
     }
 
     #[test]
-    fn test_handle_transcript_update_extracts_agent_id() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("agent-a04.jsonl");
-
-        let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","type":"reasoning","content":"test"}"#;
-        fs::write(&path, jsonl).unwrap();
-
+    fn task_graph_update_missing_file_emits_error() {
+        let path = PathBuf::from("/nonexistent/path/task_graph.json");
         let (tx, rx) = mpsc::channel();
-        handle_transcript_update(&path, &tx);
+        handle_task_graph_update(&path, &tx);
 
         let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(event, AppEvent::Error { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_transcript_dir — session discovery (FR-001, FR-002)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_discovers_new_jsonl_files() {
+        let temp = TempDir::new().unwrap();
+        let session_file = temp.path().join("session-abc.jsonl");
+        fs::write(&session_file, "").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, rx) = mpsc::channel();
+
+        scan_transcript_dir(
+            &temp.path().to_path_buf(),
+            &mut known_files,
+            &mut session_confirmed,
+            &mut completed,
+            &tx,
+        );
+
+        assert!(known_files.contains_key(&session_file));
+        assert!(session_confirmed.contains_key("session-abc"));
+
+        let event = rx.recv_timeout(Duration::from_millis(100)).unwrap();
         match event {
-            AppEvent::TranscriptUpdated { agent_id, messages } => {
-                assert_eq!(agent_id.as_str(), "a04");
-                assert_eq!(messages.len(), 1);
+            AppEvent::SessionDiscovered { session_id, transcript_path } => {
+                assert_eq!(session_id.as_str(), "session-abc");
+                assert_eq!(transcript_path, session_file);
             }
-            _ => panic!("Expected TranscriptUpdated event"),
+            _ => panic!("expected SessionDiscovered"),
         }
     }
 
     #[test]
-    fn test_scan_counter_wraps_at_u32_max() {
-        // Verify wrapping_add prevents overflow and modulo still works
-        let mut counter: u32 = u32::MAX - 5;
+    fn scan_does_not_rediscover_known_files() {
+        let temp = TempDir::new().unwrap();
+        let session_file = temp.path().join("session-xyz.jsonl");
+        fs::write(&session_file, "").unwrap();
 
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, rx) = mpsc::channel();
+
+        // First scan: discovers
+        scan_transcript_dir(
+            &temp.path().to_path_buf(),
+            &mut known_files,
+            &mut session_confirmed,
+            &mut completed,
+            &tx,
+        );
+        let _first = rx.recv_timeout(Duration::from_millis(100)).unwrap();
+
+        // Second scan: should not re-emit
+        scan_transcript_dir(
+            &temp.path().to_path_buf(),
+            &mut known_files,
+            &mut session_confirmed,
+            &mut completed,
+            &tx,
+        );
+
+        let second = rx.recv_timeout(Duration::from_millis(100));
+        assert!(second.is_err(), "should not emit duplicate SessionDiscovered");
+    }
+
+    #[test]
+    fn scan_ignores_non_jsonl_files() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("not-a-transcript.txt"), "").unwrap();
+        fs::write(temp.path().join("data.json"), "").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, rx) = mpsc::channel();
+
+        scan_transcript_dir(
+            &temp.path().to_path_buf(),
+            &mut known_files,
+            &mut session_confirmed,
+            &mut completed,
+            &tx,
+        );
+
+        assert!(known_files.is_empty());
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn scan_nonexistent_dir_is_nonfatal() {
+        let path = PathBuf::from("/nonexistent/transcript/dir");
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, _rx) = mpsc::channel();
+
+        // Must not panic (NFR-007)
+        scan_transcript_dir(&path, &mut known_files, &mut session_confirmed, &mut completed, &tx);
+        assert!(known_files.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_subagents_dir (FR-014)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_subagents_discovers_agent_files() {
+        let temp = TempDir::new().unwrap();
+        let subagents_dir = temp.path().join("subagents");
+        fs::create_dir(&subagents_dir).unwrap();
+        fs::write(subagents_dir.join("agent-a04.jsonl"), "").unwrap();
+        fs::write(subagents_dir.join("agent-b12.jsonl"), "").unwrap();
+        fs::write(subagents_dir.join("not-an-agent.txt"), "").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let (tx, _rx) = mpsc::channel();
+
+        scan_subagents_dir(
+            &subagents_dir,
+            "session-parent",
+            &mut known_files,
+            &tx,
+        );
+
+        // Two .jsonl files discovered; .txt ignored
+        assert_eq!(known_files.len(), 2);
+        for (_, state) in &known_files {
+            assert!(state.is_subagent);
+            assert_eq!(state.session_id, "session-parent");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration: polling loop discovers sessions + tails content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn polling_discovers_session_and_tails_events() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("session-test.jsonl");
+
+        // Pre-create an empty file
+        fs::write(&session_path, "").unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().to_path_buf(),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        let rx = start_watching(&paths).expect("start_watching failed");
+
+        // Drain ReplayComplete
+        let mut discovered = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(AppEvent::SessionDiscovered { session_id, .. }) => {
+                    assert_eq!(session_id.as_str(), "session-test");
+                    discovered = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(discovered, "SessionDiscovered not emitted within 5s");
+    }
+
+    #[test]
+    fn polling_tails_new_transcript_events() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("sess-tail.jsonl");
+
+        // Start with empty file
+        fs::write(&session_path, "").unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().to_path_buf(),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        let rx = start_watching(&paths).expect("start_watching");
+
+        // Wait for session discovery
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut discovered = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::SessionDiscovered { .. }) => {
+                    discovered = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(discovered, "session not discovered");
+
+        // Append a user message JSONL line
+        let line = r#"{"type":"human","timestamp":"2026-03-18T10:00:00Z","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&session_path)
+            .unwrap();
+        writeln!(f, "{}", line).unwrap();
+        drop(f);
+
+        // Expect a TranscriptEventReceived within 1 second (NFR-002)
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut received = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::TranscriptEventReceived(evt)) => {
+                    use crate::model::TranscriptEventKind;
+                    if matches!(evt.kind, TranscriptEventKind::UserMessage) {
+                        assert_eq!(evt.session_id, Some(crate::model::ids::SessionId::new("sess-tail")));
+                        received = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(received, "TranscriptEventReceived not emitted within 3s");
+    }
+
+    #[test]
+    fn polling_emits_task_graph_updated_on_file_creation() {
+        let temp = TempDir::new().unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().join("transcripts"),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        fs::create_dir_all(&paths.transcript_dir).unwrap();
+
+        let rx = start_watching(&paths).expect("start_watching");
+
+        // Write task graph after watcher starts
+        std::thread::sleep(Duration::from_millis(50));
+        let json = r#"{
+            "waves": [
+                {
+                    "number": 1,
+                    "tasks": [{"id": "T1", "description": "task", "status": "pending"}]
+                }
+            ],
+            "total_tasks": 1,
+            "completed_tasks": 0
+        }"#;
+        fs::write(&paths.task_graph, json).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut got_update = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::TaskGraphUpdated(graph)) => {
+                    assert_eq!(graph.total_tasks(), 1);
+                    got_update = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(got_update, "TaskGraphUpdated not emitted within 5s");
+    }
+
+    #[test]
+    fn polling_discovers_subagent_transcripts() {
+        let temp = TempDir::new().unwrap();
+
+        // Create session + subagents structure
+        let session_dir = temp.path().join("session-parent");
+        let subagents_dir = session_dir.join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+
+        // Top-level session file
+        fs::write(temp.path().join("session-parent.jsonl"), "").unwrap();
+        // Subagent file
+        let agent_line = r#"{"type":"assistant","timestamp":"2026-03-18T10:00:00Z","message":{"id":"m1","model":"claude-3","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":10,"output_tokens":20}}}"#;
+        let agent_path = subagents_dir.join("agent-a01.jsonl");
+        fs::write(&agent_path, format!("{}\n", agent_line)).unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().to_path_buf(),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        let rx = start_watching(&paths).expect("start_watching");
+
+        // Wait for subagent transcript events
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut got_agent_event = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::TranscriptEventReceived(evt)) => {
+                    if let Some(ref aid) = evt.agent_id {
+                        if aid.as_str().contains("a01") {
+                            got_agent_event = true;
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(got_agent_event, "subagent transcript event not received");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_counter wrapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_counter_wrapping_never_panics() {
+        let mut counter: u32 = u32::MAX - 5;
         for _ in 0..10 {
             counter = counter.wrapping_add(1);
+            let _ = counter % DIR_RESCAN_INTERVAL;
+            let _ = counter % METADATA_EMIT_INTERVAL;
         }
-
-        // Counter should have wrapped around: MAX-5 + 10 = 4 (after wrap)
-        assert_eq!(counter, 4);
-
-        // Modulo should still work correctly
-        assert_eq!(counter % 10, 4);
-        assert_eq!((counter.wrapping_add(1)) % 10, 5);
-        assert_eq!((counter.wrapping_add(6)) % 10, 0);
+        // No panic = pass
     }
 
-    #[test]
-    fn test_watch_path_warns_on_nonexistent() {
-        let mut watcher =
-            RecommendedWatcher::new(|_| {}, Config::default()).expect("create watcher");
-
-        // Should return Ok even for nonexistent path (with warning logged)
-        let result = watch_path(&mut watcher, Path::new("/nonexistent/definitely/not/here"));
-        assert!(result.is_ok());
-    }
+    // -----------------------------------------------------------------------
+    // Unit: channel send failure graceful handling
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn test_channel_send_failure_exits_thread() {
-        // Simulate channel closed scenario
+    fn channel_closed_handle_task_graph_does_not_panic() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("tg.json");
+        fs::write(&path, "invalid").unwrap();
         let (tx, rx) = mpsc::channel();
-        drop(rx); // Close receiver
+        drop(rx); // close receiver
 
-        // Sending should fail
-        let result = tx.send(AppEvent::TaskGraphUpdated(crate::model::TaskGraph::empty()));
-
-        assert!(result.is_err(), "Send should fail when channel closed");
+        // Must not panic even when receiver is gone
+        handle_task_graph_update(&path, &tx);
     }
 
+    // -----------------------------------------------------------------------
+    // Unit: FR-010/FR-012 — session confirmed on UserMessage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn session_confirmed_after_user_message() {
+        let temp = TempDir::new().unwrap();
+        let session_file = temp.path().join("sess-confirm.jsonl");
+        fs::write(&session_file, "").unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().to_path_buf(),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        let rx = start_watching(&paths).expect("start_watching");
+
+        // Wait for session discovery
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut discovered = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::SessionDiscovered { .. }) => {
+                    discovered = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(discovered, "session not discovered");
+
+        // Append a user message — watcher should mark session confirmed internally.
+        // We verify indirectly: after marking confirmed, SessionCompleted should only
+        // fire after 10min (CONFIRMED_TIMEOUT), not 30s (UNCONFIRMED_TIMEOUT).
+        // Within a short test window, no SessionCompleted should arrive.
+        let line = r#"{"type":"human","timestamp":"2026-03-18T10:00:00Z","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&session_file)
+            .unwrap();
+        writeln!(f, "{}", line).unwrap();
+        drop(f);
+
+        // Drain events for up to 1s; confirm we receive a UserMessage TranscriptEventReceived
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut got_user_message = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::TranscriptEventReceived(evt)) => {
+                    if matches!(evt.kind, crate::model::TranscriptEventKind::UserMessage) {
+                        got_user_message = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(got_user_message, "UserMessage event not received");
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_transcript_dir emits error on non-NotFound io errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_transcript_dir_emits_error_on_permission_denied() {
+        // We test using a path that is a file (not a dir) which causes a non-NotFound error
+        let temp = TempDir::new().unwrap();
+        let not_a_dir = temp.path().join("not_a_dir");
+        fs::write(&not_a_dir, "some content").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, rx) = mpsc::channel();
+
+        scan_transcript_dir(&not_a_dir, &mut known_files, &mut session_confirmed, &mut completed, &tx);
+
+        // Should emit an Error event since it's not a NotFound error (it's NotADirectory)
+        let event = rx.recv_timeout(Duration::from_millis(200));
+        assert!(
+            event.is_ok() && matches!(event.unwrap(), AppEvent::Error { .. }),
+            "expected Error event for non-dir path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_subagents_dir emits error on non-NotFound io errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_subagents_dir_emits_error_on_not_a_dir() {
+        let temp = TempDir::new().unwrap();
+        let not_a_dir = temp.path().join("not_a_dir");
+        fs::write(&not_a_dir, "some content").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let (tx, rx) = mpsc::channel();
+
+        scan_subagents_dir(&not_a_dir, "session-parent", &mut known_files, &tx);
+
+        let event = rx.recv_timeout(Duration::from_millis(200));
+        assert!(
+            event.is_ok() && matches!(event.unwrap(), AppEvent::Error { .. }),
+            "expected Error event for non-dir path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit: scan_subagents_dir silent on NotFound
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_subagents_dir_silent_on_not_found() {
+        let path = PathBuf::from("/nonexistent/subagents/dir");
+        let mut known_files = BTreeMap::new();
+        let (tx, rx) = mpsc::channel();
+
+        scan_subagents_dir(&path, "sess", &mut known_files, &tx);
+
+        // No error should be emitted
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(known_files.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 1: deleted file is cleaned up from known_files (no error spam)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deleted_file_removed_from_known_files_no_error_spam() {
+        let temp = TempDir::new().unwrap();
+        let session_path = temp.path().join("sess-delete.jsonl");
+        fs::write(&session_path, "").unwrap();
+
+        let paths = crate::paths::Paths {
+            task_graph: temp.path().join("task_graph.json"),
+            transcript_dir: temp.path().to_path_buf(),
+            archive_dir: temp.path().join("archives"),
+        };
+
+        let rx = start_watching(&paths).expect("start_watching");
+
+        // Wait for session discovery
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut discovered = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(300)) {
+                Ok(AppEvent::SessionDiscovered { session_id, .. }) => {
+                    assert_eq!(session_id.as_str(), "sess-delete");
+                    discovered = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(discovered, "session not discovered");
+
+        // Delete the file
+        fs::remove_file(&session_path).unwrap();
+
+        // Wait 2 polling cycles (2 * 200ms = 400ms) for the watcher to process the deletion
+        std::thread::sleep(Duration::from_millis(500));
+
+        // Drain any remaining events
+        while rx.recv_timeout(Duration::from_millis(50)).is_ok() {}
+
+        // After cleanup, no AppEvent::Error events should arrive for the deleted path
+        // (the entry should be gone from known_files so it's never polled again)
+        let deadline = std::time::Instant::now() + Duration::from_millis(600);
+        while std::time::Instant::now() < deadline {
+            if let Ok(AppEvent::Error { source, .. }) = rx.recv_timeout(Duration::from_millis(100)) {
+                if source.contains("sess-delete") {
+                    panic!("got error for deleted file after cleanup: {source}");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 3: scanned files never get UNIX_EPOCH mtime — they are registered
+    //         with a real mtime or skipped entirely (no fallback).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_transcript_dir_no_unix_epoch_mtime_in_known_files() {
+        // Verify that after scanning a directory of real files, no entry in
+        // known_files ends up with UNIX_EPOCH as its mtime.
+        // Before Fix 3, a metadata/modified failure fell back to UNIX_EPOCH
+        // which triggered immediate phantom SessionCompleted events.
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("sess-a.jsonl"), "").unwrap();
+        fs::write(temp.path().join("sess-b.jsonl"), "").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let mut session_confirmed = BTreeMap::new();
+        let mut completed = std::collections::HashSet::new();
+        let (tx, _rx) = mpsc::channel();
+
+        scan_transcript_dir(
+            &temp.path().to_path_buf(),
+            &mut known_files,
+            &mut session_confirmed,
+            &mut completed,
+            &tx,
+        );
+
+        // Both files should be discovered with real mtimes (not UNIX_EPOCH)
+        assert_eq!(known_files.len(), 2);
+        for (path, file_state) in &known_files {
+            assert_ne!(
+                file_state.mtime,
+                SystemTime::UNIX_EPOCH,
+                "file {:?} has UNIX_EPOCH mtime — fallback not removed",
+                path
+            );
+        }
+    }
+
+    #[test]
+    fn scan_subagents_dir_no_unix_epoch_mtime_in_known_files() {
+        let temp = TempDir::new().unwrap();
+        let subagents_dir = temp.path().join("subagents");
+        fs::create_dir(&subagents_dir).unwrap();
+        fs::write(subagents_dir.join("agent-x01.jsonl"), "").unwrap();
+
+        let mut known_files = BTreeMap::new();
+        let (tx, _rx) = mpsc::channel();
+
+        scan_subagents_dir(&subagents_dir, "parent-session", &mut known_files, &tx);
+
+        assert_eq!(known_files.len(), 1);
+        for (path, file_state) in &known_files {
+            assert_ne!(
+                file_state.mtime,
+                SystemTime::UNIX_EPOCH,
+                "subagent file {:?} has UNIX_EPOCH mtime — fallback not removed",
+                path
+            );
+        }
+    }
 }

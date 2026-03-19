@@ -1,6 +1,6 @@
-use loom_tui::model::{AgentId, HookEventKind, MessageKind, SessionId, TaskStatus};
+use loom_tui::model::{AgentId, MessageKind, TaskStatus};
 use loom_tui::watcher::{
-    extract_active_agent_ids, parse_hook_events, parse_task_graph, parse_transcript,
+    parse_task_graph, parse_transcript,
     parse_transcript_metadata, TailState,
 };
 use std::fs;
@@ -205,123 +205,7 @@ invalid json line
     assert!(result.unwrap_err().to_string().contains("Line 2"));
 }
 
-#[test]
-fn test_parse_hook_events_all_kinds() {
-    let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
-{"timestamp":"2026-02-11T10:01:00Z","event":"subagent_start","task_description":"Implement feature X"}
-{"timestamp":"2026-02-11T10:02:00Z","event":"pre_tool_use","tool_name":"Read","input_summary":"file.rs"}
-{"timestamp":"2026-02-11T10:03:00Z","event":"post_tool_use","tool_name":"Read","result_summary":"File read","duration_ms":50}
-{"timestamp":"2026-02-11T10:04:00Z","event":"notification","message":"Progress update"}
-{"timestamp":"2026-02-11T10:05:00Z","event":"user_prompt_submit"}
-{"timestamp":"2026-02-11T10:06:00Z","event":"subagent_stop"}
-{"timestamp":"2026-02-11T10:07:00Z","event":"stop","reason":"Task completed"}
-{"timestamp":"2026-02-11T10:08:00Z","event":"session_end"}"#;
-
-    let result = parse_hook_events(jsonl);
-    assert!(result.is_ok());
-
-    let events = result.unwrap();
-    assert_eq!(events.len(), 9);
-
-    // Verify event kinds
-    assert!(matches!(events[0].kind, HookEventKind::SessionStart));
-
-    match &events[1].kind {
-        HookEventKind::SubagentStart { task_description, .. } => {
-            assert_eq!(task_description, &Some("Implement feature X".to_string()));
-        }
-        _ => panic!("Expected SubagentStart"),
-    }
-
-    match &events[2].kind {
-        HookEventKind::PreToolUse { tool_name, input_summary, .. } => {
-            assert_eq!(tool_name.as_str(), "Read");
-            assert_eq!(input_summary, "file.rs");
-        }
-        _ => panic!("Expected PreToolUse"),
-    }
-
-    match &events[3].kind {
-        HookEventKind::PostToolUse { tool_name, result_summary, duration_ms } => {
-            assert_eq!(tool_name.as_str(), "Read");
-            assert_eq!(result_summary, "File read");
-            assert_eq!(duration_ms, &Some(50));
-        }
-        _ => panic!("Expected PostToolUse"),
-    }
-
-    match &events[4].kind {
-        HookEventKind::Notification { message } => {
-            assert_eq!(message, "Progress update");
-        }
-        _ => panic!("Expected Notification"),
-    }
-
-    assert!(matches!(events[5].kind, HookEventKind::UserPromptSubmit));
-    assert!(matches!(events[6].kind, HookEventKind::SubagentStop));
-
-    match &events[7].kind {
-        HookEventKind::Stop { reason } => {
-            assert_eq!(reason, &Some("Task completed".to_string()));
-        }
-        _ => panic!("Expected Stop"),
-    }
-
-    assert!(matches!(events[8].kind, HookEventKind::SessionEnd));
-}
-
-#[test]
-fn test_parse_hook_events_with_metadata() {
-    let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start","session_id":"s123","agent_id":"a01"}"#;
-
-    let result = parse_hook_events(jsonl);
-    assert!(result.is_ok());
-
-    let events = result.unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].session_id, Some(SessionId::new("s123")));
-    assert_eq!(events[0].agent_id, Some(AgentId::new("a01")));
-}
-
-#[test]
-fn test_parse_hook_events_empty() {
-    let result = parse_hook_events("");
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_empty());
-}
-
-#[test]
-fn test_parse_hook_events_skips_invalid_lines() {
-    let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}
-not valid json"#;
-
-    let result = parse_hook_events(jsonl).unwrap();
-    // Invalid line skipped, valid event preserved
-    assert_eq!(result.len(), 1);
-}
-
-#[test]
-fn test_extract_active_agent_ids_mixed_files() {
-    let paths = vec![
-        Path::new("/tmp/claude-subagents/a01.active"),
-        Path::new("/tmp/claude-subagents/a02.active"),
-        Path::new("/tmp/claude-subagents/a03.txt"),
-        Path::new("/tmp/claude-subagents/other.log"),
-        Path::new("/tmp/claude-subagents/a04.active"),
-    ];
-
-    let agent_ids = extract_active_agent_ids(&paths);
-    assert_eq!(agent_ids.len(), 3);
-    assert!(agent_ids.contains(&"a01".to_string()));
-    assert!(agent_ids.contains(&"a02".to_string()));
-    assert!(agent_ids.contains(&"a04".to_string()));
-}
-
-#[test]
-fn test_extract_active_agent_ids_empty_list() {
-    let agent_ids = extract_active_agent_ids(&[]);
-    assert!(agent_ids.is_empty());
-}
+// parse_hook_events and extract_active_agent_ids removed along with hook system (SC-001)
 
 // ============================================================================
 // TailState Tests (Incremental Reading)
@@ -435,19 +319,7 @@ fn test_parse_transcript_partial_tool_data() {
     }
 }
 
-#[test]
-fn test_parse_hook_events_minimal_fields() {
-    // Minimal hook event
-    let jsonl = r#"{"timestamp":"2026-02-11T10:00:00Z","event":"session_start"}"#;
-
-    let result = parse_hook_events(jsonl);
-    assert!(result.is_ok());
-
-    let events = result.unwrap();
-    assert_eq!(events.len(), 1);
-    assert!(events[0].session_id.is_none());
-    assert!(events[0].agent_id.is_none());
-}
+// parse_hook_events_minimal_fields removed — hook system deleted (SC-001)
 
 // ============================================================================
 // Edge Cases

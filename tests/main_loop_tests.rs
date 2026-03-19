@@ -1,8 +1,9 @@
 use chrono::Utc;
 use loom_tui::{
-    app::{update, AppState, HookStatus, ViewState},
+    app::{update, AppState, ViewState},
     event::AppEvent,
-    model::AgentId,
+    model::{AgentId, TranscriptEvent, TranscriptEventKind, TaskGraph, Wave},
+    watcher::TranscriptMetadata,
 };
 use std::time::Duration;
 
@@ -45,38 +46,39 @@ fn event_loop_tick_is_passive() {
     assert!(!state.meta.should_quit);
 }
 
+/// hook_status removed from AppMeta — replaced with a test verifying error tracking.
 #[test]
-fn event_loop_hook_status_transitions() {
+fn event_loop_error_tracking() {
+    use loom_tui::error::{LoomError, WatcherError};
+
     let mut state = AppState::new();
-    assert!(matches!(state.meta.hook_status, HookStatus::Unknown));
+    assert!(state.meta.errors.is_empty());
 
-    state.meta.hook_status = HookStatus::Missing;
-    assert!(matches!(state.meta.hook_status, HookStatus::Missing));
+    update(&mut state, AppEvent::Error {
+        source: "watcher".to_string(),
+        error: LoomError::Watcher(WatcherError::Io("disk error".to_string())),
+    });
 
-    state.meta.hook_status = HookStatus::Installed;
-    assert!(matches!(state.meta.hook_status, HookStatus::Installed));
+    assert_eq!(state.meta.errors.len(), 1);
+    assert!(state.meta.errors[0].contains("watcher"));
 }
 
 #[test]
 fn event_loop_handles_watcher_events() {
-    use chrono::Utc;
-    use loom_tui::model::{HookEvent, HookEventKind, TaskGraph, Wave};
-
     let mut state = AppState::new();
 
     let graph = TaskGraph::new(vec![Wave::new(1, vec![])]);
     update(&mut state, AppEvent::TaskGraphUpdated(graph));
     assert!(state.domain.task_graph.is_some());
 
-    let timestamp = Utc::now();
-    update(&mut state, AppEvent::AgentStarted {
+    update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
-        timestamp,
+        metadata: TranscriptMetadata::default(),
     });
     assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
 
-    let hook_event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
-    update(&mut state, AppEvent::HookEventReceived(hook_event));
+    let transcript_event = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage);
+    update(&mut state, AppEvent::TranscriptEventReceived(transcript_event));
     assert_eq!(state.domain.events.len(), 1);
 }
 
@@ -93,18 +95,17 @@ fn tick_rate_configuration() {
 fn event_loop_drains_multiple_watcher_events() {
     let mut state = AppState::new();
 
-    let timestamp = Utc::now();
-    update(&mut state, AppEvent::AgentStarted {
+    update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
-        timestamp,
+        metadata: TranscriptMetadata::default(),
     });
-    update(&mut state, AppEvent::AgentStarted {
+    update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a02"),
-        timestamp,
+        metadata: TranscriptMetadata::default(),
     });
-    update(&mut state, AppEvent::AgentStarted {
+    update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a03"),
-        timestamp,
+        metadata: TranscriptMetadata::default(),
     });
 
     assert_eq!(state.domain.agents.len(), 3);

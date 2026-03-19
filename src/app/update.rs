@@ -1,9 +1,9 @@
+use std::path::PathBuf;
+
 use crate::app::{handle_key, AppState, ViewState};
-use crate::app::state::PendingTaskPrompt;
 use crate::event::AppEvent;
-use crate::model::{Agent, AgentId, AgentMessage, ArchivedSession, HookEventKind, MessageKind, SessionId, SessionMeta, SessionStatus, ToolCall, ToolName};
+use crate::model::{ArchivedSession, SessionId, SessionMeta, SessionStatus, TranscriptEventKind};
 use crate::session;
-use std::time::Duration;
 
 /// Event handler (Elm-inspired loop). Mutates state in place.
 pub fn update(state: &mut AppState, event: AppEvent) {
@@ -19,348 +19,93 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             }
         }
 
-        AppEvent::TranscriptUpdated { agent_id, messages } => {
-            state.domain.agents.entry(agent_id).and_modify(|agent| {
-                agent.messages = messages;
-            });
-        }
-
-        AppEvent::HookEventReceived(event) => {
-            let is_assistant_text = matches!(event.kind, HookEventKind::AssistantText { .. });
-            let event_session = &event.session_id;
-
-            // Resolve agent attribution using pure function
-            let (agent_id, attribution_confident) = resolve_agent_attribution(
-                event.agent_id.as_ref(),
-                event_session.as_ref(),
-                &state.domain.transcript_agent_map,
-                &state.domain.agents,
-                is_assistant_text,
-            );
-
-            match &event.kind {
-                HookEventKind::SubagentStart {
-                    ref agent_type,
-                    ref task_description,
-                } => {
-                    if let Some(ref id) = event.agent_id {
-                        let resolved_type = agent_type.clone();
-
-                        // Correlate with buffered PreToolUse(Task) prompt (FIFO per session).
-                        // Fall back to task_description from hook payload (for backward compat).
-                        let correlated = event.session_id.as_ref().and_then(|sid| {
-                            let pos = state.domain.pending_task_prompts.iter()
-                                .position(|p| p.session_id == *sid);
-                            pos.and_then(|i| state.domain.pending_task_prompts.remove(i))
-                        });
-                        let correlated_model = correlated.as_ref().and_then(|p| p.model.clone());
-                        let desc = correlated.map(|p| p.prompt).or_else(|| task_description.clone());
-
-                        let is_new = !state.domain.agents.contains_key(id);
-                        state
-                            .domain
-                            .agents
-                            .entry(id.clone())
-                            .and_modify(|a| {
-                                // Clear finished state on restart
-                                a.finished_at = None;
-                                a.started_at = event.timestamp;
-                                if resolved_type.is_some() {
-                                    a.agent_type = resolved_type.clone();
-                                }
-                                if desc.is_some() {
-                                    a.task_description = desc.clone();
-                                }
-                                if correlated_model.is_some() {
-                                    a.model = correlated_model.clone();
-                                }
-                            })
-                            .or_insert_with(|| {
-                                let mut a = Agent::new(id.clone(), event.timestamp);
-                                a.agent_type = resolved_type;
-                                a.model = correlated_model;
-                                a.task_description = desc;
-                                a.session_id = event.session_id.clone();
-                                a
-                            });
-                        agents_changed = true;
-
-                        // Populate transcript_agent_map for subagent event attribution.
-                        // Multiple agents may share the same session_id (bulk spawns).
-                        if let Some(ref sid) = event.session_id {
-                            let agents = state.domain.transcript_agent_map
-                                .entry(sid.clone())
-                                .or_default();
-                            if !agents.contains(id) {
-                                agents.push(id.clone());
-                            }
-                        }
-
-                        // Increment per-session agent count
-                        if is_new {
-                            if let Some(ref sid) = event.session_id {
-                                if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
-                                    meta.agent_count += 1;
-                                }
-                            }
-                        }
-                    }
+        AppEvent::TranscriptEventReceived(event) => {
+            // Attribute to agent if agent_id set
+            if let Some(ref agent_id) = event.agent_id {
+                // Track tool use on agent
+                if let TranscriptEventKind::ToolUse { .. } = &event.kind {
+                    state.increment_tool_count(agent_id);
                 }
-                HookEventKind::SubagentStop => {
-                    if let Some(ref id) = event.agent_id {
-                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
-                            if agent.finished_at.is_none() {
-                                agent.finished_at = Some(event.timestamp);
-                            }
-                        });
-                        agents_changed = true;
-                    }
-                }
-                HookEventKind::PreToolUse {
-                    tool_name,
-                    input_summary,
-                    ref task_prompt,
-                    ref task_model,
-                } => {
-                    if let Some(ref id) = agent_id {
-                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
-                            agent.messages.push(AgentMessage::tool(
-                                event.timestamp,
-                                ToolCall::new(tool_name.clone(), input_summary.clone()),
-                            ));
-                        });
-                    }
-
-                    // Buffer full prompt + model from Task tool calls for SubagentStart correlation
-                    if *tool_name == ToolName::new("Task") {
-                        if let Some(prompt) = task_prompt {
-                            if let Some(ref sid) = event.session_id {
-                                state.domain.pending_task_prompts.push_back(PendingTaskPrompt {
-                                    session_id: sid.clone(),
-                                    prompt: prompt.clone(),
-                                    model: task_model.clone(),
-                                    timestamp: event.timestamp,
-                                });
-                            }
-                        }
-                    }
-                }
-                HookEventKind::PostToolUse {
-                    tool_name,
-                    result_summary,
-                    duration_ms,
-                } => {
-                    if let Some(ref id) = agent_id {
-                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
-                            if let Some(msg) = agent.messages.iter_mut().rev().find(|m| {
-                                matches!(&m.kind, MessageKind::Tool(tc) if tc.tool_name == *tool_name && tc.success.is_none())
-                            }) {
-                                if let MessageKind::Tool(ref mut tc) = msg.kind {
-                                    tc.result_summary = Some(result_summary.clone());
-                                    tc.success = Some(true);
-                                    if let Some(ms) = duration_ms {
-                                        tc.duration = Some(Duration::from_millis(*ms));
-                                    }
-                                }
-                            }
-                        });
-                        // Increment cached tool count
-                        state.increment_tool_count(id);
-                    }
-                }
-                HookEventKind::SessionStart => {
-                    let session_id = event.session_id.clone()
-                        .unwrap_or_else(|| format!("s{}", event.timestamp.format("%Y%m%d-%H%M%S")).into());
-
-                    // Only create session if not already active (idempotent)
-                    // Prevents duplicate SessionStart events from resetting counters
-                    if !state.domain.active_sessions.contains_key(&session_id) {
-                        let project_path = event.raw.get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(String::from)
-                            .unwrap_or_else(|| state.meta.project_path.clone());
-
-                        // Transcript path and git branch are pre-computed in the imperative shell (watcher)
-                        let transcript_path = event.raw.get("transcript_path")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-
-                        let git_branch = event.raw.get("git_branch")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-
-                        let mut meta = SessionMeta::new(
-                            session_id.clone(),
-                            event.timestamp,
-                            project_path,
-                        );
-                        meta.transcript_path = transcript_path;
-                        meta.git_branch = git_branch;
-                        state.domain.active_sessions.insert(session_id, meta);
-                    }
-                }
-                HookEventKind::SessionEnd => {
-                    let session_id = event.session_id.clone()
-                        .unwrap_or_else(|| SessionId::new(""));
-
-                    // Mark all active agents in this session as finished
-                    for agent in state.domain.agents.values_mut() {
-                        if agent.finished_at.is_none() && agent.session_id.as_ref() == Some(&session_id) {
-                            agent.finished_at = Some(event.timestamp);
-                            agents_changed = true;
-                        }
-                    }
-
-                    if let Some(mut meta) = state.domain.active_sessions.remove(&session_id) {
-                        meta.status = SessionStatus::Completed;
-                        // agent_count, event_count, task_count already tracked incrementally
-                        let dur = (event.timestamp - meta.timestamp)
-                            .to_std()
-                            .unwrap_or_default();
-                        meta.duration = Some(dur);
-                        let archive = session::build_archive(
-                            state.domain.task_graph.as_ref(),
-                            &state.domain.events,
-                            &state.domain.agents,
-                            &meta,
-                        );
-                        let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
-                            .with_data(archive);
-                        state.domain.sessions.insert(0, archived);
-                    }
-                }
-                HookEventKind::UserPromptSubmit => {
-                    // A real user typed a prompt — confirm this session as non-phantom
-                    if let Some(ref sid) = event.session_id {
-                        if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
-                            meta.confirmed = true;
-                        }
-                    }
-                }
-                HookEventKind::Stop { .. } => {
-                    // Stop events fire when a session/agent stops. Mark attributed agent
-                    // as finished, and also mark all active agents in the session.
-                    if let Some(ref id) = agent_id {
-                        state.domain.agents.entry(id.clone()).and_modify(|agent| {
-                            if agent.finished_at.is_none() {
-                                agent.finished_at = Some(event.timestamp);
-                                agents_changed = true;
-                            }
-                        });
-                    }
-                    if let Some(ref sid) = event.session_id {
-                        for agent in state.domain.agents.values_mut() {
-                            if agent.finished_at.is_none() && agent.session_id.as_ref() == Some(sid) {
-                                agent.finished_at = Some(event.timestamp);
-                                agents_changed = true;
-                            }
-                        }
-                    }
-                }
-                _ => {}
             }
 
-            // Only stamp agent_id on stored event when attribution is unambiguous.
-            // With concurrent agents sharing a session, tool events lack agent_id;
-            // stamping a guess causes them to show under the wrong agent.
-            let mut enriched = event;
-            if enriched.agent_id.is_none() && attribution_confident {
-                enriched.agent_id = agent_id;
-            }
-
-            // Increment per-session event count + update last_event_at + backfill project_path
-            if let Some(ref sid) = enriched.session_id {
+            // Update session metadata for the session this event belongs to
+            if let Some(ref sid) = event.session_id {
                 if let Some(meta) = state.domain.active_sessions.get_mut(sid) {
                     meta.event_count += 1;
-                    meta.last_event_at = Some(enriched.timestamp);
-                    // Auto-confirm sessions that keep receiving events beyond the
-                    // phantom timeout. Headless sessions (remote exec, pushed plans)
-                    // never get UserPromptSubmit but are clearly real if they persist.
+                    meta.last_event_at = Some(event.timestamp);
+                    // Confirm session on UserMessage (real user prompt received)
+                    if matches!(event.kind, TranscriptEventKind::UserMessage) {
+                        meta.confirmed = true;
+                    }
+                    // Auto-confirm sessions that persist beyond phantom timeout
                     if !meta.confirmed
-                        && (enriched.timestamp - meta.timestamp) > chrono::Duration::seconds(30)
+                        && (event.timestamp - meta.timestamp) > chrono::Duration::seconds(30)
                     {
                         meta.confirmed = true;
                     }
-                    // Backfill project_path from cwd if still default
-                    if meta.project_path == state.meta.project_path || meta.project_path.is_empty() {
-                        if let Some(cwd) = enriched.raw.get("cwd").and_then(|v| v.as_str()) {
-                            if !cwd.is_empty() {
-                                meta.project_path = cwd.to_string();
-                            }
-                        }
-                    }
                 }
             }
 
-            // Dedup: tool events arrive from both hooks (agent_id=None) and
-            // transcript parsing (agent_id=Some). Scan backwards through the full
-            // ring buffer — the 64-event window was too small when concurrent sessions
-            // push many events between hook delivery and transcript parse.
-            // If existing has no agent_id and new does → upgrade attribution.
-            // If existing has agent_id and new doesn't → skip (already have better data).
-            // If both match → skip (pure duplicate).
-            //
-            // When upgrading a PreToolUse, also upgrade the matching PostToolUse
-            // (same tool_name, nearby in buffer). Transcripts only produce PreToolUse
-            // from tool_use blocks — PostToolUse has no transcript counterpart.
-            let should_insert = if let Some(new_key) = enriched.dedup_key() {
-                let mut replaced = false;
-                for i in (0..state.domain.events.len()).rev() {
-                    if let Some(existing_key) = state.domain.events[i].dedup_key() {
-                        if existing_key == new_key {
-                            if state.domain.events[i].agent_id.is_none() && enriched.agent_id.is_some() {
-                                state.domain.events[i].agent_id = enriched.agent_id.clone();
-                                // Also upgrade the matching PostToolUse (no transcript counterpart)
-                                if let HookEventKind::PreToolUse { ref tool_name, .. } = enriched.kind {
-                                    let tn = tool_name.clone();
-                                    let aid = enriched.agent_id.clone();
-                                    // Scan forward from the matched PreToolUse for its PostToolUse
-                                    for j in (i + 1)..state.domain.events.len() {
-                                        if let HookEventKind::PostToolUse { ref tool_name, .. } = state.domain.events[j].kind {
-                                            if *tool_name == tn && state.domain.events[j].agent_id.is_none() {
-                                                state.domain.events[j].agent_id = aid;
-                                                break;
-                                            }
-                                        }
-                                        // Stop scanning if we hit another PreToolUse for the same tool
-                                        if let HookEventKind::PreToolUse { ref tool_name, .. } = state.domain.events[j].kind {
-                                            if *tool_name == tn {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            replaced = true;
-                            break;
-                        }
-                    }
-                }
-                !replaced
-            } else {
-                true
-            };
+            // Push to ring buffer (evict oldest if at capacity)
+            if state.domain.events.len() >= 10_000 {
+                state.domain.events.pop_front();
+            }
+            state.domain.events.push_back(event);
+        }
 
-            if should_insert {
-                // Ring buffer eviction: pop oldest if at capacity
-                if state.domain.events.len() >= 10_000 {
-                    state.domain.events.pop_front();
-                }
-                state.domain.events.push_back(enriched);
+        AppEvent::SessionDiscovered { session_id, transcript_path } => {
+            // Only create session if not already tracked (idempotent)
+            if !state.domain.active_sessions.contains_key(&session_id) {
+                let now = chrono::Utc::now();
+                let mut meta = SessionMeta::new(
+                    session_id.clone(),
+                    now,
+                    state.meta.project_path.clone(),
+                );
+                meta.transcript_path = Some(transcript_path.display().to_string());
+                state.domain.active_sessions.insert(session_id, meta);
             }
         }
 
-        AppEvent::AgentStarted { agent_id, timestamp } => {
-            let agent = Agent::new(agent_id.clone(), timestamp);
-            state.domain.agents.insert(agent_id, agent);
-            agents_changed = true;
+        AppEvent::SessionCompleted { session_id } => {
+            if let Some(mut meta) = state.domain.active_sessions.remove(&session_id) {
+                meta.status = SessionStatus::Completed;
+                let now = chrono::Utc::now();
+                let dur = (now - meta.timestamp).to_std().unwrap_or_default();
+                meta.duration = Some(dur);
+
+                let archive = session::build_archive(
+                    state.domain.task_graph.as_ref(),
+                    &state.domain.events,
+                    &state.domain.agents,
+                    &meta,
+                );
+                let archived = ArchivedSession::new(meta, PathBuf::new()).with_data(archive);
+                state.domain.sessions.insert(0, archived);
+            }
         }
 
-        AppEvent::AgentStopped { agent_id, timestamp } => {
-            state.domain.agents.entry(agent_id).and_modify(|agent| {
-                agent.finished_at = Some(timestamp);
-            });
-            agents_changed = true;
+        AppEvent::SessionReactivated { session_id } => {
+            // Move from archived back to active, or create fresh entry
+            // First check if we have it in sessions list to restore meta
+            let archived_meta = state.domain.sessions.iter()
+                .find(|s| s.meta.id == session_id)
+                .map(|s| s.meta.clone());
+
+            if !state.domain.active_sessions.contains_key(&session_id) {
+                let meta = if let Some(mut m) = archived_meta {
+                    m.status = SessionStatus::Active;
+                    m.last_event_at = Some(chrono::Utc::now());
+                    m
+                } else {
+                    SessionMeta::new(
+                        session_id.clone(),
+                        chrono::Utc::now(),
+                        state.meta.project_path.clone(),
+                    )
+                };
+                state.domain.active_sessions.insert(session_id, meta);
+            }
         }
 
         AppEvent::Key(key) => {
@@ -372,18 +117,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         }
 
         AppEvent::Tick(now) => {
-            // Evict stale pending task prompts (uncorrelated after 60s)
-            let prompt_cutoff = now - chrono::Duration::seconds(60);
-            state.domain.pending_task_prompts.retain(|p| p.timestamp > prompt_cutoff);
-
             // Skip stale cleanup until initial event replay is done.
             // During replay, historical timestamps would cause all sessions to expire
             // because Tick uses real-time `now` but events have old timestamps.
             if state.meta.replay_complete {
                 // Expire stale sessions:
-                // - Confirmed sessions: 5 minute timeout (real user sessions)
-                // - Unconfirmed sessions: 30 second timeout (phantom subagent sessions)
-                let confirmed_cutoff = now - chrono::Duration::minutes(5);
+                // - Confirmed sessions: 10 minute timeout (FR-010)
+                // - Unconfirmed sessions: 30 second timeout (FR-013)
+                let confirmed_cutoff = now - chrono::Duration::minutes(10);
                 let unconfirmed_cutoff = now - chrono::Duration::seconds(30);
                 let stale_ids: Vec<(SessionId, bool)> = state
                     .domain
@@ -397,9 +138,10 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     })
                     .map(|(id, meta)| (id.clone(), meta.confirmed))
                     .collect();
+
                 for (id, was_confirmed) in stale_ids {
                     if let Some(mut meta) = state.domain.active_sessions.remove(&id) {
-                        // Only archive confirmed sessions; drop phantom sessions silently
+                        // Only archive confirmed sessions; drop phantom sessions silently (FR-013)
                         if was_confirmed {
                             meta.status = SessionStatus::Cancelled;
                             let dur = (now - meta.timestamp).to_std().unwrap_or_default();
@@ -410,8 +152,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                                 &state.domain.agents,
                                 &meta,
                             );
-                            let archived = ArchivedSession::new(meta, std::path::PathBuf::new())
-                                .with_data(archive);
+                            let archived = ArchivedSession::new(meta, PathBuf::new()).with_data(archive);
                             state.domain.sessions.insert(0, archived);
                         }
                     }
@@ -423,29 +164,27 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             if state.meta.errors.len() >= 100 {
                 state.meta.errors.pop_front();
             }
+            // Clear loading state if this error is from a session load
+            if let Some(ref sid) = state.ui.loading_session {
+                if source.contains(sid.as_str()) {
+                    state.ui.loading_session = None;
+                }
+            }
             let error_msg = format!("{}: {}", source, error);
             state.meta.errors.push_back(error_msg);
         }
 
         AppEvent::SessionLoaded(archive) => {
+            state.ui.loading_session = None;
             if let Some(session) = state.domain.sessions.iter_mut().find(|s| s.meta.id == archive.meta.id) {
                 session.data = Some(archive);
+                state.ui.view = ViewState::SessionDetail;
+                state.ui.scroll_offsets.session_detail_left = 0;
+                state.ui.scroll_offsets.session_detail_right = 0;
+                state.ui.focus = crate::app::PanelFocus::Left;
+            } else {
+                state.meta.errors.push_back(format!("session {} not found after load", archive.meta.id));
             }
-            state.ui.loading_session = None;
-            state.ui.view = ViewState::SessionDetail;
-            state.ui.scroll_offsets.session_detail_left = 0;
-            state.ui.scroll_offsets.session_detail_right = 0;
-            state.ui.focus = crate::app::PanelFocus::Left;
-        }
-
-        AppEvent::SessionListRefreshed(archives) => {
-            state.domain.sessions = archives
-                .into_iter()
-                .map(|a| {
-                    let meta = a.meta.clone();
-                    ArchivedSession::new(meta, std::path::PathBuf::new()).with_data(a)
-                })
-                .collect();
         }
 
         AppEvent::SessionMetasLoaded(metas) => {
@@ -459,21 +198,25 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             state.ui.loading_session = Some(sid);
         }
 
-        AppEvent::InstallHookRequested => {
-            // Side-effect (install_hook) handled in main event loop
-            // Update just marks intent — no I/O in functional core
-        }
-
         AppEvent::AgentMetadataUpdated { agent_id, metadata } => {
-            // SET semantics (not delta) — watcher sends absolute totals from full file parse.
-            // Safe to call repeatedly; idempotent for model/skills, overwrites token_usage.
-            state.domain.agents.entry(agent_id).and_modify(|agent| {
-                if let Some(ref m) = metadata.model {
-                    agent.model = Some(m.clone());
-                }
-                agent.token_usage = metadata.token_usage.clone();
-                agent.skills = metadata.skills.clone();
-            });
+            use crate::model::Agent;
+            // Ensure agent entry exists (create if metadata arrives before discovery)
+            let now = chrono::Utc::now();
+            let len_before = state.domain.agents.len();
+            let agent = state.domain.agents
+                .entry(agent_id.clone())
+                .or_insert_with(|| Agent::new(agent_id.clone(), now));
+
+            // SET semantics — watcher sends absolute totals from full file parse.
+            if let Some(ref m) = metadata.model {
+                agent.model = Some(m.clone());
+            }
+            agent.token_usage = metadata.token_usage.clone();
+            agent.skills = metadata.skills.clone();
+
+            if state.domain.agents.len() > len_before {
+                agents_changed = true;
+            }
         }
     }
 
@@ -482,90 +225,21 @@ pub fn update(state: &mut AppState, event: AppEvent) {
     }
 }
 
-/// Pure function to resolve agent attribution from event data.
-///
-/// Returns (agent_id, is_confident) where:
-/// - Confident = explicit agent_id or single-candidate match
-/// - Not confident = multiple active agents (ambiguous, best guess)
-///
-/// Attribution strategy:
-/// 1. Explicit agent_id → confident
-/// 2. Single candidate in transcript_agent_map → confident
-/// 3. Multiple candidates → pick most recent active, not confident
-/// 4. Fall back to session_id match (unless is_assistant_text) → confident if single match
-fn resolve_agent_attribution(
-    explicit_agent_id: Option<&AgentId>,
-    session_id: Option<&SessionId>,
-    transcript_agent_map: &std::collections::BTreeMap<SessionId, Vec<AgentId>>,
-    agents: &std::collections::BTreeMap<AgentId, Agent>,
-    is_assistant_text: bool,
-) -> (Option<AgentId>, bool) {
-    // Explicit agent_id is always confident
-    if let Some(id) = explicit_agent_id {
-        return (Some(id.clone()), true);
-    }
-
-    // Try transcript_agent_map (session → agents mapping)
-    if let Some(sid) = session_id {
-        if let Some(candidates) = transcript_agent_map.get(sid) {
-            if candidates.len() == 1 {
-                return (Some(candidates[0].clone()), true);
-            }
-
-            // Multiple agents — best guess: most recent active agent
-            let agent_id = candidates
-                .iter()
-                .filter_map(|aid| agents.get(aid).map(|a| (aid, a)))
-                .filter(|(_, a)| a.finished_at.is_none())
-                .max_by_key(|(_, a)| a.started_at)
-                .map(|(aid, _)| aid.clone())
-                .or_else(|| {
-                    // No active agents, pick most recent finished
-                    candidates
-                        .iter()
-                        .filter_map(|aid| agents.get(aid).map(|a| (aid, a)))
-                        .max_by_key(|(_, a)| a.started_at)
-                        .map(|(aid, _)| aid.clone())
-                });
-
-            if agent_id.is_some() {
-                return (agent_id, false); // Multiple candidates, not confident
-            }
-        }
-    }
-
-    // AssistantText events should not fall back to session_id matching
-    // (main transcript shares parent session_id with subagents)
-    if is_assistant_text {
-        return (None, false);
-    }
-
-    // Last resort: match by session_id among active agents
-    let mut matches: Vec<_> = agents
-        .iter()
-        .filter(|(_, a)| a.finished_at.is_none() && a.session_id.as_ref() == session_id)
-        .collect();
-
-    match matches.len() {
-        0 => (None, false),
-        1 => (Some(matches[0].0.clone()), true),
-        _ => {
-            // Multiple active agents, pick most recent
-            matches.sort_by(|a, b| b.1.started_at.cmp(&a.1.started_at));
-            (Some(matches[0].0.clone()), false)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crate::app::AppState;
+    use crate::event::AppEvent;
     use crate::model::{
-        Agent, AgentId, AgentMessage, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta, TaskGraph,
+        Agent, AgentId, SessionId, SessionMeta, TaskGraph, TranscriptEvent, TranscriptEventKind,
         Wave,
     };
-    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    // -------------------------------------------------------------------------
+    // TaskGraphUpdated
+    // -------------------------------------------------------------------------
 
     #[test]
     fn update_task_graph() {
@@ -582,1438 +256,613 @@ mod tests {
     }
 
     #[test]
-    fn update_transcript_existing_agent() {
-        let mut state = AppState::new();
-        let agent = Agent::new("a01", Utc::now());
-        state.domain.agents.insert("a01".into(), agent);
-
-        let messages = vec![AgentMessage::reasoning(
-            Utc::now(),
-            "test reasoning".into(),
-        )];
-
-        update(
-            &mut state,
-            AppEvent::TranscriptUpdated {
-                agent_id: "a01".into(),
-                messages: messages.clone(),
-            },
-        );
-
-        assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
-    }
-
-    #[test]
-    fn update_transcript_nonexistent_agent_no_panic() {
-        let mut state = AppState::new();
-        let messages = vec![AgentMessage::reasoning(
-            Utc::now(),
-            "test reasoning".into(),
-        )];
-
-        update(
-            &mut state,
-            AppEvent::TranscriptUpdated {
-                agent_id: "nonexistent".into(),
-                messages,
-            },
-        );
-
-        assert!(state.domain.agents.is_empty());
-    }
-
-    #[test]
-    fn hook_event_ring_buffer_eviction() {
-        let mut state = AppState::new();
-        for i in 0..10_000 {
-            let event = HookEvent::new(
-                Utc::now(),
-                HookEventKind::Notification {
-                    message: format!("event {}", i),
-                },
-            );
-            state.domain.events.push_back(event);
-        }
-
-        let new_event = HookEvent::new(
-            Utc::now(),
-            HookEventKind::Notification {
-                message: "newest".into(),
-            },
-        );
-
-        update(&mut state, AppEvent::HookEventReceived(new_event));
-
-        assert_eq!(state.domain.events.len(), 10_000);
-        assert!(matches!(
-            &state.domain.events.back().unwrap().kind,
-            HookEventKind::Notification { message } if message == "newest"
-        ));
-    }
-
-    #[test]
-    fn hook_event_below_capacity_no_eviction() {
-        let mut state = AppState::new();
-        let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
-
-        update(&mut state, AppEvent::HookEventReceived(event));
-
-        assert_eq!(state.domain.events.len(), 1);
-    }
-
-    #[test]
-    fn agent_started_inserts_new_agent() {
-        let mut state = AppState::new();
-        let timestamp = Utc::now();
-        update(&mut state, AppEvent::AgentStarted {
-            agent_id: "a01".into(),
-            timestamp,
-        });
-
-        assert_eq!(state.domain.agents.len(), 1);
-        assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
-        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-        assert!(agent.finished_at.is_none());
-        assert_eq!(agent.started_at, timestamp);
-    }
-
-    #[test]
-    fn agent_stopped_marks_finished() {
-        let mut state = AppState::new();
-        let start_time = Utc::now();
-        let agent = Agent::new("a01", start_time);
-        state.domain.agents.insert("a01".into(), agent);
-
-        let stop_time = start_time + chrono::Duration::seconds(10);
-        update(&mut state, AppEvent::AgentStopped {
-            agent_id: "a01".into(),
-            timestamp: stop_time,
-        });
-
-        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-        assert_eq!(agent.finished_at, Some(stop_time));
-    }
-
-    #[test]
-    fn agent_stopped_nonexistent_no_panic() {
-        let mut state = AppState::new();
-        update(&mut state, AppEvent::AgentStopped {
-            agent_id: "nonexistent".into(),
-            timestamp: Utc::now(),
-        });
-
-        assert!(state.domain.agents.is_empty());
-    }
-
-    #[test]
-    fn key_event_delegates_to_navigation() {
-        let mut state = AppState::new();
-        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('1'));
-
-        update(&mut state, AppEvent::Key(key));
-
-        assert!(matches!(state.ui.view, crate::app::ViewState::Dashboard));
-    }
-
-    #[test]
-    fn tick_event_is_noop() {
-        let mut state = AppState::new();
-        let initial_len = state.domain.events.len();
-        update(&mut state, AppEvent::Tick(Utc::now()));
-
-        assert_eq!(state.domain.events.len(), initial_len);
-    }
-
-    #[test]
-    fn parse_error_ring_buffer_eviction() {
-        let mut state = AppState::new();
-        for i in 0..100 {
-            state.meta.errors.push_back(format!("error {}", i));
-        }
-
-        update(
-            &mut state,
-            AppEvent::Error {
-                source: "test".into(),
-                error: crate::error::WatcherError::Parse(
-                    crate::error::ParseError::Json("newest error".into())
-                ).into(),
-            },
-        );
-
-        assert_eq!(state.meta.errors.len(), 100);
-        assert!(state.meta.errors.back().unwrap().contains("newest error"));
-    }
-
-    #[test]
-    fn parse_error_below_capacity_no_eviction() {
-        let mut state = AppState::new();
-        update(
-            &mut state,
-            AppEvent::Error {
-                source: "file.json".into(),
-                error: crate::error::WatcherError::Parse(
-                    crate::error::ParseError::Json("invalid JSON".into())
-                ).into(),
-            },
-        );
-
-        assert_eq!(state.meta.errors.len(), 1);
-        assert_eq!(state.meta.errors.front().unwrap(), "file.json: parse: JSON parse: invalid JSON");
-    }
-
-    #[test]
-    fn session_loaded_populates_data() {
+    fn task_graph_updated_propagates_task_count_to_active_sessions() {
         use crate::model::{Task, TaskStatus};
 
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
+        let sid = SessionId::new("sess-1");
+        let meta = SessionMeta::new(sid.clone(), Utc::now(), "/proj".to_string());
+        state.domain.active_sessions.insert(sid, meta);
 
-        // Create task graph with 5 tasks (2 completed)
-        let graph = TaskGraph::new(vec![
-            Wave::new(
-                1,
-                vec![
-                    Task::new("T1", "Task 1".to_string(), TaskStatus::Completed),
-                    Task::new("T2", "Task 2".to_string(), TaskStatus::Completed),
-                    Task::new("T3", "Task 3".to_string(), TaskStatus::Pending),
-                ],
-            ),
-            Wave::new(
-                2,
-                vec![
-                    Task::new("T4", "Task 4".to_string(), TaskStatus::Running),
-                    Task::new("T5", "Task 5".to_string(), TaskStatus::Pending),
-                ],
-            ),
-        ]);
+        let graph = TaskGraph::new(vec![Wave::new(
+            1,
+            vec![
+                Task::new("T1", "Task 1".to_string(), TaskStatus::Pending),
+                Task::new("T2", "Task 2".to_string(), TaskStatus::Running),
+            ],
+        )]);
 
-        let mut agents = BTreeMap::new();
-        agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        update(&mut state, AppEvent::TaskGraphUpdated(graph));
 
-        let events = vec![HookEvent::new(Utc::now(), HookEventKind::SessionStart)];
+        let meta = state.domain.active_sessions.values().next().unwrap();
+        assert_eq!(meta.task_count, 2);
+    }
 
-        state.domain.sessions.push(crate::model::ArchivedSession::new(
-            meta.clone(),
-            std::path::PathBuf::new(),
-        ));
-        state.ui.loading_session = Some(SessionId::new("s1"));
+    // -------------------------------------------------------------------------
+    // TranscriptEventReceived
+    // -------------------------------------------------------------------------
 
-        let archive = SessionArchive::new(meta.clone())
-            .with_task_graph(graph)
-            .with_agents(agents)
-            .with_events(events);
+    #[test]
+    fn transcript_event_received_pushes_to_ring_buffer() {
+        let mut state = AppState::new();
+        let ts = Utc::now();
+        let event = TranscriptEvent::new(ts, TranscriptEventKind::UserMessage)
+            .with_session("sess-1");
 
-        update(&mut state, AppEvent::SessionLoaded(archive));
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
 
-        let data = state.domain.sessions[0].data.as_ref().unwrap();
-        assert_eq!(data.task_graph.as_ref().unwrap().total_tasks(), 5);
-        assert_eq!(data.agents.len(), 1);
-        assert_eq!(data.events.len(), 1);
-        assert!(state.ui.loading_session.is_none());
-        assert!(matches!(state.ui.view, ViewState::SessionDetail));
+        assert_eq!(state.domain.events.len(), 1);
+        assert_eq!(state.domain.events[0].kind, TranscriptEventKind::UserMessage);
     }
 
     #[test]
-    fn session_loaded_clears_loading_and_navigates() {
+    fn transcript_event_received_updates_session_event_count() {
         let mut state = AppState::new();
-        let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
-        state.domain.sessions.push(crate::model::ArchivedSession::new(
-            meta.clone(),
-            std::path::PathBuf::new(),
+        let sid = SessionId::new("sess-1");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        let event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage)
+            .with_session(sid.clone());
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
+
+        let meta = state.domain.active_sessions.get(&sid).unwrap();
+        assert_eq!(meta.event_count, 1);
+        assert_eq!(meta.last_event_at, Some(now));
+    }
+
+    #[test]
+    fn transcript_event_user_message_confirms_session() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-1");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        assert!(!meta.confirmed);
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        let event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage)
+            .with_session(sid.clone());
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
+
+        assert!(state.domain.active_sessions[&sid].confirmed);
+    }
+
+    #[test]
+    fn transcript_event_tool_use_increments_tool_count() {
+        let mut state = AppState::new();
+        let aid = AgentId::new("agent-1");
+        let now = Utc::now();
+        state.domain.agents.insert(aid.clone(), Agent::new(aid.clone(), now));
+
+        let event = TranscriptEvent::new(
+            now,
+            TranscriptEventKind::ToolUse {
+                tool_name: "Read".into(),
+                input_summary: "src/main.rs".to_string(),
+            },
+        )
+        .with_agent(aid.clone());
+
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
+
+        assert_eq!(state.agent_tool_count(&aid), 1);
+    }
+
+    #[test]
+    fn transcript_event_ring_buffer_evicts_oldest_at_capacity() {
+        let mut state = AppState::new();
+        let now = Utc::now();
+
+        // Fill to capacity
+        for i in 0..10_000usize {
+            let content = format!("msg-{i}");
+            let event = TranscriptEvent::new(
+                now,
+                TranscriptEventKind::AssistantMessage { content },
+            );
+            state.domain.events.push_back(event);
+        }
+        assert_eq!(state.domain.events.len(), 10_000);
+
+        // First event content is "msg-0"
+        assert!(matches!(
+            &state.domain.events[0].kind,
+            TranscriptEventKind::AssistantMessage { content } if content == "msg-0"
         ));
-        state.ui.loading_session = Some(SessionId::new("s1"));
+
+        // Push one more via update
+        let new_event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage);
+        update(&mut state, AppEvent::TranscriptEventReceived(new_event));
+
+        // Still at 10_000
+        assert_eq!(state.domain.events.len(), 10_000);
+        // Oldest (msg-0) evicted; first is now msg-1
+        assert!(matches!(
+            &state.domain.events[0].kind,
+            TranscriptEventKind::AssistantMessage { content } if content == "msg-1"
+        ));
+        // Last is UserMessage
+        assert_eq!(state.domain.events.back().unwrap().kind, TranscriptEventKind::UserMessage);
+    }
+
+    #[test]
+    fn transcript_event_auto_confirms_session_after_30s() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-old");
+        let started_at = Utc::now() - chrono::Duration::seconds(60);
+        let meta = SessionMeta::new(sid.clone(), started_at, "/proj".to_string());
+        assert!(!meta.confirmed);
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        // Event timestamp is 60s after session start → exceeds 30s threshold
+        let event_ts = started_at + chrono::Duration::seconds(60);
+        let event = TranscriptEvent::new(
+            event_ts,
+            TranscriptEventKind::AssistantMessage { content: "hello".to_string() },
+        )
+        .with_session(sid.clone());
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
+
+        assert!(state.domain.active_sessions[&sid].confirmed);
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionDiscovered (FR-009)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_discovered_creates_active_session() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-new");
+        let path = PathBuf::from("/home/user/.claude/projects/abc/sess-new.jsonl");
+
+        update(&mut state, AppEvent::SessionDiscovered {
+            session_id: sid.clone(),
+            transcript_path: path.clone(),
+        });
+
+        assert!(state.domain.active_sessions.contains_key(&sid));
+        let meta = &state.domain.active_sessions[&sid];
+        assert_eq!(meta.transcript_path, Some(path.display().to_string()));
+        assert_eq!(meta.status, SessionStatus::Active);
+    }
+
+    #[test]
+    fn session_discovered_is_idempotent() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-idempotent");
+        let path = PathBuf::from("/tmp/sess.jsonl");
+
+        update(&mut state, AppEvent::SessionDiscovered {
+            session_id: sid.clone(),
+            transcript_path: path.clone(),
+        });
+        // Manually set event_count to verify it's not reset
+        state.domain.active_sessions.get_mut(&sid).unwrap().event_count = 42;
+
+        update(&mut state, AppEvent::SessionDiscovered {
+            session_id: sid.clone(),
+            transcript_path: path,
+        });
+
+        // event_count unchanged — session not re-created
+        assert_eq!(state.domain.active_sessions[&sid].event_count, 42);
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionCompleted (FR-010)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_completed_moves_to_archived() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-done");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::SessionCompleted { session_id: sid.clone() });
+
+        assert!(!state.domain.active_sessions.contains_key(&sid));
+        assert_eq!(state.domain.sessions.len(), 1);
+        assert_eq!(state.domain.sessions[0].meta.id, sid);
+        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Completed);
+    }
+
+    #[test]
+    fn session_completed_unknown_session_is_noop() {
+        let mut state = AppState::new();
+        update(&mut state, AppEvent::SessionCompleted {
+            session_id: SessionId::new("nonexistent"),
+        });
+        assert!(state.domain.sessions.is_empty());
+        assert!(state.domain.active_sessions.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionReactivated (FR-011)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_reactivated_creates_active_entry() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-reactivated");
+
+        update(&mut state, AppEvent::SessionReactivated { session_id: sid.clone() });
+
+        assert!(state.domain.active_sessions.contains_key(&sid));
+        assert_eq!(state.domain.active_sessions[&sid].status, SessionStatus::Active);
+    }
+
+    #[test]
+    fn session_reactivated_does_not_duplicate_active_session() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-already-active");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::SessionReactivated { session_id: sid.clone() });
+
+        assert_eq!(state.domain.active_sessions.len(), 1);
+    }
+
+    #[test]
+    fn session_reactivated_restores_meta_from_archive() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-restore");
+        let now = Utc::now();
+        let mut meta = SessionMeta::new(sid.clone(), now, "/original-proj".to_string());
+        meta.git_branch = Some("main".to_string());
+        meta.status = SessionStatus::Completed;
+
+        // Put in archived sessions
+        let archived = ArchivedSession::new(meta, PathBuf::new());
+        state.domain.sessions.push(archived);
+
+        update(&mut state, AppEvent::SessionReactivated { session_id: sid.clone() });
+
+        assert!(state.domain.active_sessions.contains_key(&sid));
+        let active_meta = &state.domain.active_sessions[&sid];
+        assert_eq!(active_meta.project_path, "/original-proj");
+        assert_eq!(active_meta.git_branch, Some("main".to_string()));
+        assert_eq!(active_meta.status, SessionStatus::Active);
+    }
+
+    // -------------------------------------------------------------------------
+    // Tick timeout logic (FR-010, FR-013)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn tick_does_not_expire_sessions_before_replay_complete() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = false;
+
+        let sid = SessionId::new("sess-tick");
+        // Session with very old last_event_at
+        let old_ts = Utc::now() - chrono::Duration::hours(1);
+        let mut meta = SessionMeta::new(sid.clone(), old_ts, "/proj".to_string());
+        meta.last_event_at = Some(old_ts);
+        meta.confirmed = true;
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::Tick(Utc::now()));
+
+        // Still active — replay not complete
+        assert!(state.domain.active_sessions.contains_key(&sid));
+    }
+
+    #[test]
+    fn tick_expires_confirmed_session_after_10_minutes() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+
+        let sid = SessionId::new("sess-confirmed-expire");
+        let old_ts = Utc::now() - chrono::Duration::minutes(15);
+        let mut meta = SessionMeta::new(sid.clone(), old_ts, "/proj".to_string());
+        meta.confirmed = true;
+        meta.last_event_at = Some(old_ts);
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::Tick(Utc::now()));
+
+        assert!(!state.domain.active_sessions.contains_key(&sid));
+        // Confirmed session archived (Cancelled status)
+        assert_eq!(state.domain.sessions.len(), 1);
+        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Cancelled);
+    }
+
+    #[test]
+    fn tick_drops_unconfirmed_session_after_30_seconds_without_archiving() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+
+        let sid = SessionId::new("sess-phantom");
+        let old_ts = Utc::now() - chrono::Duration::seconds(60);
+        let mut meta = SessionMeta::new(sid.clone(), old_ts, "/proj".to_string());
+        meta.confirmed = false;
+        meta.last_event_at = Some(old_ts);
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::Tick(Utc::now()));
+
+        assert!(!state.domain.active_sessions.contains_key(&sid));
+        // Phantom session NOT archived
+        assert!(state.domain.sessions.is_empty());
+    }
+
+    #[test]
+    fn tick_keeps_recently_active_confirmed_session() {
+        let mut state = AppState::new();
+        state.meta.replay_complete = true;
+
+        let sid = SessionId::new("sess-active");
+        let recent_ts = Utc::now() - chrono::Duration::minutes(2);
+        let mut meta = SessionMeta::new(sid.clone(), recent_ts, "/proj".to_string());
+        meta.confirmed = true;
+        meta.last_event_at = Some(recent_ts);
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        update(&mut state, AppEvent::Tick(Utc::now()));
+
+        assert!(state.domain.active_sessions.contains_key(&sid));
+    }
+
+    // -------------------------------------------------------------------------
+    // Error handling
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn error_event_pushes_to_error_buffer() {
+        use crate::error::{LoomError, WatcherError};
+
+        let mut state = AppState::new();
+        update(&mut state, AppEvent::Error {
+            source: "watcher".to_string(),
+            error: LoomError::Watcher(WatcherError::Io("disk error".to_string())),
+        });
+
+        assert_eq!(state.meta.errors.len(), 1);
+        assert!(state.meta.errors[0].contains("watcher"));
+    }
+
+    #[test]
+    fn error_event_evicts_oldest_at_100() {
+        use crate::error::{LoomError, WatcherError};
+
+        let mut state = AppState::new();
+
+        // Fill error buffer
+        for i in 0..100usize {
+            state.meta.errors.push_back(format!("err-{i}"));
+        }
+
+        update(&mut state, AppEvent::Error {
+            source: "test".to_string(),
+            error: LoomError::Watcher(WatcherError::Io("x".to_string())),
+        });
+
+        assert_eq!(state.meta.errors.len(), 100);
+        // First error (err-0) was evicted
+        assert!(!state.meta.errors[0].contains("err-0"));
+    }
+
+    // -------------------------------------------------------------------------
+    // ReplayComplete
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn replay_complete_sets_flag() {
+        let mut state = AppState::new();
+        assert!(!state.meta.replay_complete);
+
+        update(&mut state, AppEvent::ReplayComplete);
+
+        assert!(state.meta.replay_complete);
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionLoaded
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_loaded_updates_archive_and_navigates() {
+        use crate::model::SessionArchive;
+
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-load");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        let archived = ArchivedSession::new(meta.clone(), PathBuf::from("/tmp/sess-load.json"));
+        state.domain.sessions.push(archived);
 
         let archive = SessionArchive::new(meta);
         update(&mut state, AppEvent::SessionLoaded(archive));
 
-        assert!(state.ui.loading_session.is_none());
+        // Navigation updated
         assert!(matches!(state.ui.view, ViewState::SessionDetail));
+        assert!(state.ui.loading_session.is_none());
+        // Data populated
+        assert!(state.domain.sessions[0].data.is_some());
     }
 
+    // -------------------------------------------------------------------------
+    // SessionMetasLoaded
+    // -------------------------------------------------------------------------
+
     #[test]
-    fn session_list_refreshed() {
+    fn session_metas_loaded_populates_sessions_list() {
         let mut state = AppState::new();
-        let sessions = vec![
-            SessionArchive::new(SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
-            SessionArchive::new(SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
+        let now = Utc::now();
+        let metas = vec![
+            (PathBuf::from("/tmp/s1.json"), SessionMeta::new("s1", now, "/proj".to_string())),
+            (PathBuf::from("/tmp/s2.json"), SessionMeta::new("s2", now, "/proj".to_string())),
         ];
 
-        update(&mut state, AppEvent::SessionListRefreshed(sessions));
+        update(&mut state, AppEvent::SessionMetasLoaded(metas));
 
         assert_eq!(state.domain.sessions.len(), 2);
-        assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s1");
-        assert_eq!(state.domain.sessions[1].meta.id.as_str(), "s2");
     }
 
-    #[test]
-    fn ring_buffer_property_never_exceeds_capacity() {
-        let mut state = AppState::new();
-
-        for i in 0..15_000 {
-            let event = HookEvent::new(
-                Utc::now(),
-                HookEventKind::Notification {
-                    message: format!("{}", i),
-                },
-            );
-            update(&mut state, AppEvent::HookEventReceived(event));
-        }
-
-        assert_eq!(state.domain.events.len(), 10_000);
-    }
+    // -------------------------------------------------------------------------
+    // AgentMetadataUpdated
+    // -------------------------------------------------------------------------
 
     #[test]
-    fn error_ring_buffer_property_never_exceeds_capacity() {
+    fn agent_metadata_updated_sets_model_and_tokens() {
+        use crate::watcher::TranscriptMetadata;
+        use crate::model::TokenUsage;
+
         let mut state = AppState::new();
-
-        for i in 0..200 {
-            update(
-                &mut state,
-                AppEvent::Error {
-                    source: "test".into(),
-                    error: crate::error::WatcherError::Parse(
-                        crate::error::ParseError::Json(format!("error {}", i))
-                    ).into(),
-                },
-            );
-        }
-
-        assert_eq!(state.meta.errors.len(), 100);
-    }
-
-    #[test]
-    fn hook_subagent_start_creates_agent() {
-        let mut state = AppState::new();
-        let event = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(event));
-
-        assert_eq!(state.domain.agents.len(), 1);
-        assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_none());
-    }
-
-    #[test]
-    fn hook_subagent_stop_finishes_agent() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let stop =
-            HookEvent::new(Utc::now(), HookEventKind::subagent_stop()).with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(start));
-        update(&mut state, AppEvent::HookEventReceived(stop));
-
-        assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_some());
-    }
-
-    #[test]
-    fn hook_subagent_start_idempotent() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let e1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let e2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(e1));
-        update(&mut state, AppEvent::HookEventReceived(e2));
-
-        assert_eq!(state.domain.agents.len(), 1);
-    }
-
-    #[test]
-    fn hook_pre_tool_use_with_agent_id() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let tool = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-        )
-        .with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(start));
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
-        match &state.domain.agents.get(&AgentId::new("a01")).unwrap().messages[0].kind {
-            MessageKind::Tool(tc) => {
-                assert_eq!(tc.tool_name.as_str(), "Read");
-                assert_eq!(tc.input_summary, "file.rs");
-                assert!(tc.success.is_none());
-            }
-            _ => panic!("Expected Tool message"),
-        }
-    }
-
-    #[test]
-    fn hook_post_tool_use_updates_pending() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let pre = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-        )
-        .with_agent("a01");
-        let post = HookEvent::new(
-            Utc::now(),
-            HookEventKind::post_tool_use("Read", "ok".to_string(), Some(250)),
-        )
-        .with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(start));
-        update(&mut state, AppEvent::HookEventReceived(pre));
-        update(&mut state, AppEvent::HookEventReceived(post));
-
-        let msg = &state.domain.agents.get(&AgentId::new("a01")).unwrap().messages[0];
-        match &msg.kind {
-            MessageKind::Tool(tc) => {
-                assert_eq!(tc.success, Some(true));
-                assert_eq!(
-                    tc.duration,
-                    Some(std::time::Duration::from_millis(250))
-                );
-                assert_eq!(tc.result_summary, Some("ok".into()));
-            }
-            _ => panic!("Expected Tool message"),
-        }
-    }
-
-    #[test]
-    fn hook_tool_use_attributed_to_single_active_agent() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let tool = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Bash", "cargo test".to_string()),
-        );
-
-        update(&mut state, AppEvent::HookEventReceived(start));
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
-    }
-
-    #[test]
-    fn hook_tool_use_attributed_to_most_recent_with_multiple_agents() {
-        // When multiple agents share a session and tool event has no agent_id,
-        // attribute to the most recently started agent (best-effort).
-        // Transcript-sourced events with explicit agent_id correct attribution.
-        let mut state = AppState::new();
-        let t1 = Utc::now();
-        let t2 = t1 + chrono::Duration::seconds(1);
-        let s1 = HookEvent::new(t1, HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let s2 = HookEvent::new(t2, HookEventKind::subagent_start(None))
-            .with_agent("a02");
-        let tool = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Bash", "cargo test".to_string()),
-        );
-
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        // Most recently started agent (a02) gets the tool event
-        assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 0);
-        assert_eq!(state.domain.agents.get(&AgentId::new("a02")).unwrap().messages.len(), 1);
-    }
-
-    #[test]
-    fn hook_tool_use_with_explicit_agent_id_attributed_correctly() {
-        // Transcript-sourced events carry explicit agent_id, bypassing fallback
-        let mut state = AppState::new();
-        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a02");
-        let tool = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-        )
-        .with_agent("a02"); // explicit from transcript
-
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 0);
-        assert_eq!(state.domain.agents.get(&AgentId::new("a02")).unwrap().messages.len(), 1);
-    }
-
-    #[test]
-    fn concurrent_session_starts_both_tracked() {
-        let mut state = AppState::new();
-        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s2");
-
-        update(&mut state, AppEvent::HookEventReceived(e1));
-        update(&mut state, AppEvent::HookEventReceived(e2));
-
-        assert_eq!(state.domain.active_sessions.len(), 2);
-        assert!(state.domain.active_sessions.contains_key(&SessionId::new("s1")));
-        assert!(state.domain.active_sessions.contains_key(&SessionId::new("s2")));
-    }
-
-    #[test]
-    fn session_end_removes_correct_session() {
-        let mut state = AppState::new();
-        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s2");
-        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
-            .with_session("s1");
-
-        update(&mut state, AppEvent::HookEventReceived(e1));
-        update(&mut state, AppEvent::HookEventReceived(e2));
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        assert_eq!(state.domain.active_sessions.len(), 1);
-        assert!(!state.domain.active_sessions.contains_key(&SessionId::new("s1")));
-        assert!(state.domain.active_sessions.contains_key(&SessionId::new("s2")));
-        assert_eq!(state.domain.sessions.len(), 1);
-        assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s1");
-    }
-
-    #[test]
-    fn session_start_does_not_clear_live_state() {
-        let mut state = AppState::new();
-        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
-        state.domain.events.push_back(HookEvent::new(
-            Utc::now(),
-            HookEventKind::Notification { message: "existing".into() },
-        ));
-
-        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(e));
-
-        assert_eq!(state.domain.agents.len(), 1);
-        assert_eq!(state.domain.events.len(), 2);
-    }
-
-    #[test]
-    fn duplicate_session_start_is_idempotent() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-
-        // First SessionStart creates the session
-        let e1 = HookEvent::new(ts, HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(e1));
-
-        // Simulate some activity that increments counters
-        let agent = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(agent));
-
-        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".into()))
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        // Verify counters are set
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 1);
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].event_count, 3); // SessionStart + SubagentStart + PreToolUse
-
-        // Duplicate SessionStart should be ignored (not reset counters)
-        let e2 = HookEvent::new(ts, HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(e2));
-
-        // Counters should remain unchanged (duplicate event still added to ring buffer and counted)
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 1);
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].event_count, 4); // +1 for duplicate event
-        assert_eq!(state.domain.active_sessions.len(), 1); // Still only 1 session
-    }
-
-    #[test]
-    fn subagent_start_increments_per_session_agent_count() {
-        let mut state = AppState::new();
-        let s1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let s2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s2");
-
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-
-        // 2 agents in session s1
-        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-        let a2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a02")
-            .with_session("s1");
-        // 1 agent in session s2
-        let a3 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a03")
-            .with_session("s2");
-
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-        update(&mut state, AppEvent::HookEventReceived(a3));
-
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 2);
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s2")].agent_count, 1);
-    }
-
-    #[test]
-    fn subagent_start_idempotent_does_not_double_count() {
-        let mut state = AppState::new();
-        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(s));
-
-        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-        let a1_dup = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a1_dup));
-
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].agent_count, 1);
-    }
-
-    #[test]
-    fn session_end_preserves_per_session_agent_count() {
-        let mut state = AppState::new();
-        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let a1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-        let a2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a02")
-            .with_session("s1");
-        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
-            .with_session("s1");
-
-        update(&mut state, AppEvent::HookEventReceived(s));
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        assert_eq!(state.domain.sessions[0].meta.agent_count, 2);
-    }
-
-    #[test]
-    fn event_count_tracked_per_session() {
-        let mut state = AppState::new();
-        let s1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let s2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s2");
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-
-        // 3 events for s1, 1 for s2
-        for _ in 0..3 {
-            let e = HookEvent::new(Utc::now(), HookEventKind::notification("msg".to_string()))
-                .with_session("s1");
-            update(&mut state, AppEvent::HookEventReceived(e));
-        }
-        let e = HookEvent::new(Utc::now(), HookEventKind::notification("msg".to_string()))
-            .with_session("s2");
-        update(&mut state, AppEvent::HookEventReceived(e));
-
-        // +1 each for their own SessionStart
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].event_count, 4);
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s2")].event_count, 2);
-    }
-
-    #[test]
-    fn task_graph_updated_sets_per_session_task_count() {
-        let mut state = AppState::new();
-        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(s));
-
-        let graph = crate::model::TaskGraph::empty();
-        update(&mut state, AppEvent::TaskGraphUpdated(graph));
-
-        assert_eq!(state.domain.active_sessions[&SessionId::new("s1")].task_count, 0);
-    }
-
-    #[test]
-    fn subagent_start_sets_session_id_on_agent() {
-        let mut state = AppState::new();
-        let s = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let a = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01")
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(s));
-        update(&mut state, AppEvent::HookEventReceived(a));
-
-        assert_eq!(state.domain.agents[&AgentId::new("a01")].session_id.as_ref(), Some(&SessionId::new("s1")));
-    }
-
-    #[test]
-    fn hook_tool_use_not_attributed_when_no_agents() {
-        let mut state = AppState::new();
-        let tool = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-        );
-
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        assert!(state.domain.agents.is_empty());
-    }
-
-    // ============================================================================
-    // Stale Session Expiration Tests
-    // ============================================================================
-
-    #[test]
-    fn stale_session_expired_after_5_minutes() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
+        let aid = AgentId::new("agent-meta");
         let now = Utc::now();
-
-        // Create confirmed session that's 6 minutes old
-        let old_time = now - chrono::Duration::minutes(6);
-        let mut meta = SessionMeta::new("s1", old_time, "/proj".to_string());
-        meta.last_event_at = Some(old_time);
-        meta.confirmed = true;
-        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
-
-        // Tick should expire the stale session
-        update(&mut state, AppEvent::Tick(now));
-
-        assert!(state.domain.active_sessions.is_empty());
-        assert_eq!(state.domain.sessions.len(), 1);
-        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Cancelled);
-    }
-
-    #[test]
-    fn active_session_with_recent_events_not_expired() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Create confirmed session with recent event (2 minutes ago)
-        let recent_time = now - chrono::Duration::minutes(2);
-        let mut meta = SessionMeta::new("s1", now - chrono::Duration::minutes(10), "/proj".to_string());
-        meta.last_event_at = Some(recent_time);
-        meta.confirmed = true;
-        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
-
-        // Tick should NOT expire the session
-        update(&mut state, AppEvent::Tick(now));
-
-        assert_eq!(state.domain.active_sessions.len(), 1);
-        assert!(state.domain.sessions.is_empty());
-    }
-
-    #[test]
-    fn session_expiration_falls_back_to_timestamp_when_no_last_event() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Create confirmed session with old timestamp, no last_event_at
-        let old_time = now - chrono::Duration::minutes(6);
-        let mut meta = SessionMeta::new("s1", old_time, "/proj".to_string());
-        meta.confirmed = true;
-        // last_event_at is None — should fall back to timestamp
-        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
-
-        // Tick should expire based on timestamp
-        update(&mut state, AppEvent::Tick(now));
-
-        assert!(state.domain.active_sessions.is_empty());
-        assert_eq!(state.domain.sessions.len(), 1);
-        assert_eq!(state.domain.sessions[0].meta.status, SessionStatus::Cancelled);
-    }
-
-    #[test]
-    fn expired_session_added_to_archived_list() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Pre-populate archived sessions
-        let old_archived = ArchivedSession::new(
-            SessionMeta::new("s_old", now - chrono::Duration::hours(1), "/proj".to_string()),
-            std::path::PathBuf::new(),
-        );
-        state.domain.sessions.push(old_archived);
-
-        // Create confirmed stale session
-        let stale_time = now - chrono::Duration::minutes(6);
-        let mut meta = SessionMeta::new("s_stale", stale_time, "/proj".to_string());
-        meta.last_event_at = Some(stale_time);
-        meta.confirmed = true;
-        state.domain.active_sessions.insert(SessionId::new("s_stale"), meta);
-
-        // Tick expires stale session
-        update(&mut state, AppEvent::Tick(now));
-
-        // Archived list should have 2 sessions (stale inserted at front)
-        assert_eq!(state.domain.sessions.len(), 2);
-        assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s_stale");
-        assert_eq!(state.domain.sessions[1].meta.id.as_str(), "s_old");
-    }
-
-    // ============================================================================
-    // Session End Marks Agents Finished
-    // ============================================================================
-
-    #[test]
-    fn session_end_marks_active_agents_finished() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a02").with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(s));
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-
-        // Both agents active
-        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_none());
-        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_none());
-
-        let end = HookEvent::new(ts, HookEventKind::SessionEnd).with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        // Both agents marked finished
-        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
-        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_some());
-    }
-
-    #[test]
-    fn session_end_does_not_affect_other_session_agents() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let s1 = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
-        let s2 = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s2");
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a02").with_session("s2");
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-
-        // End only s1
-        let end = HookEvent::new(ts, HookEventKind::SessionEnd).with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
-        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_none());
-    }
-
-    #[test]
-    fn session_end_skips_already_finished_agents() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let later = ts + chrono::Duration::seconds(5);
-        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
-        let a = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let stop = HookEvent::new(ts, HookEventKind::subagent_stop()).with_agent("a01");
-        update(&mut state, AppEvent::HookEventReceived(s));
-        update(&mut state, AppEvent::HookEventReceived(a));
-        update(&mut state, AppEvent::HookEventReceived(stop));
-
-        let original_finish = state.domain.agents[&AgentId::new("a01")].finished_at;
-
-        // SessionEnd should not overwrite earlier finish time
-        let end = HookEvent::new(later, HookEventKind::SessionEnd).with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        assert_eq!(state.domain.agents[&AgentId::new("a01")].finished_at, original_finish);
-    }
-
-    // ============================================================================
-    // Stop Event Marks Agents Finished
-    // ============================================================================
-
-    #[test]
-    fn stop_event_marks_session_agents_finished() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let s = HookEvent::new(ts, HookEventKind::SessionStart).with_session("s1");
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a02").with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(s));
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-
-        let stop = HookEvent::new(ts, HookEventKind::stop(Some("done".to_string())))
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(stop));
-
-        assert!(state.domain.agents[&AgentId::new("a01")].finished_at.is_some());
-        assert!(state.domain.agents[&AgentId::new("a02")].finished_at.is_some());
-    }
-
-    // ============================================================================
-    // Multi-Agent Attribution
-    // ============================================================================
-
-    #[test]
-    fn transcript_agent_map_stores_all_agents() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a02").with_session("s1");
-
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-
-        let agents = state.domain.transcript_agent_map.get(&SessionId::new("s1")).unwrap();
-        assert_eq!(agents.len(), 2);
-        assert!(agents.contains(&AgentId::new("a01")));
-        assert!(agents.contains(&AgentId::new("a02")));
-    }
-
-    #[test]
-    fn tool_events_not_enriched_when_multiple_agents_active() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        // Two agents on same session
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        let a2 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a02").with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(a1));
-        update(&mut state, AppEvent::HookEventReceived(a2));
-
-        // Tool event without agent_id (like real Claude Code tool events)
-        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".to_string()))
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        // Event should remain unattributed (agent_id = None)
-        let last = state.domain.events.back().unwrap();
-        assert!(last.agent_id.is_none(), "ambiguous tool events should not be force-attributed");
-    }
-
-    #[test]
-    fn tool_events_enriched_when_single_agent_active() {
-        let mut state = AppState::new();
-        let ts = Utc::now();
-        // Single agent on session
-        let a1 = HookEvent::new(ts, HookEventKind::subagent_start(None))
-            .with_agent("a01").with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(a1));
-
-        let tool = HookEvent::new(ts, HookEventKind::pre_tool_use("Read", "file.rs".to_string()))
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(tool));
-
-        let last = state.domain.events.back().unwrap();
-        assert_eq!(last.agent_id, Some(AgentId::new("a01")));
-    }
-
-    // --- resolve_agent_attribution unit tests ---
-
-    fn make_agent(id: &str, session: &str, finished: bool) -> (AgentId, Agent) {
-        let mut a = Agent::default();
-        a.id = AgentId::new(id);
-        a.session_id = Some(SessionId::new(session));
-        a.started_at = Utc::now();
-        if finished {
-            a.finished_at = Some(Utc::now());
-        }
-        (AgentId::new(id), a)
-    }
-
-    #[test]
-    fn attribution_explicit_id_is_confident() {
-        let id = AgentId::new("a01");
-        let (resolved, confident) = resolve_agent_attribution(
-            Some(&id), None, &BTreeMap::new(), &BTreeMap::new(), false,
-        );
-        assert_eq!(resolved, Some(AgentId::new("a01")));
-        assert!(confident);
-    }
-
-    #[test]
-    fn attribution_single_transcript_candidate_is_confident() {
-        let mut map = BTreeMap::new();
-        map.insert(SessionId::new("s1"), vec![AgentId::new("a01")]);
-        let agents = BTreeMap::new();
-        let sid = SessionId::new("s1");
-        let (resolved, confident) = resolve_agent_attribution(
-            None, Some(&sid), &map, &agents, false,
-        );
-        assert_eq!(resolved, Some(AgentId::new("a01")));
-        assert!(confident);
-    }
-
-    #[test]
-    fn attribution_multiple_candidates_not_confident() {
-        let mut map = BTreeMap::new();
-        map.insert(SessionId::new("s1"), vec![AgentId::new("a01"), AgentId::new("a02")]);
-        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false), make_agent("a02", "s1", false)].into();
-        let sid = SessionId::new("s1");
-        let (resolved, confident) = resolve_agent_attribution(
-            None, Some(&sid), &map, &agents, false,
-        );
-        assert!(resolved.is_some());
-        assert!(!confident);
-    }
-
-    #[test]
-    fn attribution_assistant_text_no_session_fallback() {
-        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false)].into();
-        let sid = SessionId::new("s1");
-        let (resolved, confident) = resolve_agent_attribution(
-            None, Some(&sid), &BTreeMap::new(), &agents, true,
-        );
-        assert_eq!(resolved, None);
-        assert!(!confident);
-    }
-
-    #[test]
-    fn attribution_session_fallback_single_match() {
-        let agents: BTreeMap<_, _> = [make_agent("a01", "s1", false)].into();
-        let sid = SessionId::new("s1");
-        let (resolved, confident) = resolve_agent_attribution(
-            None, Some(&sid), &BTreeMap::new(), &agents, false,
-        );
-        assert_eq!(resolved, Some(AgentId::new("a01")));
-        assert!(confident);
-    }
-
-    #[test]
-    fn attribution_no_match_returns_none() {
-        let (resolved, confident) = resolve_agent_attribution(
-            None, None, &BTreeMap::new(), &BTreeMap::new(), false,
-        );
-        assert_eq!(resolved, None);
-        assert!(!confident);
-    }
-
-    // ============================================================================
-    // Agent Tool Count Cache Tests
-    // ============================================================================
-
-    #[test]
-    fn tool_count_incremented_on_post_tool_use() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let pre = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-        )
-        .with_agent("a01");
-        let post = HookEvent::new(
-            Utc::now(),
-            HookEventKind::post_tool_use("Read", "ok".to_string(), Some(250)),
-        )
-        .with_agent("a01");
-
-        update(&mut state, AppEvent::HookEventReceived(start));
-        update(&mut state, AppEvent::HookEventReceived(pre));
-        update(&mut state, AppEvent::HookEventReceived(post));
-
-        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 1);
-    }
-
-    #[test]
-    fn tool_count_zero_for_agent_with_no_tools() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        update(&mut state, AppEvent::HookEventReceived(start));
-
-        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 0);
-    }
-
-    #[test]
-    fn tool_count_tracks_multiple_tools() {
-        let mut state = AppState::new();
-        let start = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        update(&mut state, AppEvent::HookEventReceived(start));
-
-        // 3 tool calls
-        for i in 0..3 {
-            let pre = HookEvent::new(
-                Utc::now(),
-                HookEventKind::pre_tool_use("Read", format!("file{}.rs", i)),
-            )
-            .with_agent("a01");
-            let post = HookEvent::new(
-                Utc::now(),
-                HookEventKind::post_tool_use("Read", "ok".to_string(), None),
-            )
-            .with_agent("a01");
-            update(&mut state, AppEvent::HookEventReceived(pre));
-            update(&mut state, AppEvent::HookEventReceived(post));
-        }
-
-        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 3);
-    }
-
-    #[test]
-    fn tool_count_per_agent_independent() {
-        let mut state = AppState::new();
-        let s1 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a01");
-        let s2 = HookEvent::new(Utc::now(), HookEventKind::subagent_start(None))
-            .with_agent("a02");
-        update(&mut state, AppEvent::HookEventReceived(s1));
-        update(&mut state, AppEvent::HookEventReceived(s2));
-
-        // a01: 2 tools, a02: 1 tool
-        for _ in 0..2 {
-            let pre = HookEvent::new(
-                Utc::now(),
-                HookEventKind::pre_tool_use("Read", "file.rs".to_string()),
-            )
-            .with_agent("a01");
-            let post = HookEvent::new(
-                Utc::now(),
-                HookEventKind::post_tool_use("Read", "ok".to_string(), None),
-            )
-            .with_agent("a01");
-            update(&mut state, AppEvent::HookEventReceived(pre));
-            update(&mut state, AppEvent::HookEventReceived(post));
-        }
-
-        let pre = HookEvent::new(
-            Utc::now(),
-            HookEventKind::pre_tool_use("Bash", "ls".to_string()),
-        )
-        .with_agent("a02");
-        let post = HookEvent::new(
-            Utc::now(),
-            HookEventKind::post_tool_use("Bash", "ok".to_string(), None),
-        )
-        .with_agent("a02");
-        update(&mut state, AppEvent::HookEventReceived(pre));
-        update(&mut state, AppEvent::HookEventReceived(post));
-
-        assert_eq!(state.agent_tool_count(&AgentId::new("a01")), 2);
-        assert_eq!(state.agent_tool_count(&AgentId::new("a02")), 1);
-    }
-
-    // ============================================================================
-    // Timestamp Injection Tests (FR-I9)
-    // ============================================================================
-
-    #[test]
-    fn agent_started_event_uses_provided_timestamp_not_utc_now() {
-        let mut state = AppState::new();
-        let past_timestamp = Utc::now() - chrono::Duration::hours(2);
-
-        update(&mut state, AppEvent::AgentStarted {
-            agent_id: "a01".into(),
-            timestamp: past_timestamp,
-        });
-
-        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-        assert_eq!(agent.started_at, past_timestamp);
-        // Verify it's NOT using current time
-        assert!(agent.started_at < Utc::now() - chrono::Duration::hours(1));
-    }
-
-    #[test]
-    fn agent_stopped_event_uses_provided_timestamp_not_utc_now() {
-        let mut state = AppState::new();
-        let start = Utc::now() - chrono::Duration::hours(2);
-        state.domain.agents.insert("a01".into(), Agent::new("a01", start));
-
-        let stop = start + chrono::Duration::minutes(30);
-        update(&mut state, AppEvent::AgentStopped {
-            agent_id: "a01".into(),
-            timestamp: stop,
-        });
-
-        let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-        assert_eq!(agent.finished_at, Some(stop));
-        // Verify it's NOT using current time
-        assert!(agent.finished_at.unwrap() < Utc::now() - chrono::Duration::hours(1));
-    }
-
-    #[test]
-    fn install_hook_requested_is_handled() {
-        let mut state = AppState::new();
-        // Should not panic or error
-        update(&mut state, AppEvent::InstallHookRequested);
-    }
-
-    // ============================================================================
-    // Session Confirmation (Phantom Session Filtering)
-    // ============================================================================
-
-    #[test]
-    fn session_starts_unconfirmed() {
-        let mut state = AppState::new();
-        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(e));
-
-        assert!(!state.domain.active_sessions[&SessionId::new("s1")].confirmed);
-    }
-
-    #[test]
-    fn user_prompt_submit_confirms_session() {
-        let mut state = AppState::new();
-        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(e));
-
-        let prompt = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit)
-            .with_session("s1");
-        update(&mut state, AppEvent::HookEventReceived(prompt));
-
-        assert!(state.domain.active_sessions[&SessionId::new("s1")].confirmed);
-    }
-
-    #[test]
-    fn user_prompt_submit_without_session_is_noop() {
-        let mut state = AppState::new();
-        let prompt = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit);
-        update(&mut state, AppEvent::HookEventReceived(prompt));
-        // No panic, no sessions
-        assert!(state.domain.active_sessions.is_empty());
-    }
-
-    #[test]
-    fn confirmed_active_sessions_filters_unconfirmed() {
-        let mut state = AppState::new();
-        // s1: confirmed (real user session)
-        let e1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let p1 = HookEvent::new(Utc::now(), HookEventKind::UserPromptSubmit)
-            .with_session("s1");
-        // s2: unconfirmed (subagent phantom)
-        let e2 = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s2");
-
-        update(&mut state, AppEvent::HookEventReceived(e1));
-        update(&mut state, AppEvent::HookEventReceived(p1));
-        update(&mut state, AppEvent::HookEventReceived(e2));
-
-        assert_eq!(state.domain.active_sessions.len(), 2);
-        assert_eq!(state.domain.confirmed_active_count(), 1);
-        let confirmed: Vec<_> = state.domain.confirmed_active_sessions().collect();
-        assert_eq!(confirmed.len(), 1);
-        assert_eq!(confirmed[0].0, &SessionId::new("s1"));
-    }
-
-    #[test]
-    fn unconfirmed_session_expires_after_30_seconds() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Unconfirmed session created 35 seconds ago
-        let old_time = now - chrono::Duration::seconds(35);
-        let meta = SessionMeta::new("phantom", old_time, "/proj".to_string());
-        state.domain.active_sessions.insert(SessionId::new("phantom"), meta);
-
-        update(&mut state, AppEvent::Tick(now));
-
-        // Should be removed and NOT archived
-        assert!(state.domain.active_sessions.is_empty());
-        assert!(state.domain.sessions.is_empty());
-    }
-
-    #[test]
-    fn unconfirmed_session_not_expired_within_30_seconds() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Unconfirmed session created 20 seconds ago
-        let recent_time = now - chrono::Duration::seconds(20);
-        let meta = SessionMeta::new("phantom", recent_time, "/proj".to_string());
-        state.domain.active_sessions.insert(SessionId::new("phantom"), meta);
-
-        update(&mut state, AppEvent::Tick(now));
-
-        // Should still be active
-        assert_eq!(state.domain.active_sessions.len(), 1);
-    }
-
-    #[test]
-    fn confirmed_session_not_expired_at_30_seconds() {
-        let mut state = AppState::new();
-        state.meta.replay_complete = true;
-        let now = Utc::now();
-
-        // Confirmed session created 2 minutes ago
-        let old_time = now - chrono::Duration::minutes(2);
-        let mut meta = SessionMeta::new("real", old_time, "/proj".to_string());
-        meta.confirmed = true;
-        meta.last_event_at = Some(old_time);
-        state.domain.active_sessions.insert(SessionId::new("real"), meta);
-
-        update(&mut state, AppEvent::Tick(now));
-
-        // Confirmed sessions use 5min timeout, not 30s
-        assert_eq!(state.domain.active_sessions.len(), 1);
-    }
-
-    #[test]
-    fn tick_skips_stale_cleanup_before_replay_complete() {
-        let mut state = AppState::new();
-        // replay_complete defaults to false
-        let now = Utc::now();
-
-        // Create unconfirmed session that would normally expire
-        let old_time = now - chrono::Duration::minutes(10);
-        let meta = SessionMeta::new("s1", old_time, "/proj".to_string());
-        state.domain.active_sessions.insert(SessionId::new("s1"), meta);
-
-        // Tick should NOT expire during replay
-        update(&mut state, AppEvent::Tick(now));
-        assert_eq!(state.domain.active_sessions.len(), 1);
-
-        // After ReplayComplete, Tick should expire it
-        update(&mut state, AppEvent::ReplayComplete);
-        update(&mut state, AppEvent::Tick(now));
-        assert!(state.domain.active_sessions.is_empty());
-    }
-
-    #[test]
-    fn session_end_archives_unconfirmed_session() {
-        // SessionEnd still archives even unconfirmed sessions (explicit end = real session)
-        let mut state = AppState::new();
-        let e = HookEvent::new(Utc::now(), HookEventKind::SessionStart)
-            .with_session("s1");
-        let end = HookEvent::new(Utc::now(), HookEventKind::SessionEnd)
-            .with_session("s1");
-
-        update(&mut state, AppEvent::HookEventReceived(e));
-        update(&mut state, AppEvent::HookEventReceived(end));
-
-        // SessionEnd always archives (it's a real end event)
-        assert!(state.domain.active_sessions.is_empty());
-        assert_eq!(state.domain.sessions.len(), 1);
-    }
-
-    // ============================================================================
-    // AgentMetadataUpdated Tests
-    // ============================================================================
-
-    #[test]
-    fn metadata_sets_model_on_agent_without_model() {
-        let mut state = AppState::new();
-        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
-
-        let metadata = crate::watcher::TranscriptMetadata {
-            model: Some("sonnet-4.5".to_string()),
-            ..Default::default()
-        };
-        update(&mut state, AppEvent::AgentMetadataUpdated {
-            agent_id: "a01".into(),
-            metadata,
-        });
-
-        assert_eq!(state.domain.agents[&AgentId::new("a01")].model.as_deref(), Some("sonnet-4.5"));
-    }
-
-    #[test]
-    fn metadata_overwrites_model() {
-        let mut state = AppState::new();
-        let mut agent = Agent::new("a01", Utc::now());
-        agent.model = Some("opus-4".to_string());
-        state.domain.agents.insert(AgentId::new("a01"), agent);
-
-        let metadata = crate::watcher::TranscriptMetadata {
-            model: Some("sonnet-4.5".to_string()),
-            ..Default::default()
-        };
-        update(&mut state, AppEvent::AgentMetadataUpdated {
-            agent_id: "a01".into(),
-            metadata,
-        });
-
-        // SET semantics: model from transcript always wins
-        assert_eq!(state.domain.agents[&AgentId::new("a01")].model.as_deref(), Some("sonnet-4.5"));
-    }
-
-    #[test]
-    fn metadata_sets_absolute_token_usage() {
-        let mut state = AppState::new();
-        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
-
-        let m1 = crate::watcher::TranscriptMetadata {
-            token_usage: crate::model::TokenUsage {
+        state.domain.agents.insert(aid.clone(), Agent::new(aid.clone(), now));
+
+        let metadata = TranscriptMetadata {
+            model: Some("claude-3-opus".to_string()),
+            token_usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
-                ..Default::default()
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
             ..Default::default()
         };
-        let m2 = crate::watcher::TranscriptMetadata {
-            token_usage: crate::model::TokenUsage {
-                input_tokens: 200,
-                output_tokens: 75,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m1 });
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m2 });
 
-        // SET semantics: last value wins (not accumulated)
-        let agent = &state.domain.agents[&AgentId::new("a01")];
-        assert_eq!(agent.token_usage.input_tokens, 200);
-        assert_eq!(agent.token_usage.output_tokens, 75);
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+
+        let agent = &state.domain.agents[&aid];
+        assert_eq!(agent.model, Some("claude-3-opus".to_string()));
+        assert_eq!(agent.token_usage.input_tokens, 100);
     }
 
     #[test]
-    fn metadata_replaces_skills() {
+    fn agent_metadata_updated_sets_agents_changed_for_new_agent() {
+        use crate::watcher::TranscriptMetadata;
+
+        // New agent → agents_changed must trigger recompute_sorted_keys.
+        // We verify indirectly: sorted_agent_keys is updated after update().
         let mut state = AppState::new();
-        state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", Utc::now()));
+        let aid = AgentId::new("agent-new-sc");
 
-        let m1 = crate::watcher::TranscriptMetadata {
-            skills: vec!["commit".to_string(), "review-pr".to_string()],
+        let metadata = TranscriptMetadata {
+            model: Some("claude-3".to_string()),
             ..Default::default()
         };
-        let m2 = crate::watcher::TranscriptMetadata {
-            skills: vec!["commit".to_string(), "loom".to_string()],
-            ..Default::default()
-        };
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m1 });
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: "a01".into(), metadata: m2 });
 
-        // SET semantics: full file parse includes all skills, so last send is complete
-        let skills = &state.domain.agents[&AgentId::new("a01")].skills;
-        assert_eq!(skills, &vec!["commit".to_string(), "loom".to_string()]);
-    }
-
-    #[test]
-    fn metadata_skips_unknown_agent() {
-        let mut state = AppState::new();
-        let metadata = crate::watcher::TranscriptMetadata {
-            model: Some("sonnet-4.5".to_string()),
-            ..Default::default()
-        };
-        update(&mut state, AppEvent::AgentMetadataUpdated {
-            agent_id: "nonexistent".into(),
-            metadata,
-        });
+        // Before: no agents, sorted keys empty
         assert!(state.domain.agents.is_empty());
+
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+
+        // Agent created
+        assert!(state.domain.agents.contains_key(&aid));
+        // sorted_agent_keys populated (recompute_sorted_keys was called)
+        assert!(!state.sorted_agent_keys().is_empty());
+    }
+
+    #[test]
+    fn agent_metadata_updated_creates_agent_if_not_exists() {
+        use crate::watcher::TranscriptMetadata;
+
+        let mut state = AppState::new();
+        let aid = AgentId::new("agent-new");
+
+        let metadata = TranscriptMetadata {
+            model: Some("claude-3".to_string()),
+            ..Default::default()
+        };
+
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+
+        assert!(state.domain.agents.contains_key(&aid));
+        assert_eq!(state.domain.agents[&aid].model, Some("claude-3".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionLoaded — guard against missing session
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_loaded_unknown_session_pushes_error_and_no_navigation() {
+        use crate::model::SessionArchive;
+
+        let mut state = AppState::new();
+        // sessions list is empty — no matching session
+        let sid = SessionId::new("ghost");
+        let now = Utc::now();
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        let archive = SessionArchive::new(meta);
+
+        update(&mut state, AppEvent::SessionLoaded(archive));
+
+        // Should NOT navigate to SessionDetail
+        assert!(!matches!(state.ui.view, ViewState::SessionDetail));
+        // Should push an error
+        assert_eq!(state.meta.errors.len(), 1);
+        assert!(state.meta.errors[0].contains("ghost"));
+        // loading_session cleared
+        assert!(state.ui.loading_session.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // Error — loading_session cleared on matching source
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn error_clears_loading_session_when_source_matches() {
+        use crate::error::{LoomError, WatcherError};
+
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-failing");
+        state.ui.loading_session = Some(sid.clone());
+
+        update(&mut state, AppEvent::Error {
+            source: format!("load:{}", sid.as_str()),
+            error: LoomError::Watcher(WatcherError::Io("not found".to_string())),
+        });
+
+        assert!(state.ui.loading_session.is_none());
+    }
+
+    #[test]
+    fn error_preserves_loading_session_when_source_unrelated() {
+        use crate::error::{LoomError, WatcherError};
+
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-waiting");
+        state.ui.loading_session = Some(sid.clone());
+
+        update(&mut state, AppEvent::Error {
+            source: "watcher:some_other_file".to_string(),
+            error: LoomError::Watcher(WatcherError::Io("unrelated".to_string())),
+        });
+
+        // loading_session untouched — source doesn't match session id
+        assert!(state.ui.loading_session.is_some());
+    }
+
+    // -------------------------------------------------------------------------
+    // AgentMetadataUpdated creates new agent
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn agent_metadata_creates_agent_and_updates_sorted_keys() {
+        use crate::watcher::TranscriptMetadata;
+
+        let mut state = AppState::new();
+        let aid = AgentId::new("brand-new-agent");
+        assert!(state.domain.agents.is_empty());
+
+        let metadata = TranscriptMetadata {
+            model: Some("claude-sonnet".to_string()),
+            ..Default::default()
+        };
+
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+
+        assert!(state.domain.agents.contains_key(&aid));
+        assert!(!state.sorted_agent_keys().is_empty());
     }
 }

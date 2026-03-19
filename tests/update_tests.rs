@@ -2,8 +2,8 @@ use chrono::Utc;
 use loom_tui::app::{update, AppState, ViewState};
 use loom_tui::event::AppEvent;
 use loom_tui::model::{
-    Agent, AgentId, AgentMessage, ArchivedSession, HookEvent, HookEventKind, SessionArchive, SessionId, SessionMeta,
-    SessionStatus, Task, TaskGraph, TaskStatus, ToolCall, Wave,
+    Agent, AgentId, ArchivedSession, SessionArchive, SessionId, SessionMeta,
+    SessionStatus, Task, TaskGraph, TaskStatus, TranscriptEvent, TranscriptEventKind, Wave,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -54,85 +54,64 @@ fn task_graph_updated_replaces_existing() {
     assert_eq!(state.domain.task_graph.unwrap().total_tasks(), 0);
 }
 
+/// Replacement for deprecated transcript_updated tests — now events go to the ring buffer.
 #[test]
-fn transcript_updated_adds_messages_to_existing_agent() {
+fn transcript_event_received_pushes_to_ring_buffer() {
     let mut state = AppState::new();
-    let agent = Agent::new("a01", Utc::now());
-    state.domain.agents.insert("a01".into(), agent);
+    let now = Utc::now();
 
-    let messages = vec![
-        AgentMessage::reasoning(Utc::now(), "analyzing problem".into()),
-        AgentMessage::tool(
-            Utc::now(),
-            ToolCall::new("Read", "file.rs".to_string()),
-        ),
-    ];
+    let event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage);
+    update(&mut state, AppEvent::TranscriptEventReceived(event));
 
-    update(
-        &mut state,
-        AppEvent::TranscriptUpdated {
-            agent_id: "a01".into(),
-            messages: messages.clone(),
-        },
-    );
-
-    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert_eq!(agent.messages.len(), 2);
-    assert!(matches!(
-        agent.messages[0].kind,
-        loom_tui::model::MessageKind::Reasoning { .. }
-    ));
+    assert_eq!(state.domain.events.len(), 1);
+    assert_eq!(state.domain.events[0].kind, TranscriptEventKind::UserMessage);
 }
 
 #[test]
-fn transcript_updated_replaces_existing_messages() {
+fn transcript_event_received_updates_session_last_event() {
     let mut state = AppState::new();
-    let mut agent = Agent::new("a01", Utc::now());
-    agent.messages = vec![AgentMessage::reasoning(Utc::now(), "old".into())];
-    state.domain.agents.insert("a01".into(), agent);
+    let sid = SessionId::new("sess-1");
+    let now = Utc::now();
+    let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+    state.domain.active_sessions.insert(sid.clone(), meta);
 
-    let new_messages = vec![AgentMessage::reasoning(Utc::now(), "new".into())];
+    let later = now + chrono::Duration::seconds(5);
+    let event = TranscriptEvent::new(later, TranscriptEventKind::UserMessage)
+        .with_session(sid.clone());
+    update(&mut state, AppEvent::TranscriptEventReceived(event));
 
-    update(
-        &mut state,
-        AppEvent::TranscriptUpdated {
-            agent_id: "a01".into(),
-            messages: new_messages,
-        },
-    );
-
-    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert_eq!(agent.messages.len(), 1);
+    assert_eq!(state.domain.active_sessions[&sid].last_event_at, Some(later));
+    assert_eq!(state.domain.active_sessions[&sid].event_count, 1);
 }
 
+/// Replacement for hook_event_received_appends_to_buffer.
 #[test]
-fn hook_event_received_appends_to_buffer() {
+fn transcript_event_received_appends_to_buffer() {
     let mut state = AppState::new();
-    let event1 = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
-    let event2 = HookEvent::new(
-        Utc::now(),
-        HookEventKind::Notification {
-            message: "test".into(),
-        },
+    let now = Utc::now();
+    let event1 = TranscriptEvent::new(now, TranscriptEventKind::UserMessage);
+    let event2 = TranscriptEvent::new(
+        now,
+        TranscriptEventKind::AssistantMessage { content: "test".into() },
     );
 
-    update(&mut state, AppEvent::HookEventReceived(event1));
-    update(&mut state, AppEvent::HookEventReceived(event2));
+    update(&mut state, AppEvent::TranscriptEventReceived(event1));
+    update(&mut state, AppEvent::TranscriptEventReceived(event2));
 
     assert_eq!(state.domain.events.len(), 2);
 }
 
+/// Replacement for hook_event_evicts_oldest_at_capacity.
 #[test]
-fn hook_event_evicts_oldest_at_capacity() {
+fn transcript_event_evicts_oldest_at_capacity() {
     let mut state = AppState::new();
+    let now = Utc::now();
 
     // Fill to exactly 10,000
-    for i in 0..10_000 {
-        let event = HookEvent::new(
-            Utc::now(),
-            HookEventKind::Notification {
-                message: format!("event {}", i),
-            },
+    for i in 0..10_000usize {
+        let event = TranscriptEvent::new(
+            now,
+            TranscriptEventKind::AssistantMessage { content: format!("event {i}") },
         );
         state.domain.events.push_back(event);
     }
@@ -140,17 +119,12 @@ fn hook_event_evicts_oldest_at_capacity() {
     // Front should be event 0
     assert!(matches!(
         &state.domain.events.front().unwrap().kind,
-        HookEventKind::Notification { message } if message.contains("event 0")
+        TranscriptEventKind::AssistantMessage { content } if content.contains("event 0")
     ));
 
-    // Add one more
-    let new_event = HookEvent::new(
-        Utc::now(),
-        HookEventKind::Notification {
-            message: "event 10000".into(),
-        },
-    );
-    update(&mut state, AppEvent::HookEventReceived(new_event));
+    // Add one more via update
+    let new_event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage);
+    update(&mut state, AppEvent::TranscriptEventReceived(new_event));
 
     // Should still be 10,000
     assert_eq!(state.domain.events.len(), 10_000);
@@ -158,85 +132,76 @@ fn hook_event_evicts_oldest_at_capacity() {
     // Front should now be event 1 (event 0 evicted)
     assert!(matches!(
         &state.domain.events.front().unwrap().kind,
-        HookEventKind::Notification { message } if message.contains("event 1")
+        TranscriptEventKind::AssistantMessage { content } if content.contains("event 1")
     ));
 
-    // Back should be event 10000
-    assert!(matches!(
-        &state.domain.events.back().unwrap().kind,
-        HookEventKind::Notification { message } if message.contains("event 10000")
-    ));
+    // Back should be UserMessage
+    assert_eq!(state.domain.events.back().unwrap().kind, TranscriptEventKind::UserMessage);
 }
 
+/// AgentStarted/AgentStopped removed — agents now discovered via AgentMetadataUpdated.
+/// Test equivalent: AgentMetadataUpdated creates a new agent entry.
 #[test]
-fn agent_started_creates_new_agent() {
+fn agent_metadata_updated_creates_new_agent() {
+    use loom_tui::watcher::TranscriptMetadata;
+
     let mut state = AppState::new();
-    let timestamp = Utc::now();
-    update(&mut state, AppEvent::AgentStarted {
-        agent_id: "a01".into(),
-        timestamp,
+    let aid = AgentId::new("a01");
+
+    update(&mut state, AppEvent::AgentMetadataUpdated {
+        agent_id: aid.clone(),
+        metadata: TranscriptMetadata {
+            model: Some("claude-sonnet".to_string()),
+            ..Default::default()
+        },
+    });
+
+    assert_eq!(state.domain.agents.len(), 1);
+    let agent = state.domain.agents.get(&aid).unwrap();
+    assert_eq!(agent.id.as_str(), "a01");
+    assert_eq!(agent.model.as_deref(), Some("claude-sonnet"));
+}
+
+/// AgentMetadataUpdated updates model/tokens on existing agent.
+#[test]
+fn agent_metadata_updated_updates_existing_agent() {
+    use loom_tui::watcher::TranscriptMetadata;
+
+    let mut state = AppState::new();
+    let now = Utc::now();
+    state.domain.agents.insert(AgentId::new("a01"), Agent::new("a01", now));
+
+    update(&mut state, AppEvent::AgentMetadataUpdated {
+        agent_id: AgentId::new("a01"),
+        metadata: TranscriptMetadata {
+            model: Some("claude-opus".to_string()),
+            ..Default::default()
+        },
     });
 
     assert_eq!(state.domain.agents.len(), 1);
     let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert_eq!(agent.id.as_str(), "a01");
-    assert!(agent.finished_at.is_none());
-    assert!(agent.messages.is_empty());
-    assert_eq!(agent.started_at, timestamp);
+    assert_eq!(agent.model.as_deref(), Some("claude-opus"));
 }
 
 #[test]
-fn agent_started_uses_provided_timestamp() {
-    let timestamp = Utc::now() - chrono::Duration::minutes(5);
+fn key_event_q_triggers_quit() {
     let mut state = AppState::new();
-    update(&mut state, AppEvent::AgentStarted {
-        agent_id: "a01".into(),
-        timestamp,
-    });
-
-    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert_eq!(agent.started_at, timestamp);
-}
-
-#[test]
-fn agent_stopped_uses_provided_timestamp() {
-    let mut state = AppState::new();
-    let start_time = Utc::now();
-    state
-        .domain.agents
-        .insert("a01".into(), Agent::new("a01", start_time));
-
-    let stop_time = start_time + chrono::Duration::seconds(30);
-    update(&mut state, AppEvent::AgentStopped {
-        agent_id: "a01".into(),
-        timestamp: stop_time,
-    });
-
-    let agent = state.domain.agents.get(&AgentId::new("a01")).unwrap();
-    assert_eq!(agent.finished_at, Some(stop_time));
-}
-
-#[test]
-fn key_event_no_op_until_t6() {
-    let mut state = AppState::new();
-    let original_view = state.ui.view.clone();
 
     let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('q'));
     update(&mut state, AppEvent::Key(key));
 
-    // State should be unchanged
-    assert_eq!(state.ui.view, original_view);
+    assert!(state.meta.should_quit);
     assert_eq!(state.domain.agents.len(), 0);
 }
 
 #[test]
 fn tick_event_is_passive() {
     let mut state = AppState::new();
-    state.domain.events.push_back(HookEvent::new(
+    // replay_complete must be false (default) so Tick is a no-op
+    state.domain.events.push_back(TranscriptEvent::new(
         Utc::now(),
-        HookEventKind::Notification {
-            message: "test".into(),
-        },
+        TranscriptEventKind::UserMessage,
     ));
 
     let original_len = state.domain.events.len();
@@ -355,8 +320,8 @@ fn session_loaded_stores_events_in_archive() {
     let meta = SessionMeta::new("s1", Utc::now(), "/proj".to_string());
 
     let events = vec![
-        HookEvent::new(Utc::now(), HookEventKind::SessionStart),
-        HookEvent::new(Utc::now(), HookEventKind::SessionEnd),
+        TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
+        TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage),
     ];
 
     state.domain.sessions.push(ArchivedSession::new(meta.clone(), PathBuf::new()));
@@ -381,16 +346,18 @@ fn session_loaded_clears_loading_flag() {
     assert!(state.ui.loading_session.is_none());
 }
 
+/// SessionListRefreshed removed — sessions now discovered via SessionMetasLoaded/SessionDiscovered.
+/// Equivalent: SessionMetasLoaded populates sessions list.
 #[test]
-fn session_list_refreshed_updates_sessions() {
+fn session_metas_loaded_updates_sessions() {
     let mut state = AppState::new();
-    let sessions = vec![
-        SessionArchive::new(SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
-        SessionArchive::new(SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
-        SessionArchive::new(SessionMeta::new("s3", Utc::now(), "/proj3".to_string())),
+    let metas = vec![
+        (PathBuf::from("/sessions/s1.json"), SessionMeta::new("s1", Utc::now(), "/proj1".to_string())),
+        (PathBuf::from("/sessions/s2.json"), SessionMeta::new("s2", Utc::now(), "/proj2".to_string())),
+        (PathBuf::from("/sessions/s3.json"), SessionMeta::new("s3", Utc::now(), "/proj3".to_string())),
     ];
 
-    update(&mut state, AppEvent::SessionListRefreshed(sessions));
+    update(&mut state, AppEvent::SessionMetasLoaded(metas));
 
     assert_eq!(state.domain.sessions.len(), 3);
     assert_eq!(state.domain.sessions[0].meta.id.as_str(), "s1");
@@ -398,15 +365,16 @@ fn session_list_refreshed_updates_sessions() {
 }
 
 #[test]
-fn session_list_refreshed_replaces_existing_list() {
+fn session_metas_loaded_replaces_existing_list() {
     let mut state = AppState::new();
     state
         .domain.sessions
         .push(ArchivedSession::new(SessionMeta::new("old", Utc::now(), "/old".to_string()), PathBuf::new()));
 
-    let new_sessions = vec![SessionArchive::new(SessionMeta::new("new", Utc::now(), "/new".to_string()))];
-
-    update(&mut state, AppEvent::SessionListRefreshed(new_sessions));
+    let new_metas = vec![
+        (PathBuf::from("/sessions/new.json"), SessionMeta::new("new", Utc::now(), "/new".to_string()))
+    ];
+    update(&mut state, AppEvent::SessionMetasLoaded(new_metas));
 
     assert_eq!(state.domain.sessions.len(), 1);
     assert_eq!(state.domain.sessions[0].meta.id.as_str(), "new");
@@ -441,46 +409,32 @@ fn load_session_requested_sets_loading_flag() {
     assert_eq!(state.ui.loading_session, Some(SessionId::new("s1")));
 }
 
+/// Multiple updates compose: AgentMetadataUpdated + TranscriptEventReceived.
 #[test]
 fn multiple_updates_compose_correctly() {
+    use loom_tui::watcher::TranscriptMetadata;
+
     let mut state = AppState::new();
 
-    // Start agent
-    let start_time = Utc::now();
-    update(&mut state, AppEvent::AgentStarted {
-        agent_id: "a01".into(),
-        timestamp: start_time,
+    // Discover agent via metadata
+    update(&mut state, AppEvent::AgentMetadataUpdated {
+        agent_id: AgentId::new("a01"),
+        metadata: TranscriptMetadata {
+            model: Some("claude-sonnet".to_string()),
+            ..Default::default()
+        },
     });
     assert_eq!(state.domain.agents.len(), 1);
 
-    // Update transcript
-    let messages = vec![AgentMessage::reasoning(Utc::now(), "thinking".into())];
-    update(
-        &mut state,
-        AppEvent::TranscriptUpdated {
-            agent_id: "a01".into(),
-            messages,
-        },
-    );
-    assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
-
-    // Add event (use Notification, not SessionStart which resets state)
-    let event = HookEvent::new(Utc::now(), HookEventKind::Notification { message: "test".into() });
-    update(&mut state, AppEvent::HookEventReceived(event));
+    // Add transcript event to ring buffer
+    let now = Utc::now();
+    let event = TranscriptEvent::new(now, TranscriptEventKind::UserMessage);
+    update(&mut state, AppEvent::TranscriptEventReceived(event));
     assert_eq!(state.domain.events.len(), 1);
-
-    // Stop agent
-    let stop_time = start_time + chrono::Duration::seconds(10);
-    update(&mut state, AppEvent::AgentStopped {
-        agent_id: "a01".into(),
-        timestamp: stop_time,
-    });
-    assert!(state.domain.agents.get(&AgentId::new("a01")).unwrap().finished_at.is_some());
 
     // All state should be preserved
     assert_eq!(state.domain.agents.len(), 1);
     assert_eq!(state.domain.events.len(), 1);
-    assert_eq!(state.domain.agents.get(&AgentId::new("a01")).unwrap().messages.len(), 1);
 }
 
 #[test]
@@ -490,8 +444,8 @@ fn update_preserves_unmodified_fields() {
     state.ui.auto_scroll = false;
     state.ui.show_help = true;
 
-    let event = HookEvent::new(Utc::now(), HookEventKind::SessionStart);
-    update(&mut state, AppEvent::HookEventReceived(event));
+    let event = TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage);
+    update(&mut state, AppEvent::TranscriptEventReceived(event));
 
     // These fields should be preserved
     assert_eq!(state.ui.view, ViewState::Sessions);
@@ -502,16 +456,15 @@ fn update_preserves_unmodified_fields() {
 #[test]
 fn property_event_buffer_never_exceeds_10000() {
     let mut state = AppState::new();
+    let now = Utc::now();
 
     // Stress test: add way more than capacity
-    for i in 0..20_000 {
-        let event = HookEvent::new(
-            Utc::now(),
-            HookEventKind::Notification {
-                message: format!("{}", i),
-            },
+    for i in 0..20_000usize {
+        let event = TranscriptEvent::new(
+            now,
+            TranscriptEventKind::AssistantMessage { content: format!("{i}") },
         );
-        update(&mut state, AppEvent::HookEventReceived(event));
+        update(&mut state, AppEvent::TranscriptEventReceived(event));
         assert!(state.domain.events.len() <= 10_000);
     }
 
@@ -540,24 +493,18 @@ fn property_error_buffer_never_exceeds_100() {
 
 #[test]
 fn property_update_never_panics() {
+    use loom_tui::watcher::TranscriptMetadata;
+
     let mut state = AppState::new();
 
-    // Throw a variety of events at it
-    let timestamp = Utc::now();
     let events: Vec<AppEvent> = vec![
-        AppEvent::AgentStarted {
-            agent_id: "a01".into(),
-            timestamp,
+        AppEvent::AgentMetadataUpdated {
+            agent_id: AgentId::new("a01"),
+            metadata: TranscriptMetadata::default(),
         },
-        AppEvent::AgentStopped {
-            agent_id: "nonexistent".into(),
-            timestamp,
-        },
-        AppEvent::TranscriptUpdated {
-            agent_id: "nonexistent".into(),
-            messages: vec![],
-        },
-        AppEvent::HookEventReceived(HookEvent::new(Utc::now(), HookEventKind::SessionStart)),
+        AppEvent::TranscriptEventReceived(
+            TranscriptEvent::new(Utc::now(), TranscriptEventKind::UserMessage)
+        ),
         AppEvent::Error {
             source: "test".into(),
             error: loom_tui::error::WatcherError::Parse(
@@ -568,7 +515,6 @@ fn property_update_never_panics() {
         AppEvent::Key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Char('x'),
         )),
-        AppEvent::SessionListRefreshed(vec![]),
         AppEvent::SessionMetasLoaded(vec![]),
         AppEvent::LoadSessionRequested(SessionId::new("test")),
     ];

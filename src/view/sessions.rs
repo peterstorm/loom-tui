@@ -28,7 +28,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
     }
 
     // Build table rows from session list
-    let _scroll_offset = state.ui.scroll_offsets.sessions; // TODO: implement scrolling
+    // TODO: use state.ui.scroll_offsets.sessions to scroll the session table
     let header_row = Row::new(vec![
         "Session ID",
         "Date",

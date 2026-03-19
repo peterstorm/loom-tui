@@ -1,4 +1,26 @@
 /// Shared serde utilities for domain models
+
+/// Deserialize a Vec<T> from JSON with element-wise fallback.
+///
+/// Each array element is deserialized independently: valid elements are kept,
+/// invalid ones are silently skipped. This preserves good events when a v2
+/// archive contains one corrupted entry, while still returning an empty vec
+/// for old-format archives where no element matches T (FR-026, SC-008).
+pub fn deserialize_vec_or_empty<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    if let serde_json::Value::Array(arr) = raw {
+        return Ok(arr
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<T>(v).ok())
+            .collect());
+    }
+    Ok(Vec::new())
+}
+
 /// Custom serde for Duration as milliseconds
 pub mod duration_opt_millis {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -28,6 +50,37 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct IntWrapper {
+        #[serde(default, deserialize_with = "deserialize_vec_or_empty")]
+        values: Vec<u32>,
+    }
+
+    /// Valid elements survive; a single bad element is skipped, not the whole array.
+    #[test]
+    fn mixed_valid_invalid_elements_preserves_valid() {
+        // 42 and 99 are valid u32; "bad" is not.
+        let json = r#"{"values": [42, "bad", 99]}"#;
+        let result: IntWrapper = serde_json::from_str(json).unwrap();
+        assert_eq!(result.values, vec![42u32, 99u32]);
+    }
+
+    /// All-invalid array yields empty vec.
+    #[test]
+    fn all_invalid_elements_yields_empty_vec() {
+        let json = r#"{"values": ["a", "b", "c"]}"#;
+        let result: IntWrapper = serde_json::from_str(json).unwrap();
+        assert!(result.values.is_empty());
+    }
+
+    /// Non-array value yields empty vec.
+    #[test]
+    fn non_array_value_yields_empty_vec() {
+        let json = r#"{"values": "not-an-array"}"#;
+        let result: IntWrapper = serde_json::from_str(json).unwrap();
+        assert!(result.values.is_empty());
+    }
 
     #[derive(Serialize, Deserialize)]
     struct TestStruct {

@@ -13,6 +13,7 @@
     "wave_count": 2,
     "failed_tasks": []
   },
+  "version": 2,
   "task_graph": {
     "waves": [
       {
@@ -54,19 +55,25 @@
   "events": [
     {
       "timestamp": "2026-02-11T09:59:00Z",
-      "event": "session_start",
+      "event": "user_message",
       "session_id": "s20260211-095900"
     },
     {
       "timestamp": "2026-02-11T10:00:00Z",
-      "event": "subagent_start",
+      "event": "tool_use",
+      "tool_name": "Bash",
+      "input_summary": "cargo build",
       "agent_id": "a01",
-      "task_description": "Create scaffold"
+      "session_id": "s20260211-095900"
     },
     {
       "timestamp": "2026-02-11T10:05:00Z",
-      "event": "subagent_stop",
-      "agent_id": "a01"
+      "event": "tool_result",
+      "tool_name": "Bash",
+      "result_summary": "Compiling loom-tui v0.1.0",
+      "duration_ms": 3200,
+      "agent_id": "a01",
+      "session_id": "s20260211-095900"
     }
   ],
   "agents": {

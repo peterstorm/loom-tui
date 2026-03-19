@@ -241,7 +241,7 @@ pub fn parse_transcript_events(content: &str, session_id: &str) -> Vec<Transcrip
                                 Some(t) if !t.trim().is_empty() => t,
                                 _ => continue,
                             };
-                            let content = truncate_str(text, 4000);
+                            let content = truncate_str(text, 16_000);
                             let event = build_event(
                                 timestamp,
                                 TranscriptEventKind::AssistantMessage { content },
@@ -346,7 +346,7 @@ fn build_tool_id_map(content: &str) -> HashMap<String, String> {
 /// Extract a human-readable summary from a tool_result content block.
 fn extract_tool_result_summary(block: &Value) -> String {
     match block.get("content") {
-        Some(Value::String(s)) => truncate_str(s, 500),
+        Some(Value::String(s)) => truncate_str(s, 16_000),
         Some(Value::Array(items)) => {
             let text = items
                 .iter()
@@ -359,7 +359,7 @@ fn extract_tool_result_summary(block: &Value) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            truncate_str(&text, 500)
+            truncate_str(&text, 16_000)
         }
         _ => String::new(),
     }
@@ -397,7 +397,7 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .get("description")
             .or_else(|| input.get("prompt"))
             .and_then(|v| v.as_str())
-            .map(|s| truncate_str(s, 200))
+            .map(|s| truncate_str(s, 2000))
             .unwrap_or_default(),
         _ => input
             .get("file_path")
@@ -1139,8 +1139,8 @@ not valid json
     }
 
     #[test]
-    fn parse_events_assistant_text_truncated_at_4000() {
-        let long_text = "x".repeat(5000);
+    fn parse_events_assistant_text_truncated_at_16000() {
+        let long_text = "x".repeat(20_000);
         let jsonl = make_assistant_entry(&format!(
             r#"[{{"type":"text","text":"{}"}}]"#,
             long_text
@@ -1149,7 +1149,7 @@ not valid json
         assert_eq!(events.len(), 1);
         match &events[0].kind {
             TranscriptEventKind::AssistantMessage { content } => {
-                assert!(content.len() <= 4003); // 4000 chars + "..."
+                assert!(content.len() <= 16_003); // 16000 chars + "..."
                 assert!(content.ends_with("..."));
             }
             _ => panic!("expected AssistantMessage"),

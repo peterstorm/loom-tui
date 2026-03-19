@@ -539,8 +539,7 @@ pub fn format_transcript_event_lines(kind: &TranscriptEventKind) -> (&'static st
     match kind {
         TranscriptEventKind::UserMessage => ("→", "User message".into(), None, Theme::INFO, None),
         TranscriptEventKind::AssistantMessage { content } => {
-            let truncated = crate::watcher::truncate_str(content, 4000);
-            ("💭", "Assistant".into(), Some(truncated), Theme::MUTED_TEXT, None)
+            ("💭", "Assistant".into(), Some(content.clone()), Theme::MUTED_TEXT, None)
         }
         TranscriptEventKind::ToolUse { tool_name, input_summary } => {
             let detail = if input_summary.is_empty() {

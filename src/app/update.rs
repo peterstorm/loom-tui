@@ -74,6 +74,14 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 let dur = (now - meta.timestamp).to_std().unwrap_or_default();
                 meta.duration = Some(dur);
 
+                // Mark all agents from this session as finished (backstop)
+                for agent in state.domain.agents.values_mut() {
+                    if agent.session_id.as_ref() == Some(&session_id) && agent.finished_at.is_none() {
+                        agent.finished_at = Some(now);
+                        agents_changed = true;
+                    }
+                }
+
                 let archive = session::build_archive(
                     state.domain.task_graph.as_ref(),
                     &state.domain.events,
@@ -141,6 +149,13 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
                 for (id, was_confirmed) in stale_ids {
                     if let Some(mut meta) = state.domain.active_sessions.remove(&id) {
+                        // Mark agents from this session as finished
+                        for agent in state.domain.agents.values_mut() {
+                            if agent.session_id.as_ref() == Some(&id) && agent.finished_at.is_none() {
+                                agent.finished_at = Some(now);
+                                agents_changed = true;
+                            }
+                        }
                         // Only archive confirmed sessions; drop phantom sessions silently (FR-013)
                         if was_confirmed {
                             meta.status = SessionStatus::Cancelled;
@@ -196,6 +211,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
 
         AppEvent::LoadSessionRequested(sid) => {
             state.ui.loading_session = Some(sid);
+        }
+
+        AppEvent::AgentFinished { agent_id } => {
+            if let Some(agent) = state.domain.agents.get_mut(&agent_id) {
+                if agent.finished_at.is_none() {
+                    agent.finished_at = Some(chrono::Utc::now());
+                    agents_changed = true;
+                }
+            }
         }
 
         AppEvent::AgentMetadataUpdated { agent_id, metadata } => {
@@ -867,5 +891,66 @@ mod tests {
 
         assert!(state.domain.agents.contains_key(&aid));
         assert!(!state.sorted_agent_keys().is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // AgentFinished
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn agent_finished_sets_finished_at() {
+        let mut state = AppState::new();
+        let aid = AgentId::new("agent-done");
+        let now = Utc::now();
+        state.domain.agents.insert(aid.clone(), Agent::new(aid.clone(), now));
+        assert!(state.domain.agents[&aid].finished_at.is_none());
+
+        update(&mut state, AppEvent::AgentFinished { agent_id: aid.clone() });
+
+        assert!(state.domain.agents[&aid].finished_at.is_some());
+    }
+
+    #[test]
+    fn agent_finished_is_idempotent() {
+        let mut state = AppState::new();
+        let aid = AgentId::new("agent-idem");
+        let now = Utc::now();
+        state.domain.agents.insert(aid.clone(), Agent::new(aid.clone(), now));
+
+        update(&mut state, AppEvent::AgentFinished { agent_id: aid.clone() });
+        let first_ts = state.domain.agents[&aid].finished_at;
+
+        update(&mut state, AppEvent::AgentFinished { agent_id: aid.clone() });
+        assert_eq!(state.domain.agents[&aid].finished_at, first_ts);
+    }
+
+    #[test]
+    fn agent_finished_unknown_agent_is_noop() {
+        let mut state = AppState::new();
+        update(&mut state, AppEvent::AgentFinished { agent_id: AgentId::new("ghost") });
+        assert!(state.domain.agents.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // SessionCompleted finishes agents
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn session_completed_finishes_session_agents() {
+        let mut state = AppState::new();
+        let sid = SessionId::new("sess-fin");
+        let aid = AgentId::new("agent-in-sess");
+        let now = Utc::now();
+
+        let meta = SessionMeta::new(sid.clone(), now, "/proj".to_string());
+        state.domain.active_sessions.insert(sid.clone(), meta);
+
+        let mut agent = Agent::new(aid.clone(), now);
+        agent.session_id = Some(sid.clone());
+        state.domain.agents.insert(aid.clone(), agent);
+
+        update(&mut state, AppEvent::SessionCompleted { session_id: sid });
+
+        assert!(state.domain.agents[&aid].finished_at.is_some());
     }
 }

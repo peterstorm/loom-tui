@@ -125,9 +125,10 @@ pub fn get_selected_session_data(state: &AppState) -> Option<SessionViewData<'_>
             .filter(|(_, a)| a.session_id.as_ref() == Some(sid))
             .map(|(k, v)| (k.clone(), v))
             .collect();
-        // TODO: filter state.domain.events by session_id for live sessions.
-        // Currently active sessions show no events in the detail view.
-        let filtered_events: Vec<TranscriptEvent> = Vec::new();
+        let filtered_events: Vec<TranscriptEvent> = state.domain.events.iter()
+            .filter(|e| e.session_id.as_ref() == Some(sid))
+            .cloned()
+            .collect();
         return Some(SessionViewData {
             meta,
             agents: AgentsRef::Filtered(filtered_agents),

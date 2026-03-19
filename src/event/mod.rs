@@ -33,6 +33,9 @@ pub enum AppEvent {
         metadata: TranscriptMetadata,
     },
 
+    /// Agent transcript finished (result entry seen or idle timeout)
+    AgentFinished { agent_id: AgentId },
+
     /// Keyboard input event
     Key(KeyEvent),
 

@@ -213,6 +213,9 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             }
             agent.token_usage = metadata.token_usage.clone();
             agent.skills = metadata.skills.clone();
+            if metadata.task_description.is_some() {
+                agent.task_description = metadata.task_description.clone();
+            }
 
             if state.domain.agents.len() > len_before {
                 agents_changed = true;

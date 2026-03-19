@@ -437,7 +437,7 @@ fn emit_agent_metadata(path: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
     };
 
     let metadata = parsers::parse_transcript_metadata(&full_content);
-    if metadata.model.is_none() && metadata.token_usage.is_empty() && metadata.skills.is_empty() {
+    if metadata.model.is_none() && metadata.token_usage.is_empty() && metadata.skills.is_empty() && metadata.task_description.is_none() {
         return;
     }
 

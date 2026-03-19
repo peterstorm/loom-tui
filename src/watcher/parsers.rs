@@ -417,6 +417,8 @@ pub struct TranscriptMetadata {
     pub model: Option<String>,
     pub token_usage: TokenUsage,
     pub skills: Vec<String>,
+    /// The task prompt (first user message content), truncated to 4000 chars.
+    pub task_description: Option<String>,
 }
 
 /// Parse Claude Code transcript JSONL to extract model, token usage, and skills.
@@ -438,6 +440,7 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
     // Preserve insertion order so we can pick the last unique message.
     let mut msg_order: Vec<String> = Vec::new();
     let mut msg_usage: HashMap<String, TokenUsage> = HashMap::new();
+    let mut seen_first_user = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -502,7 +505,8 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
             "human" | "user" => {
                 // Scan content for <command-name>X</command-name>
                 // Content can be either a string or an array of blocks
-                match entry.get("message").and_then(|m| m.get("content")) {
+                let content_val = entry.get("message").and_then(|m| m.get("content"));
+                match content_val {
                     Some(Value::Array(blocks)) => {
                         for block in blocks {
                             if block.get("type").and_then(|v| v.as_str()) != Some("text") {
@@ -510,11 +514,20 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
                             }
                             if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 extract_command_names(text, &mut meta.skills);
+                                // Capture first user message as task description
+                                if !seen_first_user {
+                                    meta.task_description = Some(truncate_str(text, 4000));
+                                    seen_first_user = true;
+                                }
                             }
                         }
                     }
                     Some(Value::String(text)) => {
                         extract_command_names(text, &mut meta.skills);
+                        if !seen_first_user {
+                            meta.task_description = Some(truncate_str(text, 4000));
+                            seen_first_user = true;
+                        }
                     }
                     _ => continue,
                 };

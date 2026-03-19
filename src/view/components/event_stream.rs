@@ -195,23 +195,29 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
         if let Some(detail_text) = detail {
             let clean = clean_detail(&detail_text);
             if !clean.is_empty() {
-                let (start_line, offset_clean) = extract_line_offset(&clean);
-                let ext_hint = tool_name
-                    .as_ref()
-                    .filter(|t| {
-                        matches!(
-                            t.as_str(),
-                            "Read" | "Edit" | "Write" | "Grep" | "Glob"
-                        )
-                    })
-                    .and_then(|_| {
-                        // Check first few lines for file path/extension
-                        offset_clean
-                            .lines()
-                            .take(5)
-                            .find_map(super::syntax::detect_extension)
-                    });
-                lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                if tool_name.is_none() {
+                    // Assistant messages: full markdown rendering via tui_markdown
+                    let rendered = tui_markdown::from_str(&clean);
+                    lines.extend(own_text_lines(rendered));
+                } else {
+                    // Tool use/result: custom rendering with syntax highlighting + diff coloring
+                    let (start_line, offset_clean) = extract_line_offset(&clean);
+                    let ext_hint = tool_name
+                        .as_ref()
+                        .filter(|t| {
+                            matches!(
+                                t.as_str(),
+                                "Read" | "Edit" | "Write" | "Grep" | "Glob"
+                            )
+                        })
+                        .and_then(|_| {
+                            offset_clean
+                                .lines()
+                                .take(5)
+                                .find_map(super::syntax::detect_extension)
+                        });
+                    lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                }
             }
         }
     }
@@ -464,6 +470,33 @@ fn parse_inline_markdown(text: &str) -> Vec<Span<'static>> {
     }
 
     spans
+}
+
+/// Convert tui_markdown's `Text` to owned `Vec<Line<'static>>`.
+/// Merges line-level styles (used by tui_markdown for headings) into
+/// span-level styles so they survive the lifetime conversion.
+/// Strips the raw `# ` prefix spans that tui_markdown leaves on headings.
+pub fn own_text_lines(text: ratatui::text::Text<'_>) -> Vec<Line<'static>> {
+    text.lines
+        .into_iter()
+        .map(|line| {
+            let line_style = line.style;
+            let owned_spans: Vec<Span<'static>> = line
+                .spans
+                .into_iter()
+                .filter(|s| {
+                    // Strip tui_markdown's heading prefix spans ("# ", "## ", etc.)
+                    let t = s.content.trim_end();
+                    !(t.chars().all(|c| c == '#') && !t.is_empty())
+                })
+                .map(|s| {
+                    let merged = line_style.patch(s.style);
+                    Span::styled(s.content.to_string(), merged)
+                })
+                .collect();
+            Line::from(owned_spans)
+        })
+        .collect()
 }
 
 /// Shorten an agent ID to first 7 chars (like git short hash).

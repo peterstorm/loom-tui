@@ -9,7 +9,7 @@ pub struct Paths {
     pub task_graph: PathBuf,
 
     /// Directory containing Claude Code transcript JSONL files for this project
-    /// Example: ~/.claude/projects/home-user-dev-myproject/
+    /// Example: ~/.claude/projects/-home-user-dev-myproject/
     pub transcript_dir: PathBuf,
 
     /// Directory for archived session storage
@@ -81,13 +81,12 @@ impl Paths {
     ///
     /// assert_eq!(
     ///     Paths::project_hash(Path::new("/home/user/dev/myproject")),
-    ///     "home-user-dev-myproject"
+    ///     "-home-user-dev-myproject"
     /// );
     /// ```
     pub fn project_hash(project_root: &Path) -> String {
         let raw = project_root.to_string_lossy();
-        let replaced = raw.replace('/', "-");
-        replaced.trim_start_matches('-').to_string()
+        raw.replace('/', "-")
     }
 }
 
@@ -104,32 +103,33 @@ mod tests {
     fn project_hash_typical_path() {
         assert_eq!(
             Paths::project_hash(Path::new("/home/user/dev/myproject")),
-            "home-user-dev-myproject"
+            "-home-user-dev-myproject"
         );
     }
 
     #[test]
     fn project_hash_root_path() {
-        assert_eq!(Paths::project_hash(Path::new("/")), "");
+        assert_eq!(Paths::project_hash(Path::new("/")), "-");
     }
 
     #[test]
     fn project_hash_single_segment() {
-        assert_eq!(Paths::project_hash(Path::new("/project")), "project");
+        assert_eq!(Paths::project_hash(Path::new("/project")), "-project");
     }
 
     #[test]
     fn project_hash_deep_path() {
         assert_eq!(
             Paths::project_hash(Path::new("/home/peterstorm/dev/rust/loom-tui")),
-            "home-peterstorm-dev-rust-loom-tui"
+            "-home-peterstorm-dev-rust-loom-tui"
         );
     }
 
     #[test]
-    fn project_hash_no_leading_dash() {
+    fn project_hash_matches_claude_code_convention() {
+        // Claude Code uses leading dash: /home/user -> -home-user
         let hash = Paths::project_hash(Path::new("/any/path"));
-        assert!(!hash.starts_with('-'), "hash must not start with dash");
+        assert!(hash.starts_with('-'), "hash must start with dash to match Claude Code dirs");
     }
 
     // ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ mod tests {
 
         assert_eq!(
             paths.transcript_dir,
-            Path::new("/home/testuser/.claude/projects/home-testuser-dev-myproject")
+            Path::new("/home/testuser/.claude/projects/-home-testuser-dev-myproject")
         );
     }
 
@@ -157,7 +157,7 @@ mod tests {
         // When HOME is unset, falls back to /tmp
         assert_eq!(
             paths.transcript_dir,
-            Path::new("/tmp/.claude/projects/home-user-project")
+            Path::new("/tmp/.claude/projects/-home-user-project")
         );
     }
 

@@ -15,7 +15,13 @@
         let
           craneLib = crane.mkLib pkgs;
 
-          src = craneLib.cleanCargoSource ./.;
+          testFixtureFilter = path: _type:
+            builtins.match ".*tests/fixtures/.*" path != null;
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              (testFixtureFilter path type) || (craneLib.filterCargoSources path type);
+          };
 
           commonArgs = {
             inherit src;

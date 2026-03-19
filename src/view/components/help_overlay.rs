@@ -74,6 +74,7 @@ fn build_help_text() -> Vec<Line<'static>> {
         Line::from("  p           - Preview agent in popup"),
         Line::from("  v           - Toggle wave/kanban view"),
         Line::from("  ?           - Toggle help overlay"),
+        Line::from("  L           - Tmux layout picker"),
         Line::from("  q           - Quit application"),
         Line::from(""),
         Line::from(Span::styled(

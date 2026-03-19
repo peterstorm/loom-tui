@@ -60,4 +60,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if let Some(ref agent_id) = state.ui.show_agent_popup {
         components::render_agent_popup(frame, state, agent_id.as_str());
     }
+
+    // Overlay layout picker if active
+    if state.ui.layout_picker.is_open() {
+        components::layout_picker::render_layout_picker(frame, frame.area(), &state.ui.layout_picker);
+    }
 }

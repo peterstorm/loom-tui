@@ -48,6 +48,9 @@ pub struct UiState {
     /// Prompt popup state (Closed or Open with scroll offset)
     pub prompt_popup: PromptPopupState,
 
+    /// Layout picker popup state
+    pub layout_picker: LayoutPickerState,
+
     /// Index of selected agent within session detail view's agent list
     pub selected_session_agent_index: Option<usize>,
 }
@@ -70,6 +73,19 @@ impl PromptPopupState {
             Self::Open { scroll } => *scroll,
             Self::Closed => 0,
         }
+    }
+}
+
+/// Layout picker popup state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutPickerState {
+    Closed,
+    Open { selected: usize },
+}
+
+impl LayoutPickerState {
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open { .. })
     }
 }
 
@@ -223,6 +239,7 @@ impl Default for UiState {
             selected_session_id: None,
             loading_session: None,
             prompt_popup: PromptPopupState::Closed,
+            layout_picker: LayoutPickerState::Closed,
             selected_session_agent_index: None,
         }
     }

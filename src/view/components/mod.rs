@@ -7,6 +7,7 @@ pub mod format;
 pub mod header;
 pub mod help_overlay;
 pub mod kanban;
+pub mod layout_picker;
 pub mod popup;
 pub mod prompt_popup;
 pub mod syntax;

@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{AppState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
+use crate::app::{AppState, LayoutPickerState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
+use crate::tmux;
 
 /// Jump size for Ctrl+D / Ctrl+U (fixed at 20 lines).
 const PAGE_JUMP: usize = 20;
@@ -22,6 +23,12 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
     // Agent popup has third priority
     if state.ui.show_agent_popup.is_some() {
         handle_popup_key(state, key);
+        return;
+    }
+
+    // Layout picker has fourth priority
+    if state.ui.layout_picker.is_open() {
+        handle_layout_picker_key(state, key);
         return;
     }
 
@@ -63,6 +70,7 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('v') => toggle_task_view_mode(state),
         KeyCode::Char('?') => toggle_help(state),
         KeyCode::Char(' ') => toggle_auto_scroll(state),
+        KeyCode::Char('L') => open_layout_picker(state),
         _ => {}
     }
 }
@@ -96,6 +104,43 @@ fn handle_popup_key(state: &mut AppState, key: KeyEvent) {
             state.ui.show_agent_popup = None;
         }
         _ => {}
+    }
+}
+
+fn handle_layout_picker_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('L') => {
+            state.ui.layout_picker = LayoutPickerState::Closed;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let LayoutPickerState::Open { selected } = &mut state.ui.layout_picker {
+                let max = tmux::LayoutPreset::ALL.len().saturating_sub(1);
+                *selected = (*selected + 1).min(max);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let LayoutPickerState::Open { selected } = &mut state.ui.layout_picker {
+                *selected = selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Enter => {
+            if let LayoutPickerState::Open { selected } = state.ui.layout_picker {
+                let preset = tmux::LayoutPreset::ALL[selected];
+                if let Err(e) = tmux::spawn_layout(preset) {
+                    state.meta.errors.push_back(format!("tmux: {e}"));
+                }
+                state.ui.layout_picker = LayoutPickerState::Closed;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn open_layout_picker(state: &mut AppState) {
+    if tmux::is_inside_tmux() {
+        state.ui.layout_picker = LayoutPickerState::Open { selected: 0 };
+    } else {
+        state.meta.errors.push_back("not inside tmux".to_string());
     }
 }
 

@@ -8,11 +8,13 @@ pub mod components;
 pub mod dashboard;
 pub mod session_detail;
 pub mod sessions;
+pub mod token_cost_dashboard;
 
 pub use agent_detail::render_agent_detail;
 pub use dashboard::render_dashboard;
 pub use session_detail::render_session_detail;
 pub use sessions::render_sessions;
+pub use token_cost_dashboard::render_token_cost_dashboard;
 
 /// Main view dispatcher.
 /// Renders global header on all views, then routes content area to specific view.
@@ -43,6 +45,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
         }
         ViewState::SessionDetail => {
             session_detail::render_session_detail(frame, state, layout[1]);
+        }
+        ViewState::TokenDashboard => {
+            token_cost_dashboard::render_token_cost_dashboard(frame, state, layout[1]);
         }
     }
 

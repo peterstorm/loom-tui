@@ -125,6 +125,9 @@ pub struct DomainState {
 
     /// Current task graph (None if not yet loaded)
     pub task_graph: Option<TaskGraph>,
+
+    /// Session IDs that were deleted by the user (skip on re-discovery)
+    pub deleted_session_ids: HashSet<SessionId>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
@@ -144,6 +147,9 @@ pub struct AppMeta {
 
     /// Initial event replay complete — stale cleanup deferred until true
     pub replay_complete: bool,
+
+    /// Archive directory path (for delete tombstones)
+    pub archive_dir: Option<std::path::PathBuf>,
 }
 
 /// Cache state (private): sorted keys, dirty flags, agent tool counts
@@ -184,6 +190,9 @@ pub enum ViewState {
 
     /// Session detail view (inspecting a single session)
     SessionDetail,
+
+    /// Token cost dashboard (per-session and per-model breakdown)
+    TokenDashboard,
 }
 
 /// Task view mode for Dashboard
@@ -226,6 +235,9 @@ pub struct ScrollState {
 
     /// Scroll offset for session detail right panel (events)
     pub session_detail_right: usize,
+
+    /// Scroll offset for token dashboard left panel (session table)
+    pub token_dashboard_left: usize,
 }
 
 impl DomainState {
@@ -274,6 +286,7 @@ impl Default for DomainState {
             sessions: Vec::new(),
             active_sessions: BTreeMap::new(),
             task_graph: None,
+            deleted_session_ids: HashSet::new(),
         }
     }
 }
@@ -286,6 +299,7 @@ impl Default for AppMeta {
             project_path: String::new(),
             should_quit: false,
             replay_complete: false,
+            archive_dir: None,
         }
     }
 }
@@ -393,6 +407,7 @@ impl ScrollState {
         self.sessions = 0;
         self.session_detail_left = 0;
         self.session_detail_right = 0;
+        self.token_dashboard_left = 0;
     }
 }
 

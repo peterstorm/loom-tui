@@ -48,6 +48,7 @@ fn build_help_text() -> Vec<Line<'static>> {
         Line::from("  1           - Dashboard view"),
         Line::from("  2           - Agent detail view"),
         Line::from("  3           - Sessions view"),
+        Line::from("  4           - Token cost dashboard"),
         Line::from("  Tab         - Switch panel focus"),
         Line::from("  h / l       - Focus left / right panel"),
         Line::from(""),
@@ -92,6 +93,10 @@ fn build_help_text() -> Vec<Line<'static>> {
         Line::from("    Enter          - Load archived session"),
         Line::from("    Space          - Mark/unmark session for deletion"),
         Line::from("    d              - Delete marked (or cursor) session"),
+        Line::from(""),
+        Line::from("  Token Dashboard:"),
+        Line::from("    Tab            - Switch panel focus"),
+        Line::from("    j/k            - Scroll session table"),
         Line::from(""),
         Line::from(Span::styled(
             "SEARCH",

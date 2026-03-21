@@ -36,6 +36,14 @@ fn main() -> Result<()> {
     let mut state = AppState::new()
         .with_project_path(project_root.display().to_string());
 
+    // Load deleted session tombstones
+    state.meta.archive_dir = Some(paths.archive_dir.clone());
+    let deleted_ids = session::load_deleted_ids(&paths.archive_dir);
+    state.domain.deleted_session_ids = deleted_ids
+        .into_iter()
+        .map(loom_tui::model::SessionId::new)
+        .collect();
+
     // Terminal initialization
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();

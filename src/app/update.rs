@@ -54,8 +54,10 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         }
 
         AppEvent::SessionDiscovered { session_id, transcript_path } => {
-            // Only create session if not already tracked (idempotent)
-            if !state.domain.active_sessions.contains_key(&session_id) {
+            // Skip sessions the user previously deleted
+            if state.domain.deleted_session_ids.contains(&session_id) {
+                // no-op: tombstoned
+            } else if !state.domain.active_sessions.contains_key(&session_id) {
                 let now = chrono::Utc::now();
                 let mut meta = SessionMeta::new(
                     session_id.clone(),
@@ -205,6 +207,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         AppEvent::SessionMetasLoaded(metas) => {
             state.domain.sessions = metas
                 .into_iter()
+                .filter(|(_, meta)| !state.domain.deleted_session_ids.contains(&meta.id))
                 .map(|(path, meta)| ArchivedSession::new(meta, path))
                 .collect();
         }
@@ -219,6 +222,13 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                     agent.finished_at = Some(chrono::Utc::now());
                     agents_changed = true;
                 }
+            }
+        }
+
+        AppEvent::SessionMetadataUpdated { session_id, model, token_usage } => {
+            if let Some(meta) = state.domain.active_sessions.get_mut(&session_id) {
+                meta.model = model;
+                meta.token_usage = token_usage;
             }
         }
 

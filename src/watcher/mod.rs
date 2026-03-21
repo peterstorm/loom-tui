@@ -280,6 +280,11 @@ fn polling_loop(
             if is_subagent && do_metadata_emit {
                 emit_agent_metadata(&path, &tx);
             }
+
+            // Emit session-level metadata from main transcript
+            if !is_subagent && do_metadata_emit {
+                emit_session_metadata(&path, &session_id, &tx);
+            }
         }
 
         // ----------------------------------------------------------------
@@ -474,6 +479,28 @@ fn scan_subagents_dir(
             session_id: parent_session_id.to_string(),
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: emit session-level metadata from main transcript
+// ---------------------------------------------------------------------------
+
+fn emit_session_metadata(path: &PathBuf, session_id: &str, tx: &mpsc::Sender<AppEvent>) {
+    let full_content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let metadata = parsers::parse_transcript_metadata(&full_content);
+    if metadata.model.is_none() && metadata.token_usage.is_empty() {
+        return;
+    }
+
+    let _ = tx.send(AppEvent::SessionMetadataUpdated {
+        session_id: SessionId::new(session_id),
+        model: metadata.model,
+        token_usage: metadata.token_usage,
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -47,7 +47,7 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
     match &state.ui.view {
         ViewState::Dashboard => {
             spans.push(sep());
-            spans.extend(kb("1-3", ":views"));
+            spans.extend(kb("1-4", ":views"));
             spans.push(sep());
             spans.extend(kb("Tab", ":focus "));
             spans.extend(kb("j/k", ":scroll "));
@@ -82,6 +82,16 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
             spans.extend(kb("?", ":help"));
         }
         ViewState::SessionDetail => {
+            spans.push(sep());
+            spans.extend(kb("Esc", ":back"));
+            spans.push(sep());
+            spans.extend(kb("Tab", ":focus "));
+            spans.extend(kb("j/k", ":scroll "));
+            spans.extend(kb("g/G", ":top/bottom"));
+            spans.push(sep());
+            spans.extend(kb("?", ":help"));
+        }
+        ViewState::TokenDashboard => {
             spans.push(sep());
             spans.extend(kb("Esc", ":back"));
             spans.push(sep());
@@ -131,7 +141,7 @@ mod tests {
         let line = build_footer_text(&state);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
 
-        assert!(text.contains("1-3:views"));
+        assert!(text.contains("1-4:views"));
         assert!(text.contains("Tab:focus"));
         assert!(text.contains("j/k:scroll"));
         assert!(text.contains("g/G:top/bottom"));

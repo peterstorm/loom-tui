@@ -1,3 +1,4 @@
+use super::agent::TokenUsage;
 use super::ids::{AgentId, SessionId, TaskId};
 use super::serde_utils::{deserialize_vec_or_empty, duration_opt_millis};
 use super::{Agent, TaskGraph, TranscriptEvent};
@@ -37,6 +38,12 @@ pub struct SessionMeta {
     /// Whether a real user prompt was received (filters out subagent phantom sessions)
     #[serde(skip)]
     pub confirmed: bool,
+    /// Model used by the main orchestrator (from main transcript metadata)
+    #[serde(skip)]
+    pub model: Option<String>,
+    /// Token usage from the main transcript (orchestrator-level, excludes subagents)
+    #[serde(skip)]
+    pub token_usage: TokenUsage,
 }
 
 impl PartialEq for SessionMeta {
@@ -76,6 +83,8 @@ impl SessionMeta {
             transcript_path: None,
             last_event_at: Some(timestamp),
             confirmed: false,
+            model: None,
+            token_usage: TokenUsage::default(),
         }
     }
 

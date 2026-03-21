@@ -35,6 +35,7 @@ fn build_header_text(state: &AppState) -> Line<'static> {
         ViewState::AgentDetail => "[2:Agents]",
         ViewState::Sessions => "[3:Sessions]",
         ViewState::SessionDetail => "[3:Session Detail]",
+        ViewState::TokenDashboard => "[4:Tokens]",
     };
 
     let project_name = if state.meta.project_path.is_empty() {

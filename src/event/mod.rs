@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::KeyEvent;
 
 use crate::error::LoomError;
-use crate::model::{AgentId, SessionArchive, SessionId, SessionMeta, TaskGraph};
+use crate::model::{AgentId, SessionArchive, SessionId, SessionMeta, TaskGraph, TokenUsage};
 use crate::model::TranscriptEvent;
 use crate::watcher::TranscriptMetadata;
 
@@ -31,6 +31,13 @@ pub enum AppEvent {
     AgentMetadataUpdated {
         agent_id: AgentId,
         metadata: TranscriptMetadata,
+    },
+
+    /// Session-level metadata from main transcript (model, tokens)
+    SessionMetadataUpdated {
+        session_id: SessionId,
+        model: Option<String>,
+        token_usage: TokenUsage,
     },
 
     /// Agent transcript finished (result entry seen or idle timeout)

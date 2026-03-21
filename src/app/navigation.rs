@@ -64,6 +64,10 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
                 state.ui.selected_session_index = Some(0);
             }
         }
+        KeyCode::Char('4') => {
+            state.ui.marked_sessions.clear();
+            switch_to_token_dashboard(state);
+        }
         KeyCode::Tab => toggle_focus(state),
         KeyCode::Char('l') => toggle_focus_right(state),
         KeyCode::Char('h') => toggle_focus_left(state),
@@ -211,6 +215,13 @@ fn handle_delete_confirm_key(state: &mut AppState, key: KeyEvent) {
                             state.meta.errors.push_back(format!("delete {id}: {e}"));
                         }
                     }
+                    // Write tombstone so session isn't re-discovered on restart
+                    if let Some(ref archive_dir) = state.meta.archive_dir {
+                        if let Err(e) = crate::session::mark_deleted(archive_dir, id.as_str()) {
+                            state.meta.errors.push_back(format!("tombstone {id}: {e}"));
+                        }
+                    }
+                    state.domain.deleted_session_ids.insert(id.clone());
                 }
                 state.domain.sessions.retain(|s| !ids.contains(&s.meta.id));
                 state.ui.marked_sessions.clear();
@@ -253,6 +264,21 @@ fn handle_filter_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn switch_to_token_dashboard(state: &mut AppState) {
+    // Preload unloaded archives
+    for session in &mut state.domain.sessions {
+        if session.data.is_none() {
+            match crate::session::load_session(&session.path) {
+                Ok(archive) => session.data = Some(archive),
+                Err(e) => state.meta.errors.push_back(format!("load {}: {e}", session.meta.id)),
+            }
+        }
+    }
+    state.ui.view = ViewState::TokenDashboard;
+    state.ui.scroll_offsets.token_dashboard_left = 0;
+    state.ui.focus = PanelFocus::Left;
+}
+
 fn switch_to_agent_detail(state: &mut AppState) {
     state.ui.view = ViewState::AgentDetail;
     if state.ui.selected_agent_index.is_none() && !state.domain.agents.is_empty() {
@@ -289,6 +315,8 @@ fn active_scroll_offset_mut(state: &mut AppState) -> &mut usize {
         (ViewState::Sessions, _) => &mut state.ui.scroll_offsets.task_list, // unused, Sessions uses selected_session_index
         (ViewState::SessionDetail, PanelFocus::Left) => &mut state.ui.scroll_offsets.session_detail_left,
         (ViewState::SessionDetail, PanelFocus::Right) => &mut state.ui.scroll_offsets.session_detail_right,
+        (ViewState::TokenDashboard, PanelFocus::Left) => &mut state.ui.scroll_offsets.token_dashboard_left,
+        (ViewState::TokenDashboard, PanelFocus::Right) => &mut state.ui.scroll_offsets.task_list, // fallback, unused
     }
 }
 
@@ -307,6 +335,12 @@ fn item_count(state: &AppState) -> Option<usize> {
         (ViewState::AgentDetail, PanelFocus::Left) => Some(state.domain.agents.len()),
         (ViewState::SessionDetail, PanelFocus::Left) => Some(session_agent_count(state) + 1), // +1 for Main
         (ViewState::Sessions, _) => Some(state.domain.confirmed_active_count() + state.domain.sessions.len()),
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            // Count sessions with token data (active + loaded archives)
+            let active = state.domain.confirmed_active_count();
+            let archived = state.domain.sessions.iter().filter(|s| s.data.is_some()).count();
+            Some(active + archived)
+        }
         _ => None,
     }
 }
@@ -358,6 +392,14 @@ fn scroll_down(state: &mut AppState) {
                 }
             }
         }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    let current = state.ui.scroll_offsets.token_dashboard_left;
+                    state.ui.scroll_offsets.token_dashboard_left = (current + 1).min(count - 1);
+                }
+            }
+        }
         _ => {
             *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(1);
         }
@@ -394,6 +436,10 @@ fn scroll_up(state: &mut AppState) {
         (ViewState::Sessions, _) => {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(1));
+        }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            state.ui.scroll_offsets.token_dashboard_left =
+                state.ui.scroll_offsets.token_dashboard_left.saturating_sub(1);
         }
         _ => {
             *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(1);
@@ -440,6 +486,14 @@ fn scroll_page_down(state: &mut AppState) {
                 }
             }
         }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    let current = state.ui.scroll_offsets.token_dashboard_left;
+                    state.ui.scroll_offsets.token_dashboard_left = (current + PAGE_JUMP).min(count - 1);
+                }
+            }
+        }
         _ => {
             *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_add(PAGE_JUMP);
         }
@@ -475,6 +529,10 @@ fn scroll_page_up(state: &mut AppState) {
             let current = state.ui.selected_session_index.unwrap_or(0);
             state.ui.selected_session_index = Some(current.saturating_sub(PAGE_JUMP));
         }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            state.ui.scroll_offsets.token_dashboard_left =
+                state.ui.scroll_offsets.token_dashboard_left.saturating_sub(PAGE_JUMP);
+        }
         _ => {
             *active_scroll_offset_mut(state) = active_scroll_offset_mut(state).saturating_sub(PAGE_JUMP);
         }
@@ -502,6 +560,9 @@ fn jump_to_top(state: &mut AppState) {
         }
         (ViewState::Sessions, _) => {
             state.ui.selected_session_index = Some(0);
+        }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            state.ui.scroll_offsets.token_dashboard_left = 0;
         }
         _ => {
             *active_scroll_offset_mut(state) = 0;
@@ -534,6 +595,13 @@ fn jump_to_bottom(state: &mut AppState) {
             if let Some(count) = item_count(state) {
                 if count > 0 {
                     state.ui.selected_session_index = Some(count - 1);
+                }
+            }
+        }
+        (ViewState::TokenDashboard, PanelFocus::Left) => {
+            if let Some(count) = item_count(state) {
+                if count > 0 {
+                    state.ui.scroll_offsets.token_dashboard_left = count - 1;
                 }
             }
         }
@@ -589,6 +657,7 @@ fn drill_down(state: &mut AppState) {
             }
         }
         ViewState::SessionDetail => {}
+        ViewState::TokenDashboard => {}
     }
 }
 
@@ -631,6 +700,9 @@ fn go_back(state: &mut AppState) {
             state.ui.selected_session_agent_index = None;
             state.ui.prompt_popup = PromptPopupState::Closed;
             state.ui.view = ViewState::Sessions;
+        }
+        ViewState::TokenDashboard => {
+            state.ui.view = ViewState::Dashboard;
         }
         ViewState::Dashboard => {}
     }

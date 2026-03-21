@@ -37,6 +37,34 @@ pub fn format_duration(duration: Option<Duration>) -> String {
     }
 }
 
+/// Format a token count for compact display: 42k, 1.2M, etc.
+pub fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if m >= 10.0 {
+            format!("{}M", m as u64)
+        } else {
+            format!("{:.1}M", m)
+        }
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        if k >= 10.0 {
+            format!("{}k", k as u64)
+        } else {
+            format!("{:.1}k", k)
+        }
+    } else {
+        format!("{}", n)
+    }
+}
+
+/// Format cost in cents as USD string: 0 → "$0.00", 123 → "$1.23", 1234 → "$12.34"
+pub fn format_cost_usd(cents: u64) -> String {
+    let dollars = cents / 100;
+    let remainder = cents % 100;
+    format!("${}.{:02}", dollars, remainder)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +128,34 @@ mod tests {
         assert_eq!(format_duration(Some(Duration::from_secs(3600))), "1h 0m");
         assert_eq!(format_duration(Some(Duration::from_secs(3665))), "1h 1m");
         assert_eq!(format_duration(Some(Duration::from_secs(7265))), "2h 1m");
+    }
+
+    #[test]
+    fn format_token_count_small() {
+        assert_eq!(format_token_count(500), "500");
+    }
+
+    #[test]
+    fn format_token_count_thousands() {
+        assert_eq!(format_token_count(1_200), "1.2k");
+        assert_eq!(format_token_count(42_000), "42k");
+    }
+
+    #[test]
+    fn format_token_count_millions() {
+        assert_eq!(format_token_count(1_200_000), "1.2M");
+        assert_eq!(format_token_count(15_000_000), "15M");
+    }
+
+    #[test]
+    fn format_cost_usd_zero() {
+        assert_eq!(format_cost_usd(0), "$0.00");
+    }
+
+    #[test]
+    fn format_cost_usd_cents() {
+        assert_eq!(format_cost_usd(123), "$1.23");
+        assert_eq!(format_cost_usd(1234), "$12.34");
+        assert_eq!(format_cost_usd(5), "$0.05");
     }
 }

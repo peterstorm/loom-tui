@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -306,6 +306,31 @@ pub fn list_session_metas(dir: &Path) -> Result<(Vec<(PathBuf, SessionMeta)>, Ve
 /// * `Err(SessionError)` - I/O error
 pub fn delete_session(path: &Path) -> Result<(), SessionError> {
     fs::remove_file(path)
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })
+}
+
+/// Load deleted session IDs from tombstone file.
+/// Returns empty set if file doesn't exist.
+pub fn load_deleted_ids(archive_dir: &Path) -> HashSet<String> {
+    let path = archive_dir.join(".deleted");
+    fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Append a session ID to the tombstone file.
+pub fn mark_deleted(archive_dir: &Path, session_id: &str) -> Result<(), SessionError> {
+    let path = archive_dir.join(".deleted");
+    use std::io::Write;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })?;
+    writeln!(f, "{}", session_id)
         .map_err(|e| SessionError::Io { path: path.display().to_string(), message: e.to_string() })
 }
 

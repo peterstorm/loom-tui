@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::app::{AppState, PanelFocus};
 use crate::model::{Agent, SessionMeta, SessionStatus, Theme};
-use super::format::{format_duration, format_elapsed};
+use super::format::{format_duration, format_elapsed, format_token_count};
 
 /// Render agent list panel for agent detail view (uses global state).
 pub fn render_agent_list(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -226,27 +226,6 @@ fn build_agent_items_generic(
             ListItem::new(Line::from(spans))
         })
         .collect()
-}
-
-/// Format a token count for compact display: 42k, 1.2M, etc.
-fn format_token_count(n: u64) -> String {
-    if n >= 1_000_000 {
-        let m = n as f64 / 1_000_000.0;
-        if m >= 10.0 {
-            format!("{}M", m as u64)
-        } else {
-            format!("{:.1}M", m)
-        }
-    } else if n >= 1_000 {
-        let k = n as f64 / 1_000.0;
-        if k >= 10.0 {
-            format!("{}k", k as u64)
-        } else {
-            format!("{:.1}k", k)
-        }
-    } else {
-        format!("{}", n)
-    }
 }
 
 #[cfg(test)]

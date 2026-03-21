@@ -29,7 +29,10 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
 
     // Build table rows from session list
     // TODO: use state.ui.scroll_offsets.sessions to scroll the session table
+    let active_count = state.domain.confirmed_active_count();
+
     let header_row = Row::new(vec![
+        "",
         "Session ID",
         "Date",
         "Duration",
@@ -80,7 +83,16 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
                 format_status(&session.status)
             };
 
+            let checkbox = if idx < active_count {
+                "   ".to_string()
+            } else if state.ui.marked_sessions.contains(&session.id) {
+                "[x]".to_string()
+            } else {
+                "[ ]".to_string()
+            };
+
             Row::new(vec![
+                checkbox,
                 session.id.to_string(),
                 session.timestamp.format("%Y-%m-%d %H:%M").to_string(),
                 format_duration(duration),
@@ -92,7 +104,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
             .style(style)
             .fg(if is_selected {
                 Theme::BACKGROUND
-            } else if is_loading {
+            } else if is_loading || state.ui.marked_sessions.contains(&session.id) {
                 Theme::WARNING
             } else {
                 status_color
@@ -101,6 +113,7 @@ pub fn render_sessions(frame: &mut Frame, state: &AppState, area: Rect) {
         .collect();
 
     let widths = [
+        Constraint::Length(3),  // Checkbox
         Constraint::Length(12), // Session ID
         Constraint::Length(16), // Date
         Constraint::Length(10), // Duration

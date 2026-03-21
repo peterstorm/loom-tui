@@ -75,7 +75,9 @@ fn build_footer_text(state: &AppState) -> Line<'static> {
             spans.push(sep());
             spans.extend(kb("j/k", ":scroll "));
             spans.extend(kb("g/G", ":top/bottom "));
-            spans.extend(kb("Enter", ":detail"));
+            spans.extend(kb("Enter", ":detail "));
+            spans.extend(kb("Space", ":mark "));
+            spans.extend(kb("d", ":delete"));
             spans.push(sep());
             spans.extend(kb("?", ":help"));
         }

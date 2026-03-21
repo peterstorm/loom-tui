@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::model::{Agent, AgentId, ArchivedSession, SessionId, SessionMeta, TaskGraph, TranscriptEvent};
@@ -51,6 +51,12 @@ pub struct UiState {
     /// Layout picker popup state
     pub layout_picker: LayoutPickerState,
 
+    /// Delete confirm popup state
+    pub delete_confirm: DeleteConfirmState,
+
+    /// Sessions marked for bulk delete
+    pub marked_sessions: HashSet<SessionId>,
+
     /// Index of selected agent within session detail view's agent list
     pub selected_session_agent_index: Option<usize>,
 }
@@ -84,6 +90,19 @@ pub enum LayoutPickerState {
 }
 
 impl LayoutPickerState {
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+}
+
+/// Delete confirmation popup state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteConfirmState {
+    Closed,
+    Open { session_ids: Vec<SessionId> },
+}
+
+impl DeleteConfirmState {
     pub fn is_open(&self) -> bool {
         matches!(self, Self::Open { .. })
     }
@@ -240,6 +259,8 @@ impl Default for UiState {
             loading_session: None,
             prompt_popup: PromptPopupState::Closed,
             layout_picker: LayoutPickerState::Closed,
+            delete_confirm: DeleteConfirmState::Closed,
+            marked_sessions: HashSet::new(),
             selected_session_agent_index: None,
         }
     }

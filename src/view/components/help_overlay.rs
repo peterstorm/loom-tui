@@ -90,6 +90,8 @@ fn build_help_text() -> Vec<Line<'static>> {
         Line::from(""),
         Line::from("  Sessions:"),
         Line::from("    Enter          - Load archived session"),
+        Line::from("    Space          - Mark/unmark session for deletion"),
+        Line::from("    d              - Delete marked (or cursor) session"),
         Line::from(""),
         Line::from(Span::styled(
             "SEARCH",

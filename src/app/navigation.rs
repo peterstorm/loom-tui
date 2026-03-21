@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{AppState, LayoutPickerState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
+use crate::app::{AppState, DeleteConfirmState, LayoutPickerState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
 use crate::tmux;
 
 /// Jump size for Ctrl+D / Ctrl+U (fixed at 20 lines).
@@ -32,6 +32,12 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         return;
     }
 
+    // Delete confirm has fifth priority
+    if state.ui.delete_confirm.is_open() {
+        handle_delete_confirm_key(state, key);
+        return;
+    }
+
     // Filter mode has priority over normal navigation
     if state.ui.filter.is_some() {
         handle_filter_key(state, key);
@@ -44,9 +50,13 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
             state.meta.should_quit = true;
         }
         KeyCode::Char('1') => {
+            state.ui.marked_sessions.clear();
             state.ui.view = ViewState::Dashboard;
         }
-        KeyCode::Char('2') => switch_to_agent_detail(state),
+        KeyCode::Char('2') => {
+            state.ui.marked_sessions.clear();
+            switch_to_agent_detail(state);
+        }
         KeyCode::Char('3') => {
             state.ui.view = ViewState::Sessions;
             let has_sessions = state.domain.confirmed_active_count() > 0 || !state.domain.sessions.is_empty();
@@ -69,7 +79,15 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('p') => show_agent_popup(state),
         KeyCode::Char('v') => toggle_task_view_mode(state),
         KeyCode::Char('?') => toggle_help(state),
-        KeyCode::Char(' ') => toggle_auto_scroll(state),
+        KeyCode::Char(' ') => match state.ui.view {
+            ViewState::Sessions => toggle_session_mark(state),
+            _ => toggle_auto_scroll(state),
+        },
+        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if matches!(state.ui.view, ViewState::Sessions) {
+                initiate_delete(state);
+            }
+        }
         KeyCode::Char('L') => open_layout_picker(state),
         _ => {}
     }
@@ -141,6 +159,77 @@ fn open_layout_picker(state: &mut AppState) {
         state.ui.layout_picker = LayoutPickerState::Open { selected: 0 };
     } else {
         state.meta.errors.push_back("not inside tmux".to_string());
+    }
+}
+
+fn toggle_session_mark(state: &mut AppState) {
+    let active_count = state.domain.confirmed_active_count();
+    if let Some(idx) = state.ui.selected_session_index {
+        if idx < active_count {
+            return; // can't mark active sessions
+        }
+        let archive_idx = idx - active_count;
+        if let Some(session) = state.domain.sessions.get(archive_idx) {
+            let id = session.meta.id.clone();
+            if !state.ui.marked_sessions.remove(&id) {
+                state.ui.marked_sessions.insert(id);
+            }
+        }
+    }
+    scroll_down(state);
+}
+
+fn initiate_delete(state: &mut AppState) {
+    let active_count = state.domain.confirmed_active_count();
+    let ids: Vec<_> = if !state.ui.marked_sessions.is_empty() {
+        state.ui.marked_sessions.iter().cloned().collect()
+    } else if let Some(idx) = state.ui.selected_session_index {
+        if idx < active_count {
+            state.meta.errors.push_back("cannot delete active session".to_string());
+            return;
+        }
+        let archive_idx = idx - active_count;
+        match state.domain.sessions.get(archive_idx) {
+            Some(session) => vec![session.meta.id.clone()],
+            None => return,
+        }
+    } else {
+        return;
+    };
+
+    state.ui.delete_confirm = DeleteConfirmState::Open { session_ids: ids };
+}
+
+fn handle_delete_confirm_key(state: &mut AppState, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('y') => {
+            if let DeleteConfirmState::Open { session_ids } = &state.ui.delete_confirm {
+                let ids = session_ids.clone();
+                for id in &ids {
+                    if let Some(session) = state.domain.sessions.iter().find(|s| &s.meta.id == id) {
+                        if let Err(e) = crate::session::delete_session(&session.path) {
+                            state.meta.errors.push_back(format!("delete {id}: {e}"));
+                        }
+                    }
+                }
+                state.domain.sessions.retain(|s| !ids.contains(&s.meta.id));
+                state.ui.marked_sessions.clear();
+                // Clamp selected index to new bounds
+                let total = state.domain.confirmed_active_count() + state.domain.sessions.len();
+                if total == 0 {
+                    state.ui.selected_session_index = None;
+                } else if let Some(idx) = state.ui.selected_session_index {
+                    if idx >= total {
+                        state.ui.selected_session_index = Some(total - 1);
+                    }
+                }
+            }
+            state.ui.delete_confirm = DeleteConfirmState::Closed;
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            state.ui.delete_confirm = DeleteConfirmState::Closed;
+        }
+        _ => {}
     }
 }
 
@@ -520,6 +609,7 @@ fn go_back(state: &mut AppState) {
             state.ui.view = ViewState::Dashboard;
         }
         ViewState::Sessions => {
+            state.ui.marked_sessions.clear();
             state.ui.view = ViewState::Dashboard;
         }
         ViewState::SessionDetail => {

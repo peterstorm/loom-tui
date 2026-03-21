@@ -65,4 +65,9 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.ui.layout_picker.is_open() {
         components::layout_picker::render_layout_picker(frame, frame.area(), &state.ui.layout_picker);
     }
+
+    // Overlay delete confirm if active
+    if state.ui.delete_confirm.is_open() {
+        components::delete_confirm::render_delete_confirm(frame, frame.area(), &state.ui.delete_confirm);
+    }
 }

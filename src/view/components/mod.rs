@@ -1,5 +1,6 @@
 pub mod agent_list;
 pub mod banner;
+pub mod delete_confirm;
 pub mod event_stream;
 pub mod filter_bar;
 pub mod footer;

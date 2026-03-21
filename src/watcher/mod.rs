@@ -492,14 +492,14 @@ fn emit_session_metadata(path: &PathBuf, session_id: &str, tx: &mpsc::Sender<App
     };
 
     let metadata = parsers::parse_transcript_metadata(&full_content);
-    if metadata.model.is_none() && metadata.token_usage.is_empty() {
+    if metadata.model.is_none() && metadata.cumulative_usage.is_empty() {
         return;
     }
 
     let _ = tx.send(AppEvent::SessionMetadataUpdated {
         session_id: SessionId::new(session_id),
         model: metadata.model,
-        token_usage: metadata.token_usage,
+        token_usage: metadata.cumulative_usage,
     });
 }
 

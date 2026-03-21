@@ -415,7 +415,10 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptMetadata {
     pub model: Option<String>,
+    /// Last message's usage (context window snapshot)
     pub token_usage: TokenUsage,
+    /// Sum of all deduplicated messages' usage (cumulative session total)
+    pub cumulative_usage: TokenUsage,
     pub skills: Vec<String>,
     /// The task prompt (first user message content), truncated to 4000 chars.
     pub task_description: Option<String>,
@@ -536,7 +539,12 @@ pub fn parse_transcript_metadata(content: &str) -> TranscriptMetadata {
         }
     }
 
-    // Use the last unique message's usage as token_usage (context window).
+    // Cumulative: sum all deduplicated messages' usage
+    for tu in msg_usage.values() {
+        meta.cumulative_usage.add(tu);
+    }
+
+    // Context window: last unique message's usage snapshot
     if let Some(last_id) = msg_order.last() {
         if let Some(tu) = msg_usage.remove(last_id) {
             meta.token_usage = tu;

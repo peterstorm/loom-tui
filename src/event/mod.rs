@@ -19,7 +19,12 @@ pub enum AppEvent {
     TranscriptEventReceived(TranscriptEvent),
 
     /// New session discovered on disk (transcript path found)
-    SessionDiscovered { session_id: SessionId, transcript_path: PathBuf },
+    SessionDiscovered {
+        session_id: SessionId,
+        transcript_path: PathBuf,
+        /// Real start time from first transcript entry (None if file empty/unparseable)
+        started_at: Option<DateTime<Utc>>,
+    },
 
     /// Session completed (no more activity expected)
     SessionCompleted { session_id: SessionId },
@@ -101,9 +106,10 @@ mod tests {
         let app_event = AppEvent::SessionDiscovered {
             session_id: session_id(),
             transcript_path: path.clone(),
+            started_at: None,
         };
         match app_event {
-            AppEvent::SessionDiscovered { session_id, transcript_path } => {
+            AppEvent::SessionDiscovered { session_id, transcript_path, .. } => {
                 assert_eq!(session_id, SessionId::new("sess-test"));
                 assert_eq!(transcript_path, path);
             }

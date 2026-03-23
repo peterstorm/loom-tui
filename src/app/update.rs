@@ -53,15 +53,15 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             state.domain.events.push_back(event);
         }
 
-        AppEvent::SessionDiscovered { session_id, transcript_path } => {
+        AppEvent::SessionDiscovered { session_id, transcript_path, started_at } => {
             // Skip sessions the user previously deleted
             if state.domain.deleted_session_ids.contains(&session_id) {
                 // no-op: tombstoned
             } else if !state.domain.active_sessions.contains_key(&session_id) {
-                let now = chrono::Utc::now();
+                let ts = started_at.unwrap_or_else(chrono::Utc::now);
                 let mut meta = SessionMeta::new(
                     session_id.clone(),
-                    now,
+                    ts,
                     state.meta.project_path.clone(),
                 );
                 meta.transcript_path = Some(transcript_path.display().to_string());
@@ -459,6 +459,7 @@ mod tests {
         update(&mut state, AppEvent::SessionDiscovered {
             session_id: sid.clone(),
             transcript_path: path.clone(),
+            started_at: None,
         });
 
         assert!(state.domain.active_sessions.contains_key(&sid));
@@ -476,6 +477,7 @@ mod tests {
         update(&mut state, AppEvent::SessionDiscovered {
             session_id: sid.clone(),
             transcript_path: path.clone(),
+            started_at: None,
         });
         // Manually set event_count to verify it's not reset
         state.domain.active_sessions.get_mut(&sid).unwrap().event_count = 42;
@@ -483,6 +485,7 @@ mod tests {
         update(&mut state, AppEvent::SessionDiscovered {
             session_id: sid.clone(),
             transcript_path: path,
+            started_at: None,
         });
 
         // event_count unchanged — session not re-created

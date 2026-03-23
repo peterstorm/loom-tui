@@ -411,6 +411,16 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
     truncate_str(&summary, 8000)
 }
 
+/// Extract the timestamp from the first JSONL line of a transcript.
+/// Returns None if the file is empty or the first line has no parseable timestamp.
+pub fn extract_first_timestamp(content: &str) -> Option<DateTime<Utc>> {
+    let first_line = content.lines().next()?;
+    let obj: Value = serde_json::from_str(first_line).ok()?;
+    obj.get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+}
+
 /// Metadata extracted from a Claude Code subagent transcript.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptMetadata {

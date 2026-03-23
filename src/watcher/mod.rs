@@ -404,9 +404,20 @@ fn scan_transcript_dir(
             // (re-discovery after restart should still emit)
             if !session_confirmed.contains_key(&session_id) {
                 session_confirmed.insert(session_id.clone(), (false, mtime));
+                // Peek at first line to get real session start time
+                let started_at = std::fs::File::open(&path)
+                    .ok()
+                    .and_then(|f| {
+                        use std::io::BufRead;
+                        let mut reader = std::io::BufReader::new(f);
+                        let mut first_line = String::new();
+                        reader.read_line(&mut first_line).ok()?;
+                        parsers::extract_first_timestamp(&first_line)
+                    });
                 if tx.send(AppEvent::SessionDiscovered {
                     session_id: SessionId::new(&session_id),
                     transcript_path: path,
+                    started_at,
                 }).is_err() {
                     return;
                 }
@@ -722,7 +733,7 @@ mod tests {
 
         let event = rx.recv_timeout(Duration::from_millis(100)).unwrap();
         match event {
-            AppEvent::SessionDiscovered { session_id, transcript_path } => {
+            AppEvent::SessionDiscovered { session_id, transcript_path, .. } => {
                 assert_eq!(session_id.as_str(), "session-abc");
                 assert_eq!(transcript_path, session_file);
             }

@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use crate::model::{Agent, AgentId, ArchivedSession, SessionId, SessionMeta, TaskGraph, TranscriptEvent};
+use crate::model::{Agent, AgentId, ArchivedSession, GitContext, GitError, SessionId, SessionMeta, TaskGraph, TranscriptEvent};
 
 /// UI state: view mode, focus, scrolling, selections, display flags
 #[derive(Debug, Clone)]
@@ -59,6 +59,9 @@ pub struct UiState {
 
     /// Index of selected agent within session detail view's agent list
     pub selected_session_agent_index: Option<usize>,
+
+    /// Whether the git context panel is expanded in session detail
+    pub git_panel_expanded: bool,
 }
 
 /// Prompt popup overlay state — encapsulates visibility and scroll offset
@@ -128,6 +131,9 @@ pub struct DomainState {
 
     /// Session IDs that were deleted by the user (skip on re-discovery)
     pub deleted_session_ids: HashSet<SessionId>,
+
+    /// Cached git context per session (lazy-loaded on Ctrl+g)
+    pub git_cache: HashMap<SessionId, Result<GitContext, GitError>>,
 }
 
 /// Application metadata: lifecycle, errors, configuration
@@ -274,6 +280,7 @@ impl Default for UiState {
             delete_confirm: DeleteConfirmState::Closed,
             marked_sessions: HashSet::new(),
             selected_session_agent_index: None,
+            git_panel_expanded: false,
         }
     }
 }
@@ -287,6 +294,7 @@ impl Default for DomainState {
             active_sessions: BTreeMap::new(),
             task_graph: None,
             deleted_session_ids: HashSet::new(),
+            git_cache: HashMap::new(),
         }
     }
 }

@@ -232,7 +232,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             }
         }
 
-        AppEvent::AgentMetadataUpdated { agent_id, metadata } => {
+        AppEvent::AgentMetadataUpdated { agent_id, session_id, metadata } => {
             use crate::model::Agent;
             // Ensure agent entry exists (create if metadata arrives before discovery)
             let now = chrono::Utc::now();
@@ -250,6 +250,8 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             if metadata.task_description.is_some() {
                 agent.task_description = metadata.task_description.clone();
             }
+            // Always stamp session_id so session detail view can filter agents
+            agent.session_id = Some(session_id);
 
             if state.domain.agents.len() > len_before {
                 agents_changed = true;
@@ -767,7 +769,7 @@ mod tests {
             ..Default::default()
         };
 
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), session_id: SessionId::new("sess-test"), metadata });
 
         let agent = &state.domain.agents[&aid];
         assert_eq!(agent.model, Some("claude-3-opus".to_string()));
@@ -791,7 +793,7 @@ mod tests {
         // Before: no agents, sorted keys empty
         assert!(state.domain.agents.is_empty());
 
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), session_id: SessionId::new("sess-test"), metadata });
 
         // Agent created
         assert!(state.domain.agents.contains_key(&aid));
@@ -811,7 +813,7 @@ mod tests {
             ..Default::default()
         };
 
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), session_id: SessionId::new("sess-test"), metadata });
 
         assert!(state.domain.agents.contains_key(&aid));
         assert_eq!(state.domain.agents[&aid].model, Some("claude-3".to_string()));
@@ -897,7 +899,7 @@ mod tests {
             ..Default::default()
         };
 
-        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), metadata });
+        update(&mut state, AppEvent::AgentMetadataUpdated { agent_id: aid.clone(), session_id: SessionId::new("sess-test"), metadata });
 
         assert!(state.domain.agents.contains_key(&aid));
         assert!(!state.sorted_agent_keys().is_empty());

@@ -30,6 +30,7 @@ pub enum AppEvent {
     /// Agent metadata extracted from subagent transcript (model, tokens, skills)
     AgentMetadataUpdated {
         agent_id: AgentId,
+        session_id: SessionId,
         metadata: TranscriptMetadata,
     },
 
@@ -158,10 +159,11 @@ mod tests {
         };
         let app_event = AppEvent::AgentMetadataUpdated {
             agent_id: agent_id(),
+            session_id: session_id(),
             metadata: meta,
         };
         match app_event {
-            AppEvent::AgentMetadataUpdated { agent_id, metadata } => {
+            AppEvent::AgentMetadataUpdated { agent_id, metadata, .. } => {
                 assert_eq!(agent_id, AgentId::new("agent-test"));
                 assert_eq!(metadata.model, Some("claude-3".to_string()));
             }

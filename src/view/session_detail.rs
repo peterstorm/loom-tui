@@ -318,24 +318,75 @@ fn render_left_panel(
     state: &AppState,
     is_focused: bool,
 ) {
-    // Split vertically: [info block ~6 lines] [agent list rest]
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
-        .split(area);
+    let git_expanded = state.ui.git_panel_expanded;
+    let sid = &data.meta.id;
+    let git_result = state.domain.git_cache.get(sid);
 
-    render_session_info(frame, chunks[0], data, is_focused);
-    render_agent_list_with_main(
-        frame,
-        chunks[1],
-        sorted_agents,
-        state.ui.selected_session_agent_index,
-        is_focused,
-        data.meta,
-    );
+    if git_expanded {
+        if let Some(Ok(ctx)) = git_result {
+            let git_height = (ctx.commits.len() + ctx.file_changes.len() + 4)
+                .max(4) as u16;
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(8),
+                    Constraint::Length(git_height),
+                    Constraint::Min(0),
+                ])
+                .split(area);
+
+            render_session_info(frame, chunks[0], data, git_result, is_focused);
+            render_git_panel(frame, chunks[1], ctx, is_focused);
+            render_agent_list_with_main(
+                frame,
+                chunks[2],
+                sorted_agents,
+                state.ui.selected_session_agent_index,
+                is_focused,
+                data.meta,
+            );
+        } else {
+            // Expanded but error or no data — just show info + agents
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(8), Constraint::Min(0)])
+                .split(area);
+
+            render_session_info(frame, chunks[0], data, git_result, is_focused);
+            render_agent_list_with_main(
+                frame,
+                chunks[1],
+                sorted_agents,
+                state.ui.selected_session_agent_index,
+                is_focused,
+                data.meta,
+            );
+        }
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(8), Constraint::Min(0)])
+            .split(area);
+
+        render_session_info(frame, chunks[0], data, git_result, is_focused);
+        render_agent_list_with_main(
+            frame,
+            chunks[1],
+            sorted_agents,
+            state.ui.selected_session_agent_index,
+            is_focused,
+            data.meta,
+        );
+    }
 }
 
-fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>, is_focused: bool) {
+fn render_session_info(
+    frame: &mut Frame,
+    area: Rect,
+    data: &SessionViewData<'_>,
+    git_result: Option<&Result<crate::model::GitContext, crate::model::GitError>>,
+    is_focused: bool,
+) {
     let meta = data.meta;
     let started = meta.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
     // For active sessions, calculate duration from start to now
@@ -349,6 +400,35 @@ fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>
     };
     let event_count = data.events.len();
     let agent_count = data.agents.len();
+
+    let git_line = match git_result {
+        Some(Ok(ctx)) => {
+            let ds = &ctx.diff_stat;
+            Line::from(vec![
+                Span::styled("Git:      ", Style::default().fg(Theme::MUTED_TEXT)),
+                Span::raw(format!("{} files ", ds.files_changed)),
+                Span::styled(format!("+{}", ds.insertions), Style::default().fg(Theme::TASK_COMPLETED)),
+                Span::raw(" "),
+                Span::styled(format!("-{}", ds.deletions), Style::default().fg(Theme::TASK_FAILED)),
+            ])
+        }
+        Some(Err(crate::model::GitError::NotARepo)) => Line::from(vec![
+            Span::styled("Git:      ", Style::default().fg(Theme::MUTED_TEXT)),
+            Span::styled("not a repo", Style::default().fg(Theme::MUTED_TEXT)),
+        ]),
+        Some(Err(crate::model::GitError::GitNotFound)) => Line::from(vec![
+            Span::styled("Git:      ", Style::default().fg(Theme::MUTED_TEXT)),
+            Span::styled("git not found", Style::default().fg(Theme::MUTED_TEXT)),
+        ]),
+        Some(Err(crate::model::GitError::CommandFailed(_))) => Line::from(vec![
+            Span::styled("Git:      ", Style::default().fg(Theme::MUTED_TEXT)),
+            Span::styled("error", Style::default().fg(Theme::TASK_FAILED)),
+        ]),
+        None => Line::from(vec![
+            Span::styled("Git:      ", Style::default().fg(Theme::MUTED_TEXT)),
+            Span::styled("Ctrl+Shift+g", Style::default().fg(Theme::INFO)),
+        ]),
+    };
 
     let lines = vec![
         Line::from(vec![
@@ -367,12 +447,71 @@ fn render_session_info(frame: &mut Frame, area: Rect, data: &SessionViewData<'_>
             Span::styled("Agents:   ", Style::default().fg(Theme::MUTED_TEXT)),
             Span::raw(agent_count.to_string()),
         ]),
+        git_line,
     ];
 
     let p = Paragraph::new(lines)
         .block(
             Block::default()
                 .title(" Session Info ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if is_focused {
+                    Theme::ACTIVE_BORDER
+                } else {
+                    Theme::PANEL_BORDER
+                })),
+        )
+        .style(Style::default().fg(Theme::TEXT));
+
+    frame.render_widget(p, area);
+}
+
+fn render_git_panel(
+    frame: &mut Frame,
+    area: Rect,
+    ctx: &crate::model::GitContext,
+    is_focused: bool,
+) {
+    let mut lines = Vec::new();
+
+    if ctx.commits.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no commits during session",
+            Style::default().fg(Theme::MUTED_TEXT),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Commits:",
+            Style::default().add_modifier(Modifier::BOLD).fg(Theme::TEXT),
+        )));
+        for commit in &ctx.commits {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", commit.hash), Style::default().fg(Theme::INFO)),
+                Span::raw(&commit.subject),
+            ]));
+        }
+
+        if !ctx.file_changes.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Files:",
+                Style::default().add_modifier(Modifier::BOLD).fg(Theme::TEXT),
+            )));
+            for fc in &ctx.file_changes {
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  {} ", fc.path)),
+                    Span::styled(format!("+{}", fc.insertions), Style::default().fg(Theme::TASK_COMPLETED)),
+                    Span::raw(" "),
+                    Span::styled(format!("-{}", fc.deletions), Style::default().fg(Theme::TASK_FAILED)),
+                ]));
+            }
+        }
+    }
+
+    let p = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Git ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if is_focused {
                     Theme::ACTIVE_BORDER
@@ -536,6 +675,8 @@ fn render_session_detail_footer(frame: &mut Frame, area: Rect) {
         Span::raw(":select/scroll | "),
         Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":prompt | "),
+        Span::styled("^G", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(":git | "),
         Span::styled("?", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(":help | "),
         Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),

@@ -150,6 +150,7 @@ fn agent_metadata_updated_creates_new_agent() {
 
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: aid.clone(),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata {
             model: Some("claude-sonnet".to_string()),
             ..Default::default()
@@ -173,6 +174,7 @@ fn agent_metadata_updated_updates_existing_agent() {
 
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata {
             model: Some("claude-opus".to_string()),
             ..Default::default()
@@ -419,6 +421,7 @@ fn multiple_updates_compose_correctly() {
     // Discover agent via metadata
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata {
             model: Some("claude-sonnet".to_string()),
             ..Default::default()
@@ -500,6 +503,7 @@ fn property_update_never_panics() {
     let events: Vec<AppEvent> = vec![
         AppEvent::AgentMetadataUpdated {
             agent_id: AgentId::new("a01"),
+            session_id: SessionId::new("s1"),
             metadata: TranscriptMetadata::default(),
         },
         AppEvent::TranscriptEventReceived(

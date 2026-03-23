@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{AppState, DeleteConfirmState, LayoutPickerState, PanelFocus, PromptPopupState, TaskViewMode, ViewState};
+use crate::model::SessionStatus;
 use crate::tmux;
 
 /// Jump size for Ctrl+D / Ctrl+U (fixed at 20 lines).
@@ -75,6 +76,8 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) {
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => scroll_page_up(state),
         KeyCode::Char('j') | KeyCode::Down => scroll_down(state),
         KeyCode::Char('k') | KeyCode::Up => scroll_up(state),
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => toggle_git_panel(state),
+        KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => toggle_git_panel(state),
         KeyCode::Char('g') => jump_to_top(state),
         KeyCode::Char('G') => jump_to_bottom(state),
         KeyCode::Enter => drill_down(state),
@@ -164,6 +167,78 @@ fn open_layout_picker(state: &mut AppState) {
     } else {
         state.meta.errors.push_back("not inside tmux".to_string());
     }
+}
+
+fn toggle_git_panel(state: &mut AppState) {
+    if !matches!(state.ui.view, ViewState::SessionDetail) {
+        return;
+    }
+
+    // Resolve current session meta
+    let session_data = resolve_session_for_git(state);
+    let Some((sid, project_path, timestamp, duration, status)) = session_data else {
+        state.meta.errors.push_back("git: no session resolved".to_string());
+        return;
+    };
+
+    let is_active = status == SessionStatus::Active;
+    let already_cached = state.domain.git_cache.contains_key(&sid);
+
+    // Fetch if not cached, or re-fetch for active sessions when expanding
+    if !already_cached || (is_active && state.ui.git_panel_expanded) {
+        let until = match (status, duration) {
+            (SessionStatus::Active, _) => None,
+            (_, Some(d)) => Some(timestamp + chrono::Duration::from_std(d).unwrap_or_default()),
+            (_, None) => None,
+        };
+        let result = crate::git::fetch_git_context(&project_path, &timestamp, until.as_ref());
+        state.domain.git_cache.insert(sid, result);
+    }
+
+    state.ui.git_panel_expanded = !state.ui.git_panel_expanded;
+}
+
+/// Extract session info needed for git context fetch.
+fn resolve_session_for_git(
+    state: &AppState,
+) -> Option<(
+    crate::model::SessionId,
+    String,
+    chrono::DateTime<chrono::Utc>,
+    Option<std::time::Duration>,
+    SessionStatus,
+)> {
+    let sid = state.ui.selected_session_id.as_ref().or_else(|| {
+        let idx = state.ui.selected_session_index?;
+        let active_count = state.domain.confirmed_active_count();
+        if idx < active_count {
+            state.domain.confirmed_active_sessions().nth(idx).map(|(id, _)| id)
+        } else {
+            let archive_idx = idx - active_count;
+            state.domain.sessions.get(archive_idx).map(|s| &s.meta.id)
+        }
+    })?;
+
+    // Try active first
+    if let Some(meta) = state.domain.active_sessions.get(sid).filter(|m| m.confirmed) {
+        return Some((
+            sid.clone(),
+            meta.project_path.clone(),
+            meta.timestamp,
+            meta.duration,
+            meta.status.clone(),
+        ));
+    }
+
+    // Try archived
+    let session = state.domain.sessions.iter().find(|s| &s.meta.id == sid)?;
+    Some((
+        sid.clone(),
+        session.meta.project_path.clone(),
+        session.meta.timestamp,
+        session.meta.duration,
+        session.meta.status.clone(),
+    ))
 }
 
 fn toggle_session_mark(state: &mut AppState) {

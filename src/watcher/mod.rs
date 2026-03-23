@@ -278,7 +278,7 @@ fn polling_loop(
 
             // Emit metadata for subagent files on the rescan tick (FR-014)
             if is_subagent && do_metadata_emit {
-                emit_agent_metadata(&path, &tx);
+                emit_agent_metadata(&path, &session_id, &tx);
             }
 
             // Emit session-level metadata from main transcript
@@ -507,7 +507,7 @@ fn emit_session_metadata(path: &PathBuf, session_id: &str, tx: &mpsc::Sender<App
 // Helper: emit agent metadata from full file content
 // ---------------------------------------------------------------------------
 
-fn emit_agent_metadata(path: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
+fn emit_agent_metadata(path: &PathBuf, session_id: &str, tx: &mpsc::Sender<AppEvent>) {
     let full_content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -529,6 +529,7 @@ fn emit_agent_metadata(path: &PathBuf, tx: &mpsc::Sender<AppEvent>) {
 
     let _ = tx.send(AppEvent::AgentMetadataUpdated {
         agent_id: agent_id.into(),
+        session_id: SessionId::new(session_id),
         metadata,
     });
 }

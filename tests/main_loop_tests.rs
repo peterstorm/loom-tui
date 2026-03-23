@@ -2,7 +2,7 @@ use chrono::Utc;
 use loom_tui::{
     app::{update, AppState, ViewState},
     event::AppEvent,
-    model::{AgentId, TranscriptEvent, TranscriptEventKind, TaskGraph, Wave},
+    model::{AgentId, SessionId, TranscriptEvent, TranscriptEventKind, TaskGraph, Wave},
     watcher::TranscriptMetadata,
 };
 use std::time::Duration;
@@ -73,6 +73,7 @@ fn event_loop_handles_watcher_events() {
 
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata::default(),
     });
     assert!(state.domain.agents.contains_key(&AgentId::new("a01")));
@@ -97,14 +98,17 @@ fn event_loop_drains_multiple_watcher_events() {
 
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a01"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata::default(),
     });
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a02"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata::default(),
     });
     update(&mut state, AppEvent::AgentMetadataUpdated {
         agent_id: AgentId::new("a03"),
+        session_id: SessionId::new("s1"),
         metadata: TranscriptMetadata::default(),
     });
 

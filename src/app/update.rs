@@ -245,7 +245,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
             if let Some(ref m) = metadata.model {
                 agent.model = Some(m.clone());
             }
-            agent.token_usage = metadata.token_usage.clone();
+            agent.token_usage = metadata.cumulative_usage.clone();
             agent.skills = metadata.skills.clone();
             if metadata.task_description.is_some() {
                 agent.task_description = metadata.task_description.clone();
@@ -763,7 +763,7 @@ mod tests {
 
         let metadata = TranscriptMetadata {
             model: Some("claude-3-opus".to_string()),
-            token_usage: TokenUsage {
+            cumulative_usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_creation_input_tokens: 0,

@@ -382,7 +382,28 @@ fn extract_tool_input_summary(tool_name: &str, input: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "Edit" | "Write" => input
+        "Edit" => {
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let old_str = input.get("old_string").and_then(|v| v.as_str());
+            let new_str = input.get("new_string").and_then(|v| v.as_str());
+            match (old_str, new_str) {
+                (Some(old), Some(new)) => {
+                    let mut lines = vec![file_path.to_string()];
+                    for line in old.lines() {
+                        lines.push(format!("- {line}"));
+                    }
+                    for line in new.lines() {
+                        lines.push(format!("+ {line}"));
+                    }
+                    lines.join("\n")
+                }
+                _ => file_path.to_string(),
+            }
+        }
+        "Write" => input
             .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")

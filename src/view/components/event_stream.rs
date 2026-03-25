@@ -13,7 +13,7 @@ use crate::model::{Theme, TranscriptEventKind};
 /// Shows scrollable log of recent transcript events with timestamps.
 /// Uses Paragraph with word wrap so long lines don't clip.
 pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
-    let lines = build_filtered_event_lines(state, None);
+    let lines = build_filtered_event_lines(state, None, false);
 
     let is_focused = matches!(state.ui.focus, PanelFocus::Right);
 
@@ -47,6 +47,7 @@ pub fn render_event_stream(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 /// Render filtered event stream for a specific agent.
+/// Includes "shared" unattributed events from the same session (for agent detail view).
 pub fn render_agent_event_stream(
     frame: &mut Frame,
     area: Rect,
@@ -55,7 +56,32 @@ pub fn render_agent_event_stream(
     scroll_offset: usize,
     is_focused: bool,
 ) {
-    let lines = build_filtered_event_lines(state, Some(agent_id));
+    render_agent_events_inner(frame, area, state, agent_id, scroll_offset, is_focused, false);
+}
+
+/// Render event stream for a specific agent with strict matching (no shared events).
+/// Used in session detail view where Main and agent events should be separate.
+pub fn render_agent_event_stream_strict(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    agent_id: &str,
+    scroll_offset: usize,
+    is_focused: bool,
+) {
+    render_agent_events_inner(frame, area, state, agent_id, scroll_offset, is_focused, true);
+}
+
+fn render_agent_events_inner(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    agent_id: &str,
+    scroll_offset: usize,
+    is_focused: bool,
+    strict: bool,
+) {
+    let lines = build_filtered_event_lines(state, Some(agent_id), strict);
 
     let title = if state.ui.auto_scroll {
         "Activity [auto-scroll]"
@@ -63,8 +89,6 @@ pub fn render_agent_event_stream(
         "Activity"
     };
 
-    // Clamp scroll_offset to u16::MAX to prevent silent truncation overflow
-    // Additionally clamp to a reasonable maximum to avoid ratatui internal panics
     let scroll = scroll_offset
         .min(u16::MAX as usize)
         .min(10000) as u16;
@@ -86,15 +110,120 @@ pub fn render_agent_event_stream(
     frame.render_widget(paragraph, area);
 }
 
+/// Render session "Main" events: reads from global ring buffer, filters by session_id,
+/// only shows events with no agent_id (the main orchestrator's transcript).
+pub fn render_session_main_events(
+    frame: &mut Frame,
+    area: Rect,
+    state: &AppState,
+    session_id: &str,
+    scroll_offset: usize,
+    is_focused: bool,
+) {
+    let sid = crate::model::SessionId::new(session_id);
+    let filtered: Vec<_> = state.domain.events.iter().rev()
+        .filter(|e| {
+            e.session_id.as_ref() == Some(&sid) && e.agent_id.is_none()
+        })
+        .take(500)
+        .collect();
+
+    let lines = if filtered.is_empty() {
+        vec![Line::from(Span::styled("No events", Style::default().fg(Theme::MUTED_TEXT)))]
+    } else {
+        build_event_lines_from_slice(&filtered, state)
+    };
+
+    let scroll = scroll_offset.min(u16::MAX as usize).min(10000) as u16;
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if is_focused {
+                    Theme::ACTIVE_BORDER
+                } else {
+                    Theme::PANEL_BORDER
+                }))
+                .title(" Events "),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(paragraph, area);
+}
+
+/// Build display lines from a pre-filtered slice of transcript events.
+fn build_event_lines_from_slice(events: &[&crate::model::TranscriptEvent], state: &AppState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut first = true;
+
+    for event in events {
+        if !first {
+            lines.push(Line::from(Span::styled(
+                "────────────────────────────────",
+                Style::default().fg(Theme::SEPARATOR),
+            )));
+        }
+        first = false;
+
+        let timestamp = event.timestamp.format("%H:%M:%S").to_string();
+        let (icon, header, detail, event_color, tool_name) = format_transcript_event_lines(&event.kind);
+
+        let agent_label = event.agent_id.as_ref().map(|aid| {
+            state.domain.agents.get(aid)
+                .map(|a| a.display_name().to_string())
+                .unwrap_or_else(|| short_id(aid.as_str()))
+        });
+
+        let mut header_spans = vec![
+            Span::styled(format!("{} ", timestamp), Style::default().fg(Theme::MUTED_TEXT)),
+            Span::styled(format!("{} ", icon), Style::default().fg(event_color)),
+            Span::styled(header, Style::default().fg(event_color)),
+        ];
+
+        if let Some(ref label) = agent_label {
+            header_spans.push(Span::styled(
+                format!("  {}", label),
+                Style::default().fg(Theme::AGENT_LABEL),
+            ));
+        }
+        lines.push(Line::from(header_spans));
+
+        if let Some(detail_text) = detail {
+            let clean = clean_detail(&detail_text);
+            if !clean.is_empty() {
+                if tool_name.is_none() {
+                    let rendered = tui_markdown::from_str(&clean);
+                    lines.extend(own_text_lines(rendered));
+                } else {
+                    let (start_line, offset_clean) = extract_line_offset(&clean);
+                    let ext_hint = tool_name.as_ref()
+                        .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
+                        .and_then(|_| offset_clean.lines().take(5).find_map(super::syntax::detect_extension));
+                    let is_edit = tool_name.as_deref() == Some("Edit");
+                    if is_edit {
+                        lines.extend(markdown_to_lines_diff(offset_clean, ext_hint.as_deref(), start_line));
+                    } else {
+                        lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                    }
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// Pure function: build lines from events, optionally filtered by agent_id.
-fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> Vec<Line<'static>> {
-    // When filtering by agent, also include unattributed events from the same session.
-    // Some transcript events from subagent files may arrive without agent_id
-    // before the watcher attributes them. Fall back to session_id matching.
-    let agent_session = agent_filter.and_then(|aid| {
-        state.domain.agents.get(&crate::model::AgentId::new(aid))
-            .and_then(|a| a.session_id.clone())
-    });
+fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>, strict: bool) -> Vec<Line<'static>> {
+    // When not strict, also include unattributed events from the same session.
+    // Strict mode (session detail) only matches exact agent_id.
+    let agent_session = if strict {
+        None
+    } else {
+        agent_filter.and_then(|aid| {
+            state.domain.agents.get(&crate::model::AgentId::new(aid))
+                .and_then(|a| a.session_id.clone())
+        })
+    };
 
     // Get search filter from state (only applies when agent_filter is None - dashboard view)
     let search_filter = if agent_filter.is_none() {
@@ -216,7 +345,12 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
                                 .take(5)
                                 .find_map(super::syntax::detect_extension)
                         });
-                    lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                    let is_edit = tool_name.as_deref() == Some("Edit");
+                    if is_edit {
+                        lines.extend(markdown_to_lines_diff(offset_clean, ext_hint.as_deref(), start_line));
+                    } else {
+                        lines.extend(markdown_to_lines(offset_clean, ext_hint.as_deref(), start_line));
+                    }
                 }
             }
         }
@@ -225,22 +359,21 @@ fn build_filtered_event_lines(state: &AppState, agent_filter: Option<&str>) -> V
     lines
 }
 
-/// Strip JSON escapes and control chars from detail text for clean display.
-/// Converts escaped newlines (\\n) to actual newlines for diff-style content.
+/// Strip control chars and clean display artifacts from detail text.
+/// Serde already handles JSON unescaping, so we only filter control chars
+/// and strip the `→` gutter separator from Read tool output.
 pub fn clean_detail(s: &str) -> String {
-    s.replace("\\\"", "\"")
-        .replace("\\t", " ")
-        .replace("\\\\", "\\")
-        .replace("\\n", "\n")
-        .lines()
+    s.lines()
         .map(|line| {
+            // Strip `→` (U+2192) separator from Read tool `cat -n` style output (e.g. "  1→code")
+            let line = line.replace('→', " ");
             line.chars()
                 .filter(|c| !c.is_control() || *c == '\n')
                 .collect::<String>()
         })
         .collect::<Vec<_>>()
         .join("\n")
-        .trim()
+        .trim_end()
         .to_string()
 }
 
@@ -269,6 +402,14 @@ pub fn render_detail_lines(text: &str, ext_hint: Option<&str>) -> Vec<Line<'stat
 /// When `ext_hint` is provided, diff lines and untagged code blocks get syntax highlighting.
 /// `start_line` sets the first gutter number for code blocks.
 fn markdown_to_lines(text: &str, ext_hint: Option<&str>, start_line: usize) -> Vec<Line<'static>> {
+    markdown_to_lines_inner(text, ext_hint, start_line, false)
+}
+
+fn markdown_to_lines_diff(text: &str, ext_hint: Option<&str>, start_line: usize) -> Vec<Line<'static>> {
+    markdown_to_lines_inner(text, ext_hint, start_line, true)
+}
+
+fn markdown_to_lines_inner(text: &str, ext_hint: Option<&str>, start_line: usize, diff_mode: bool) -> Vec<Line<'static>> {
     let raw_lines: Vec<&str> = text.split('\n').collect();
     let mut result = Vec::new();
     let mut i = 0;
@@ -313,8 +454,8 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>, start_line: usize) -> V
             continue;
         }
 
-        // Consecutive diff lines
-        if line.starts_with("+ ") || line.starts_with("- ") {
+        // Consecutive diff lines (only in diff_mode, i.e. Edit tool)
+        if diff_mode && (line.starts_with("+ ") || line.starts_with("- ")) {
             let mut diff_lines = Vec::new();
             while i < raw_lines.len()
                 && (raw_lines[i].starts_with("+ ") || raw_lines[i].starts_with("- "))
@@ -324,7 +465,7 @@ fn markdown_to_lines(text: &str, ext_hint: Option<&str>, start_line: usize) -> V
             }
 
             if let Some(ext) = ext_hint {
-                result.extend(super::syntax::highlight_diff_block(&diff_lines, ext, start_line));
+                result.extend(super::syntax::highlight_diff_block_no_gutter(&diff_lines, ext));
             } else {
                 // Fallback: flat coloring (no extension context)
                 for dl in diff_lines {
@@ -590,7 +731,7 @@ mod tests {
     #[test]
     fn build_event_stream_items_shows_no_events_when_empty() {
         let state = AppState::new();
-        let lines = build_filtered_event_lines(&state, None);
+        let lines = build_filtered_event_lines(&state, None, false);
 
         assert_eq!(lines.len(), 1);
     }
@@ -607,7 +748,7 @@ mod tests {
 
         state.domain.events = VecDeque::from(vec![event1, event2]);
 
-        let lines = build_filtered_event_lines(&state, None);
+        let lines = build_filtered_event_lines(&state, None, false);
 
         // 2 events (each 1 line): header + separator + header = 3 lines
         assert_eq!(lines.len(), 3);
@@ -654,16 +795,19 @@ mod tests {
     }
 
     #[test]
-    fn clean_detail_strips_escapes() {
-        let raw = r#"{"filePath":"src/main.rs","oldString":"fn main() {\n  println!(\"hello\");\n}"}"#;
+    fn clean_detail_preserves_code_escapes() {
+        // After serde parsing, literal \n in source code stays as backslash-n
+        let raw = "fn main() {\n  println!(\"hello\\nworld\");\n}";
         let cleaned = clean_detail(raw);
-        assert!(!cleaned.contains("\\n"));
-        assert!(!cleaned.contains("\\\""));
+        // Real newlines split lines, literal \\n in code preserved
+        assert!(cleaned.contains("\\n"));
+        assert!(cleaned.contains("println!"));
     }
 
     #[test]
-    fn clean_detail_trims_whitespace() {
-        assert_eq!(clean_detail("  foo   bar  "), "foo   bar");
+    fn clean_detail_trims_trailing_whitespace() {
+        // Leading whitespace preserved (Read line number indentation), trailing trimmed
+        assert_eq!(clean_detail("  foo   bar  "), "  foo   bar");
     }
 
     #[test]
@@ -710,9 +854,17 @@ mod tests {
 
     #[test]
     fn markdown_renders_diff_lines() {
-        let lines = markdown_to_lines("- removed\n+ added", None, 1);
+        let lines = markdown_to_lines_diff("- removed\n+ added", None, 1);
         assert_eq!(lines[0].spans[0].style.fg, Some(Theme::ERROR));
         assert_eq!(lines[1].spans[0].style.fg, Some(Theme::SUCCESS));
+    }
+
+    #[test]
+    fn markdown_no_diff_coloring_without_diff_mode() {
+        let lines = markdown_to_lines("- not a diff\n+ also not", None, 1);
+        // Should render as plain text, not diff-colored
+        assert_ne!(lines[0].spans[0].style.fg, Some(Theme::ERROR));
+        assert_ne!(lines[1].spans[0].style.fg, Some(Theme::SUCCESS));
     }
 
     #[test]
@@ -778,7 +930,7 @@ mod tests {
         .with_agent("a01");
         state.domain.events = VecDeque::from(vec![event]);
 
-        let lines = build_filtered_event_lines(&state, None);
+        let lines = build_filtered_event_lines(&state, None, false);
         // Header line should contain "Explore"
         let header_text: String = lines[0]
             .spans

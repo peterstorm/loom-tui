@@ -5,13 +5,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
 use crate::app::state::{AppState, PanelFocus};
 use crate::model::{Agent, AgentId, SessionMeta, SessionStatus, TaskGraph, Theme, TranscriptEvent};
 use super::components::agent_list::render_agent_list_with_main;
+use super::components::event_stream::{render_agent_event_stream_strict, render_session_main_events};
 use super::components::format::format_duration;
 use super::components::prompt_popup::render_prompt_popup;
 
@@ -208,21 +209,37 @@ pub fn render_session_detail(frame: &mut Frame, state: &AppState, area: Rect) {
     // Left: session info + interactive agent list
     render_left_panel(frame, main_chunks[0], &data, &sorted_agents, state, is_left_focused);
 
-    // Right: per-agent filtered events
-    // Index 0 = Main (show agent_id=None events), index n>=1 = sorted_agents[n-1]
-    let event_filter = match state.ui.selected_session_agent_index {
-        Some(0) => EventFilter::Main,
-        Some(n) => match sorted_agents.get(n - 1) {
-            Some(agent) => EventFilter::Agent(&agent.id),
-            None => EventFilter::All,
-        },
-        None => EventFilter::All,
-    };
+    // Right: per-agent filtered events — reuse the working agent event stream component
+    // Index 0 = Main (show all session events), index n>=1 = sorted_agents[n-1]
+    let is_right_focused = !is_left_focused;
     let selected_agent = match state.ui.selected_session_agent_index {
         Some(n) if n >= 1 => sorted_agents.get(n - 1).copied(),
         _ => None,
     };
-    render_right_panel(frame, main_chunks[1], &data, &event_filter, state.ui.scroll_offsets.session_detail_right, !is_left_focused);
+    match selected_agent {
+        Some(agent) => {
+            // Reuse event stream component with strict matching (no shared events)
+            render_agent_event_stream_strict(
+                frame,
+                main_chunks[1],
+                state,
+                agent.id.as_str(),
+                state.ui.scroll_offsets.session_detail_right,
+                is_right_focused,
+            );
+        }
+        None => {
+            // Main: read from global ring buffer filtered by session_id
+            render_session_main_events(
+                frame,
+                main_chunks[1],
+                state,
+                data.meta.id.as_str(),
+                state.ui.scroll_offsets.session_detail_right,
+                is_right_focused,
+            );
+        }
+    };
 
     render_session_detail_footer(frame, chunks[2]);
 
@@ -522,147 +539,6 @@ fn render_git_panel(
         .style(Style::default().fg(Theme::TEXT));
 
     frame.render_widget(p, area);
-}
-
-/// Which events to show in the right panel.
-enum EventFilter<'a> {
-    /// Main orchestrator: events with no agent_id
-    Main,
-    /// Specific agent: strict match on agent_id
-    Agent(&'a AgentId),
-    /// All events (no filter)
-    All,
-}
-
-fn render_right_panel(
-    frame: &mut Frame,
-    area: Rect,
-    data: &SessionViewData<'_>,
-    filter: &EventFilter<'_>,
-    scroll_offset: usize,
-    is_focused: bool,
-) {
-    render_events_list(frame, area, data, filter, scroll_offset, is_focused);
-}
-
-fn render_events_list(
-    frame: &mut Frame,
-    area: Rect,
-    data: &SessionViewData<'_>,
-    filter: &EventFilter<'_>,
-    scroll_offset: usize,
-    is_focused: bool,
-) {
-    let events: Vec<&TranscriptEvent> = data.events.iter_rev()
-        .filter(|e| match filter {
-            EventFilter::Main => e.agent_id.is_none(),
-            EventFilter::Agent(aid) => e.agent_id.as_ref() == Some(*aid),
-            EventFilter::All => true,
-        })
-        .collect();
-
-    if events.is_empty() {
-        let p = Paragraph::new("No events")
-            .style(Style::default().fg(Theme::MUTED_TEXT))
-            .block(
-                Block::default()
-                    .title(" Events ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(if is_focused {
-                        Theme::ACTIVE_BORDER
-                    } else {
-                        Theme::PANEL_BORDER
-                    })),
-            );
-        frame.render_widget(p, area);
-        return;
-    }
-
-    let mut lines = Vec::new();
-    let mut first = true;
-
-    for event in &events {
-        if !first {
-            lines.push(Line::from(Span::styled(
-                "────────────────────────────────",
-                Style::default().fg(Theme::SEPARATOR),
-            )));
-        }
-        first = false;
-
-        let timestamp = event.timestamp.format("%H:%M:%S").to_string();
-        let (icon, header, detail, event_color, tool_name) =
-            crate::view::components::event_stream::format_transcript_event_lines(&event.kind);
-
-        let agent_label = event.agent_id.as_ref().map(|aid| {
-            data.agents
-                .get(aid)
-                .map(|a| a.display_name().to_string())
-                .unwrap_or_else(|| short_id(aid.as_str()))
-        });
-
-        let mut spans = vec![
-            Span::styled(format!("{} ", timestamp), Style::default().fg(Theme::MUTED_TEXT)),
-            Span::styled(format!("{} ", icon), Style::default().fg(event_color)),
-            Span::styled(header, Style::default().fg(event_color)),
-        ];
-
-        if let Some(ref label) = agent_label {
-            spans.push(Span::styled(
-                format!("  {}", label),
-                Style::default().fg(Theme::AGENT_LABEL),
-            ));
-        }
-
-        lines.push(Line::from(spans));
-
-        // Detail with markdown + syntax highlighting (shared with dashboard event stream)
-        if let Some(detail_text) = detail {
-            let clean = crate::view::components::event_stream::clean_detail(&detail_text);
-            if !clean.is_empty() {
-                let ext_hint = tool_name
-                    .as_ref()
-                    .filter(|t| matches!(t.as_str(), "Read" | "Edit" | "Write" | "Grep" | "Glob"))
-                    .and_then(|_| {
-                        // Strip offset prefix before scanning for extension
-                        let (_, text_for_ext) = crate::view::components::event_stream::extract_line_offset(&clean);
-                        text_for_ext.lines()
-                            .take(5)
-                            .find_map(crate::view::components::syntax::detect_extension)
-                    });
-                lines.extend(crate::view::components::event_stream::render_detail_lines(
-                    &clean,
-                    ext_hint.as_deref(),
-                ));
-            }
-        }
-    }
-
-    // Clamp scroll_offset to u16::MAX to prevent silent truncation overflow
-    // Additionally clamp to a reasonable maximum to avoid ratatui internal panics
-    let scroll = scroll_offset
-        .min(u16::MAX as usize)
-        .min(10000) as u16;
-
-    let p = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title(" Events ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if is_focused {
-                    Theme::ACTIVE_BORDER
-                } else {
-                    Theme::PANEL_BORDER
-                })),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-
-    frame.render_widget(p, area);
-}
-
-fn short_id(id: &str) -> String {
-    if id.chars().count() > 7 { id.chars().take(7).collect() } else { id.to_string() }
 }
 
 fn render_session_detail_footer(frame: &mut Frame, area: Rect) {

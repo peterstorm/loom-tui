@@ -17,7 +17,7 @@ pub mod wave_river;
 
 pub use agent_list::{render_agent_list, render_agent_list_generic, render_agent_list_with_main};
 pub use banner::render_banner;
-pub use event_stream::{render_agent_event_stream, render_event_stream};
+pub use event_stream::{render_agent_event_stream, render_agent_event_stream_strict, render_event_stream, render_session_main_events};
 pub use filter_bar::render_filter_bar;
 pub use footer::render_footer;
 pub use header::render_header;

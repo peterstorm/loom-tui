@@ -43,6 +43,15 @@ pub fn highlight_code_block(lines: &[&str], extension: &str, start_line: usize) 
 /// Highlight diff lines (+/-) with syntax coloring, prefix colors, and line numbers.
 /// `start_line` sets the first gutter number.
 pub fn highlight_diff_block(lines: &[&str], extension: &str, start_line: usize) -> Vec<Line<'static>> {
+    highlight_diff_block_inner(lines, extension, Some(start_line))
+}
+
+/// Highlight diff lines without gutter line numbers.
+pub fn highlight_diff_block_no_gutter(lines: &[&str], extension: &str) -> Vec<Line<'static>> {
+    highlight_diff_block_inner(lines, extension, None)
+}
+
+fn highlight_diff_block_inner(lines: &[&str], extension: &str, start_line: Option<usize>) -> Vec<Line<'static>> {
     let ss = &*SYNTAX_SET;
     let theme = best_theme();
     let normalized = lang_to_extension(extension);
@@ -52,7 +61,6 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str, start_line: usize) 
     let mut h = HighlightLines::new(syntax, theme);
 
     let count = lines.len().min(MAX_HIGHLIGHT_LINES);
-    let gutter_w = digit_width(count + start_line - 1);
 
     lines[..count]
         .iter()
@@ -60,10 +68,12 @@ pub fn highlight_diff_block(lines: &[&str], extension: &str, start_line: usize) 
         .map(|(i, line)| {
             let (prefix, code, prefix_color) = parse_diff_prefix(line);
             let is_removal = prefix == "- ";
-            let mut spans = vec![
-                gutter_span(i + start_line, gutter_w),
-                Span::styled(prefix.to_string(), Style::default().fg(prefix_color)),
-            ];
+            let mut spans = Vec::new();
+            if let Some(sl) = start_line {
+                let gutter_w = digit_width(count + sl - 1);
+                spans.push(gutter_span(i + sl, gutter_w));
+            }
+            spans.push(Span::styled(prefix.to_string(), Style::default().fg(prefix_color)));
             let mut code_spans = highlight_line_spans(&mut h, code, ss);
             if is_removal {
                 for s in &mut code_spans {

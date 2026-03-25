@@ -32,7 +32,7 @@ const UNCONFIRMED_TIMEOUT: Duration = Duration::from_secs(30);
 const POST_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Agents are marked finished after this idle time without new transcript content.
-const AGENT_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const AGENT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often we re-scan the transcript directory for new .jsonl files (session discovery).
 /// 10 × 200ms = ~2 seconds, satisfying NFR-001.
@@ -223,6 +223,14 @@ fn polling_loop(
                 if is_subagent {
                     // Track agent activity for idle detection
                     agent_last_activity.insert(path.clone(), SystemTime::now());
+
+                    // Reactivate if previously idle-finished (agent resumed work)
+                    let aid_for_reactivation = extract_agent_id(&path);
+                    if finished_agents.remove(&aid_for_reactivation) {
+                        // Agent was idle-finished but has new content — will be
+                        // re-tracked for idle timeout. The UI side clears
+                        // finished_at on receiving new transcript events.
+                    }
 
                     // If result seen, immediately mark agent finished
                     if has_result {

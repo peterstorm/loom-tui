@@ -22,6 +22,13 @@ pub fn update(state: &mut AppState, event: AppEvent) {
         AppEvent::TranscriptEventReceived(event) => {
             // Attribute to agent if agent_id set
             if let Some(ref agent_id) = event.agent_id {
+                // Reactivate agent if it was idle-finished but has new content
+                if let Some(agent) = state.domain.agents.get_mut(agent_id) {
+                    if agent.finished_at.is_some() {
+                        agent.finished_at = None;
+                        agents_changed = true;
+                    }
+                }
                 // Track tool use on agent
                 if let TranscriptEventKind::ToolUse { .. } = &event.kind {
                     state.increment_tool_count(agent_id);

@@ -67,8 +67,12 @@ pub struct Agent {
     pub session_id: Option<SessionId>,
     #[serde(default)]
     pub skills: Vec<String>,
+    /// Cumulative token usage across all messages (for cost tracking).
     #[serde(default)]
     pub token_usage: TokenUsage,
+    /// Last assistant message's usage snapshot (for context window display).
+    #[serde(default)]
+    pub context_window: TokenUsage,
 }
 
 impl Default for Agent {
@@ -85,6 +89,7 @@ impl Default for Agent {
             session_id: None,
             skills: Vec::new(),
             token_usage: TokenUsage::default(),
+            context_window: TokenUsage::default(),
         }
     }
 }
@@ -103,6 +108,7 @@ impl Agent {
             session_id: None,
             skills: Vec::new(),
             token_usage: TokenUsage::default(),
+            context_window: TokenUsage::default(),
         }
     }
 

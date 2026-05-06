@@ -253,6 +253,7 @@ pub fn update(state: &mut AppState, event: AppEvent) {
                 agent.model = Some(m.clone());
             }
             agent.token_usage = metadata.cumulative_usage.clone();
+            agent.context_window = metadata.token_usage.clone();
             agent.skills = metadata.skills.clone();
             if metadata.task_description.is_some() {
                 agent.task_description = metadata.task_description.clone();

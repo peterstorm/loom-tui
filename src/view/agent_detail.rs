@@ -72,7 +72,7 @@ pub fn render_agent_detail(frame: &mut Frame, state: &AppState, area: Rect) {
                 text,
                 &agent.messages,
                 &agent.skills,
-                &agent.token_usage,
+                &agent.context_window,
                 state.ui.prompt_popup.scroll(),
             );
         }

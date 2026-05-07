@@ -215,7 +215,7 @@ fn build_agent_items_generic(
                 ));
             }
 
-            let ctx_tokens = agent.token_usage.context_window();
+            let ctx_tokens = agent.context_window.context_window();
             if ctx_tokens > 0 {
                 spans.push(Span::styled(
                     format!("  ~{}tok", format_token_count(ctx_tokens)),
